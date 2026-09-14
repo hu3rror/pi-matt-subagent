@@ -194,19 +194,15 @@ function loadAgentsFromDir(
   return agents;
 }
 
-function isDirectory(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
 function findNearestProjectAgentsDir(cwd: string, configDirName: string): string | null {
   let currentDir = cwd;
   while (true) {
     const candidate = path.join(currentDir, configDirName, "agents");
-    if (isDirectory(candidate)) return candidate;
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      /* not a directory */
+    }
     const parentDir = path.dirname(currentDir);
     if (parentDir === currentDir) return null;
     currentDir = parentDir;

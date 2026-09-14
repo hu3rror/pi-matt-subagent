@@ -48,7 +48,7 @@ import {
 
 const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
 
-const MAX_PARALLEL_TASKS = 8;
+const MAX_TASKS_PER_CALL = 8;
 const MAX_CONCURRENCY = 4;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
@@ -162,6 +162,10 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
   return { command: "pi", args };
 }
 
+function formatAgentList(agents: AgentConfig[]): string {
+  return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+}
+
 // ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
@@ -217,7 +221,7 @@ async function runSingleAgent(
   const agent = agents.find((a) => a.name === agentName);
 
   if (!agent) {
-    const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
+    const available = formatAgentList(agents);
     return {
       agent: agentName,
       agentSource: "unknown",
@@ -485,18 +489,17 @@ export default function (pi: ExtensionAPI) {
       const hasTasks = (params.tasks?.length ?? 0) > 0;
       const hasSingle = Boolean(params.agent && params.task);
       const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
+      const mode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 
-      const makeDetails =
-        (mode: "single" | "parallel" | "chain") =>
-        (results: SingleResult[]): SubagentDetails => ({ mode, results });
+      const makeDetails = (results: SingleResult[]): SubagentDetails => ({ mode, results });
 
       if (modeCount !== 1) {
-        const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+        const available = formatAgentList(agents);
         return {
           content: [
             { type: "text", text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}` },
           ],
-          details: makeDetails("single")([]),
+          details: makeDetails([]),
         };
       }
 
@@ -525,7 +528,7 @@ export default function (pi: ExtensionAPI) {
           if (!ok) {
             return {
               content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-              details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+              details: makeDetails([]),
             };
           }
         }
@@ -545,7 +548,7 @@ export default function (pi: ExtensionAPI) {
                 if (current) {
                   onUpdate({
                     content: partial.content,
-                    details: makeDetails("chain")([...results, current]),
+                    details: makeDetails([...results, current]),
                   });
                 }
               }
@@ -558,7 +561,7 @@ export default function (pi: ExtensionAPI) {
             { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
             signal,
             chainUpdate,
-            makeDetails("chain"),
+            makeDetails,
           );
           results.push(result);
 
@@ -567,7 +570,7 @@ export default function (pi: ExtensionAPI) {
               content: [
                 { type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}` },
               ],
-              details: makeDetails("chain")(results),
+              details: makeDetails(results),
               isError: true,
             };
           }
@@ -577,20 +580,20 @@ export default function (pi: ExtensionAPI) {
           content: [
             { type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" },
           ],
-          details: makeDetails("chain")(results),
+          details: makeDetails(results),
         };
       }
 
       if (hasTasks && params.tasks) {
-        if (params.tasks.length > MAX_PARALLEL_TASKS) {
+        if (params.tasks.length > MAX_TASKS_PER_CALL) {
           return {
             content: [
               {
                 type: "text",
-                text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+                text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_TASKS_PER_CALL}.`,
               },
             ],
-            details: makeDetails("parallel")([]),
+            details: makeDetails([]),
           };
         }
 
@@ -614,7 +617,7 @@ export default function (pi: ExtensionAPI) {
             const done = allResults.filter((r) => !r.running).length;
             onUpdate({
               content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
-              details: makeDetails("parallel")([...allResults]),
+              details: makeDetails([...allResults]),
             });
           }
         };
@@ -632,7 +635,7 @@ export default function (pi: ExtensionAPI) {
                 emitParallelUpdate();
               }
             },
-            makeDetails("parallel"),
+            makeDetails,
           );
           allResults[index] = result;
           emitParallelUpdate();
@@ -654,7 +657,7 @@ export default function (pi: ExtensionAPI) {
               text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
             },
           ],
-          details: makeDetails("parallel")(results),
+          details: makeDetails(results),
         };
       }
 
@@ -666,27 +669,27 @@ export default function (pi: ExtensionAPI) {
           { agentName: params.agent, task: params.task, cwd: params.cwd },
           signal,
           onUpdate,
-          makeDetails("single"),
+          makeDetails,
         );
         if (isFailedResult(result)) {
           return {
             content: [
               { type: "text", text: `Agent ${result.stopReason || "failed"}: ${getResultOutput(result)}` },
             ],
-            details: makeDetails("single")([result]),
+            details: makeDetails([result]),
             isError: true,
           };
         }
         return {
           content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
-          details: makeDetails("single")([result]),
+          details: makeDetails([result]),
         };
       }
 
-      const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+      const available = formatAgentList(agents);
       return {
         content: [{ type: "text", text: `Invalid parameters. Available agents: ${available}` }],
-        details: makeDetails("single")([]),
+        details: makeDetails([]),
       };
     },
 
