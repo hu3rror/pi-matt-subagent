@@ -59,7 +59,7 @@ Report, per file/hunk where relevant:
 
 Distinguish hard violations from judgement calls: documented-standard breaches can be hard; baseline smells are always judgement calls; a documented repo standard overrides the baseline. Skip anything tooling already enforces. Keep the report under 400 words.
 
-Bash is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
+The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
   },
 
   "spec-reviewer": {
@@ -75,7 +75,7 @@ Report:
 
 Quote the spec line for each finding. Keep the report under 400 words. If no spec is available, report exactly: "no spec available".
 
-Bash is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
+The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
   },
 
   "design-explorer": {
@@ -342,6 +342,14 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
   return { dir: tmpDir, filePath };
 }
 
+function resolveTools(tools: string[] | undefined): string[] | undefined {
+  if (!tools || tools.length === 0) return tools;
+  if (process.platform === "win32") {
+    return tools.map((t) => (t === "bash" ? "powershell" : t));
+  }
+  return tools;
+}
+
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -432,7 +440,8 @@ async function runSingleAgent(
   const model = agent.model ?? dispatchDefaults.model;
   if (model) args.push("--model", model);
   if (!agent.model && dispatchDefaults.thinkingLevel) args.push("--thinking", dispatchDefaults.thinkingLevel);
-  if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+  const resolvedTools = resolveTools(agent.tools);
+  if (resolvedTools && resolvedTools.length > 0) args.push("--tools", resolvedTools.join(","));
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -596,8 +605,8 @@ function runBackgroundResearch(opts: {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
-  const tools = opts.tools ?? role.tools ?? ["read", "grep", "find", "ls", "bash", "write"];
-  args.push("--tools", tools.join(","));
+  const tools = resolveTools(opts.tools ?? role.tools ?? ["read", "grep", "find", "ls", "bash", "write"]);
+  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   args.push(prompt);
 
   const invocation = getPiInvocation(args);
