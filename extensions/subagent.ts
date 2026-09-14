@@ -10,10 +10,10 @@
  *   - `research` (background): spawns a detached researcher that writes
  *     findings to a file, then returns immediately with a handle.
  *
- * Six bundled roles: standards-reviewer, spec-reviewer, design-explorer,
- * architecture-scout, researcher, fact-finder. User agents from
- * ~/.pi/agent/agents/*.md and project agents from .pi/agents/*.md override
- * bundled roles by name.
+ * Six bundled roles live in src/lib.ts (standards-reviewer, spec-reviewer,
+ * design-explorer, architecture-scout, researcher, fact-finder). User agents
+ * from ~/.pi/agent/agents/*.md and project agents from .pi/agents/*.md
+ * override bundled roles by name.
  */
 
 import { spawn } from "node:child_process";
@@ -32,222 +32,28 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+import {
+  buildResearchPrompt,
+  discoverAgents,
+  emptyUsage,
+  resolveRole,
+  resolveTools,
+  type AgentConfig,
+  type AgentScope,
+  type AgentSource,
+  type AgentFrontmatter,
+  type FrontmatterParser,
+  type UsageStats,
+} from "../src/lib.ts";
+
+const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
+
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
 // ---------------------------------------------------------------------------
-// Embedded roles
-// ---------------------------------------------------------------------------
-
-interface RoleDef {
-  description: string;
-  tools?: string[];
-  systemPrompt: string;
-}
-
-const EMBEDDED_ROLES: Record<string, RoleDef> = {
-  "standards-reviewer": {
-    description:
-      "Standards axis of a two-axis review: does the diff conform to the repo's documented standards (and the smell baseline)?",
-    tools: ["read", "grep", "find", "ls", "bash"],
-    systemPrompt: `You are the Standards axis of a two-axis code review. You receive a diff command and commit list, the standards-source files, and the full smell baseline, and you report violations.
-
-Report, per file/hunk where relevant:
-(a) every place the diff violates a documented repo standard — cite the standard (file + rule);
-(b) any baseline smell you spot — name it and quote the hunk.
-
-Distinguish hard violations from judgement calls: documented-standard breaches can be hard; baseline smells are always judgement calls; a documented repo standard overrides the baseline. Skip anything tooling already enforces. Keep the report under 400 words.
-
-The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
-  },
-
-  "spec-reviewer": {
-    description:
-      "Spec axis of a two-axis review: does the diff faithfully implement the originating issue / spec?",
-    tools: ["read", "grep", "find", "ls", "bash"],
-    systemPrompt: `You are the Spec axis of a two-axis code review. You receive a diff command and commit list, and the originating spec (path or fetched contents), and you report fidelity.
-
-Report:
-(a) requirements the spec asked for that are missing or partial;
-(b) behaviour in the diff that wasn't asked for (scope creep);
-(c) requirements that look implemented but where the implementation looks wrong.
-
-Quote the spec line for each finding. Keep the report under 400 words. If no spec is available, report exactly: "no spec available".
-
-The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only commands only: git diff, git log, git show. Never modify files or run builds.`,
-  },
-
-  "design-explorer": {
-    description:
-      "Produces one radically different interface design for a deepened module, under a given design constraint.",
-    tools: ["read", "grep", "find", "ls"],
-    systemPrompt: `You are a design explorer. Produce ONE radically different interface design for a deepened module, given a technical brief and a single design constraint. Do NOT make changes; read and design only.
-
-Output:
-1. Interface — types, methods, params, plus invariants, ordering, error modes.
-2. Usage example — how callers use it.
-3. What the implementation hides behind the seam.
-4. Dependency strategy and adapters.
-5. Trade-offs — where leverage is high, where it is thin.
-
-Name concepts using the brief's architecture vocabulary and the project's CONTEXT.md domain vocabulary.`,
-  },
-
-  "architecture-scout": {
-    description:
-      "Walks a codebase organically and reports architectural friction (shallow modules, poor locality, leaking seams).",
-    tools: ["read", "grep", "find", "ls", "bash"],
-    systemPrompt: `You are an architecture scout. Walk the codebase organically and note where you experience friction. Do NOT make changes.
-
-Look for:
-- where understanding one concept requires bouncing between many small modules;
-- shallow modules (interface nearly as complex as the implementation);
-- pure functions extracted only for testability while the real bugs hide in how they are called (no locality);
-- tightly-coupled modules leaking across their seams;
-- parts that are untested, or hard to test through their current interface.
-
-Apply the deletion test to anything you suspect is shallow: would deleting it concentrate complexity, or just move it? A "yes, concentrates" is the signal you want.
-
-Report findings with exact file paths and line ranges, grouped by severity, and for each say which signal it is.`,
-  },
-
-  researcher: {
-    description:
-      "Investigates a question against primary sources and writes cited findings to a Markdown file.",
-    tools: ["read", "grep", "find", "ls", "bash", "write"],
-    systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
-
-Write your findings to a single Markdown file at the findings path given in your task, citing each claim's source. The file is the deliverable; do not answer in chat.`,
-  },
-
-  "fact-finder": {
-    description:
-      "Answers a precise factual question using the environment (filesystem, tools), citing sources.",
-    tools: ["read", "grep", "find", "ls", "bash"],
-    systemPrompt: `You are a fact-finder. Answer a precise factual question using the environment (filesystem, tools). Report only what you can verify, with the source (file path + line, or command output). Do not speculate; if a fact is unverifiable, say so explicitly.`,
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Agent discovery (embedded + file overrides)
-// ---------------------------------------------------------------------------
-
-type AgentSource = "embedded" | "user" | "project" | "unknown";
-type AgentScope = "user" | "project" | "both";
-
-interface AgentConfig {
-  name: string;
-  description: string;
-  tools?: string[];
-  model?: string;
-  systemPrompt: string;
-  source: AgentSource;
-}
-
-type AgentFrontmatter = {
-  name?: unknown;
-  description?: unknown;
-  tools?: unknown;
-  model?: unknown;
-};
-
-function parseToolList(value: unknown): string[] | undefined {
-  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
-  const tools = raw
-    .filter((t): t is string => typeof t === "string")
-    .map((t) => t.trim())
-    .filter(Boolean);
-  return tools.length > 0 ? tools : undefined;
-}
-
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
-  const agents: AgentConfig[] = [];
-  if (!fs.existsSync(dir)) return agents;
-
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return agents;
-  }
-
-  for (const entry of entries) {
-    if (!entry.name.endsWith(".md")) continue;
-    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-
-    const filePath = path.join(dir, entry.name);
-    let content: string;
-    try {
-      content = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      continue;
-    }
-
-    const { frontmatter, body } = parseFrontmatter<AgentFrontmatter>(content);
-    if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string") continue;
-
-    agents.push({
-      name: frontmatter.name,
-      description: frontmatter.description,
-      tools: parseToolList(frontmatter.tools),
-      model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-      systemPrompt: body,
-      source,
-    });
-  }
-
-  return agents;
-}
-
-function isDirectory(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function findNearestProjectAgentsDir(cwd: string): string | null {
-  let currentDir = cwd;
-  while (true) {
-    const candidate = path.join(currentDir, CONFIG_DIR_NAME, "agents");
-    if (isDirectory(candidate)) return candidate;
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) return null;
-    currentDir = parentDir;
-  }
-}
-
-function discoverAgents(cwd: string, scope: AgentScope): { agents: AgentConfig[]; projectAgentsDir: string | null } {
-  const map = new Map<string, AgentConfig>();
-
-  for (const [name, role] of Object.entries(EMBEDDED_ROLES)) {
-    map.set(name, {
-      name,
-      description: role.description,
-      tools: role.tools,
-      systemPrompt: role.systemPrompt,
-      source: "embedded",
-    });
-  }
-
-  if (scope !== "project") {
-    for (const a of loadAgentsFromDir(path.join(getAgentDir(), "agents"), "user")) map.set(a.name, a);
-  }
-
-  const projectAgentsDir = findNearestProjectAgentsDir(cwd);
-  if (scope === "project" || scope === "both") {
-    if (projectAgentsDir) {
-      for (const a of loadAgentsFromDir(projectAgentsDir, "project")) map.set(a.name, a);
-    }
-  }
-
-  return { agents: Array.from(map.values()), projectAgentsDir };
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
+// Display helpers
 // ---------------------------------------------------------------------------
 
 function formatTokens(count: number): string {
@@ -342,14 +148,6 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
   return { dir: tmpDir, filePath };
 }
 
-function resolveTools(tools: string[] | undefined): string[] | undefined {
-  if (!tools || tools.length === 0) return tools;
-  if (process.platform === "win32") {
-    return tools.map((t) => (t === "bash" ? "powershell" : t));
-  }
-  return tools;
-}
-
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -368,21 +166,12 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 // Result types
 // ---------------------------------------------------------------------------
 
-interface UsageStats {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
-  contextTokens: number;
-  turns: number;
-}
-
 interface SingleResult {
   agent: string;
   agentSource: AgentSource;
   task: string;
   exitCode: number;
+  running?: boolean;
   messages: Message[];
   stderr: string;
   usage: UsageStats;
@@ -408,18 +197,23 @@ interface DispatchDefaults {
 // Blocking runner
 // ---------------------------------------------------------------------------
 
+interface AgentTask {
+  agentName: string;
+  task: string;
+  cwd?: string;
+  step?: number;
+}
+
 async function runSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
   agents: AgentConfig[],
-  agentName: string,
-  task: string,
-  cwd: string | undefined,
-  step: number | undefined,
+  agentTask: AgentTask,
   signal: AbortSignal | undefined,
   onUpdate: OnUpdate | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
 ): Promise<SingleResult> {
+  const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
 
   if (!agent) {
@@ -431,7 +225,7 @@ async function runSingleAgent(
       exitCode: 1,
       messages: [],
       stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+      usage: emptyUsage(),
       step,
     };
   }
@@ -453,7 +247,7 @@ async function runSingleAgent(
     exitCode: 0,
     messages: [],
     stderr: "",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    usage: emptyUsage(),
     model,
     step,
   };
@@ -594,18 +388,20 @@ function runBackgroundResearch(opts: {
   tools?: string[];
   task: string;
   findingsPath: string;
+  agents: AgentConfig[];
 }): ResearchHandle {
-  const role = EMBEDDED_ROLES.researcher;
+  const agent = resolveRole(opts.agents, "researcher");
+  if (!agent) throw new Error('No "researcher" role available');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-research-"));
   const logPath = path.join(tmpDir, "research.log");
   const researchId = path.basename(tmpDir);
 
-  const prompt = [role.systemPrompt, "", `Findings path: ${opts.findingsPath}`, "", `Task: ${opts.task}`].join("\n");
+  const prompt = buildResearchPrompt(agent, opts.task, opts.findingsPath);
 
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
-  const tools = resolveTools(opts.tools ?? role.tools ?? ["read", "grep", "find", "ls", "bash", "write"]);
+  const tools = resolveTools(opts.tools ?? agent.tools ?? ["read", "grep", "find", "ls", "bash", "write"]);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   args.push(prompt);
 
@@ -682,7 +478,7 @@ export default function (pi: ExtensionAPI) {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinkingLevel: ctx.thinkingLevel,
       };
-      const discovery = discoverAgents(ctx.cwd, agentScope);
+      const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
       const agents = discovery.agents;
 
       const hasChain = (params.chain?.length ?? 0) > 0;
@@ -759,10 +555,7 @@ export default function (pi: ExtensionAPI) {
             ctx.cwd,
             dispatchDefaults,
             agents,
-            step.agent,
-            taskWithContext,
-            step.cwd,
-            i + 1,
+            { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
             signal,
             chainUpdate,
             makeDetails("chain"),
@@ -807,17 +600,18 @@ export default function (pi: ExtensionAPI) {
             agent: params.tasks[i].agent,
             agentSource: "unknown",
             task: params.tasks[i].task,
-            exitCode: -1,
+            exitCode: 0,
+            running: true,
             messages: [],
             stderr: "",
-            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+            usage: emptyUsage(),
           };
         }
 
         const emitParallelUpdate = () => {
           if (onUpdate) {
-            const running = allResults.filter((r) => r.exitCode === -1).length;
-            const done = allResults.filter((r) => r.exitCode !== -1).length;
+            const running = allResults.filter((r) => r.running).length;
+            const done = allResults.filter((r) => !r.running).length;
             onUpdate({
               content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
               details: makeDetails("parallel")([...allResults]),
@@ -830,10 +624,7 @@ export default function (pi: ExtensionAPI) {
             ctx.cwd,
             dispatchDefaults,
             agents,
-            t.agent,
-            t.task,
-            t.cwd,
-            undefined,
+            { agentName: t.agent, task: t.task, cwd: t.cwd },
             signal,
             (partial) => {
               if (partial.details?.results[0]) {
@@ -872,10 +663,7 @@ export default function (pi: ExtensionAPI) {
           ctx.cwd,
           dispatchDefaults,
           agents,
-          params.agent,
-          params.task,
-          params.cwd,
-          undefined,
+          { agentName: params.agent, task: params.task, cwd: params.cwd },
           signal,
           onUpdate,
           makeDetails("single"),
@@ -923,10 +711,10 @@ export default function (pi: ExtensionAPI) {
 
       const lines: string[] = [];
       for (const r of details.results) {
-        const icon = r.exitCode === -1 ? "⏳" : isFailedResult(r) ? "✗" : "✓";
+        const icon = r.running ? "⏳" : isFailedResult(r) ? "✗" : "✓";
         lines.push(`${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`);
         const out = getResultOutput(r);
-        if (r.exitCode === -1) {
+        if (r.running) {
           lines.push("  (running...)");
         } else if (out && out !== "(no output)") {
           lines.push(out.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n"));
@@ -958,6 +746,8 @@ export default function (pi: ExtensionAPI) {
         ? params.findingsPath
         : path.join(ctx.cwd, params.findingsPath);
 
+      const { agents } = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, "user", parseAgentFrontmatter);
+
       const handle = runBackgroundResearch({
         cwd: params.cwd ?? ctx.cwd,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -965,6 +755,7 @@ export default function (pi: ExtensionAPI) {
         tools: params.tools,
         task: params.task,
         findingsPath,
+        agents,
       });
 
       return {
