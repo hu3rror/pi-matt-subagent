@@ -1,11 +1,9 @@
 # npm publish workflow — Trusted Publisher / OIDC, zero token.
-# First release: package does not exist on npm yet, and `npm stage` requires the
-# package to already be in the registry — so this publishes directly (Mode B).
-# Once the package exists, switch the last step back to `npm stage publish`
-# (Mode A: maintainer approves locally with 2FA).
+# Mode A (staged): `npm stage publish`; the maintainer approves locally with 2FA.
+# First release used `npm publish` because `npm stage` requires the package to
+# already exist in the registry — the package now exists, so stage applies again.
 # Prereq: package exists on npmjs with this repo + workflow filename bound as
-# trusted publisher (first OIDC publish of a new package creates it and binds
-# the workflow automatically).
+# trusted publisher.
 
 name: publish
 
@@ -45,11 +43,12 @@ jobs:
             exit 1
           fi
 
-      # Mode B (first release): direct publish — npm creates the package and
-      # binds this workflow as its trusted publisher via OIDC.
-      - name: Publish to npm registry
-        run: npm publish --provenance
+      # Mode A: staged — publish only after the maintainer approves the
+      # stage-id locally with 2FA (npm stage approve <stage-id>).
+      - name: Stage package on npm registry
+        run: npm stage publish --provenance
 
-      # Mode A (later releases, maintainer-gated):
-      # - name: Stage package on npm registry
-      #   run: npm stage publish --provenance
+      # Mode B (direct publish; used for the first release only, because stage
+      # requires the package to already exist on npm):
+      # - name: Publish to npm registry
+      #   run: npm publish --provenance
