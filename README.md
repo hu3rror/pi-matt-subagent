@@ -1,5 +1,7 @@
 # pi-matt-subagent
 
+> 简体中文: [README.zh-CN.md](README.zh-CN.md)
+
 <p align="center">
   <img src="docs/banner.png" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background sub-agents" width="800">
 </p>
