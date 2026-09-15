@@ -27,4 +27,5 @@
 ## E. 实战 dogfood
 
 - [x] **E1 — 真实 `/code-review`**：装好后对某个真实 commit 跑一次两轴 review，验证 Standards+Spec 并行阻塞效果。 — ✅ 已完成：对 `6c33cf4`（/research prompt，固定点 `d3aa5fc`）跑完整两轴 review——一次 `subagent` 调用 + `tasks` 数组，standards-reviewer/spec-reviewer 并行阻塞、返回时两轴同时到手、分开报告（符合 blocking 语义与 ADR 0001）。结果：Standards 0 硬违规 + 3 判断项（已顺手修 #1 绝对路径措辞）；Spec 4 项无缺失/越界/错误实现（最重仅「未显式说 single Markdown file」，researcher role prompt 已强制）。
-- [ ] **E2 — 真实 `/design-it-twice`**：对某个深化候选跑一次 3+ 并行接口设计。
+- [x] **E2 — 真实 `/design-it-twice`**：对某个深化候选跑一次 3+ 并行接口设计。
+  - ✅ 全验证。候选：`src/lib.ts` 子代理进程启动簇（extensions/subagent.ts 的 `runSingleAgent` + lib.ts 的启动装配簇，依赖类别 in-process/local-substitutable）。跑法：`subagent` + `tasks` 数组并行 4 个 design-explorer（Minimize / Flexibility / Default-trivial / Ports & adapters），阻塞返回后逐一呈现 + 按 depth/locality/seam placement 横向比较，给出混合推荐（B 主干 `createRunner` + A 的解析器双消费者 `collectBackgroundRun`）。**限流观测**：4 并发首轮 2 成功 2 失败（429 rpm exhausted，印证 A4「并行加剧限流」）；重试 2 并行 2/2 成功；中间另有 1 次 `Subagent was aborted`（用户/会话中止）。失败报告格式正确（`Parallel: 2/4 succeeded` + 原始 429 体）。slash command 触发、模板展开、`$@` 占位符替换在上一轮已确认。
