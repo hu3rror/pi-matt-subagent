@@ -31,3 +31,7 @@ _Avoid_: brainstorming, options
 **workflow preset**:
 预编码一次编排（single/parallel/chain）的 prompt 模板。
 _Avoid_: command, recipe
+
+**tool-name resolution**:
+把 role 声明的工具名归一化到子代理进程实际可用的名字：环境没有的名字回退到内置替代名（如 `ffgrep`→`grep`），替代名也不存在则从派发清单剔除。方向恒为「增强名→内置名」，绝不反向（内置名在任何环境下都可用）。
+_Avoid_: tool fallback, alias mapping, tool renaming
