@@ -4,6 +4,9 @@
   "type": "module",
   "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
   "keywords": ["pi-package"],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/hu3rror/pi-matt-subagent.git"
