@@ -38,6 +38,7 @@ import {
   getPiInvocation,
   resolveTools,
   runBackgroundResearch,
+  scopeAllowsProject,
   type AgentConfig,
   type AgentScope,
   type AgentSource,
@@ -151,6 +152,37 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 
 function formatAgentList(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+}
+
+/**
+ * Gates project-local agents behind a trust confirmation, shared by the
+ * blocking `subagent` tool and the background `research` tool. Returns true
+ * when no confirmation is needed (user scope, headless, trusted project, or
+ * no requested agent resolves to a project source) or when the user approves.
+ */
+async function confirmProjectAgents(
+  ctx: {
+    hasUI: boolean;
+    isProjectTrusted: () => boolean;
+    ui: { confirm: (title: string, message: string) => Promise<boolean> };
+  },
+  agentScope: AgentScope,
+  agents: AgentConfig[],
+  projectAgentsDir: string | null,
+  requestedNames: string[],
+  title: string,
+): Promise<boolean> {
+  if (!scopeAllowsProject(agentScope) || !ctx.hasUI || ctx.isProjectTrusted() || requestedNames.length === 0) {
+    return true;
+  }
+  const projectAgents = agents.filter((a) => requestedNames.includes(a.name) && a.source === "project");
+  if (projectAgents.length === 0) return true;
+  const dir = projectAgentsDir ?? "(unknown)";
+  const names = projectAgents.map((a) => a.name).join(", ");
+  return ctx.ui.confirm(
+    title,
+    `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +404,8 @@ async function runSingleAgent(
 // Tool schemas
 // ---------------------------------------------------------------------------
 
+const AgentScopeSchema = Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")]);
+
 const TaskItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
   task: Type.String({ description: "Task to delegate to the agent" }),
@@ -389,9 +423,7 @@ const SubagentParams = Type.Object({
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
   chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
-  agentScope: Type.Optional(
-    Type.String({ description: 'Which agent directories to use: "user" (default), "project", or "both".' }),
-  ),
+  agentScope: Type.Optional(AgentScopeSchema),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
 
@@ -402,6 +434,7 @@ const ResearchParams = Type.Object({
   }),
   cwd: Type.Optional(Type.String({ description: "Working directory for the researcher process" })),
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
+  agentScope: Type.Optional(AgentScopeSchema),
 });
 
 // ---------------------------------------------------------------------------
@@ -448,35 +481,24 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      if (
-        (agentScope === "project" || agentScope === "both") &&
-        ctx.hasUI &&
-        !ctx.isProjectTrusted() &&
-        (params.chain || params.tasks || params.agent)
-      ) {
-        const requestedNames = new Set<string>();
-        if (params.chain) for (const s of params.chain) requestedNames.add(s.agent);
-        if (params.tasks) for (const t of params.tasks) requestedNames.add(t.agent);
-        if (params.agent) requestedNames.add(params.agent);
+      const requestedNames = new Set<string>();
+      if (params.chain) for (const s of params.chain) requestedNames.add(s.agent);
+      if (params.tasks) for (const t of params.tasks) requestedNames.add(t.agent);
+      if (params.agent) requestedNames.add(params.agent);
 
-        const projectAgentsRequested = Array.from(requestedNames)
-          .map((name) => agents.find((a) => a.name === name))
-          .filter((a): a is AgentConfig => a?.source === "project");
-
-        if (projectAgentsRequested.length > 0) {
-          const names = projectAgentsRequested.map((a) => a.name).join(", ");
-          const dir = discovery.projectAgentsDir ?? "(unknown)";
-          const ok = await ctx.ui.confirm(
-            "Run project-local agents?",
-            `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-          );
-          if (!ok) {
-            return {
-              content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-              details: makeDetails([]),
-            };
-          }
-        }
+      const approved = await confirmProjectAgents(
+        ctx,
+        agentScope,
+        agents,
+        discovery.projectAgentsDir,
+        Array.from(requestedNames),
+        "Run project-local agents?",
+      );
+      if (!approved) {
+        return {
+          content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+          details: makeDetails([]),
+        };
       }
 
       if (hasChain && params.chain) {
@@ -686,15 +708,30 @@ export default function (pi: ExtensionAPI) {
       "Run a background research subagent (isolated pi process) that writes cited findings to a file, then return immediately.",
       "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, then read the returned findingsPath later to collect the results.",
       "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
+      'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
     ].join(" "),
     parameters: ResearchParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
       const findingsPath = path.isAbsolute(params.findingsPath)
         ? params.findingsPath
         : path.join(ctx.cwd, params.findingsPath);
 
-      const { agents } = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, "user", parseAgentFrontmatter);
+      const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
+      const agents = discovery.agents;
+
+      const approved = await confirmProjectAgents(
+        ctx,
+        agentScope,
+        agents,
+        discovery.projectAgentsDir,
+        ["researcher"],
+        "Run project-local researcher?",
+      );
+      if (!approved) {
+        return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }] };
+      }
 
       const handle = runBackgroundResearch({
         cwd: params.cwd ?? ctx.cwd,

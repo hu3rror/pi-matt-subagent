@@ -11,6 +11,7 @@ import {
   resolveRole,
   resolveTools,
   runBackgroundResearch,
+  scopeAllowsProject,
   type AgentConfig,
   type FrontmatterParser,
 } from "./lib.ts";
@@ -174,7 +175,12 @@ function embeddedResearcher(): AgentConfig {
 const TOOLS_EXPECTED = process.platform === "win32" ? ["read", "grep", "find", "ls", "powershell", "write"] : ["read", "grep", "find", "ls", "bash", "write"];
 
 test("buildResearchArgs prefixes the fixed pi flags", () => {
-  const args = buildResearchArgs({ agent: embeddedResearcher(), task: "T", findingsPath: "/tmp/f.md" });
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "T",
+    findingsPath: "/tmp/f.md",
+    promptPath: "/tmp/p.md",
+  });
   assert.deepEqual(args.slice(0, 4), ["--mode", "json", "-p", "--no-session"]);
 });
 
@@ -185,13 +191,19 @@ test("buildResearchArgs renders model and thinkingLevel when given", () => {
     findingsPath: "/tmp/f.md",
     model: "p/m",
     thinkingLevel: "low",
+    promptPath: "/tmp/p.md",
   });
   assert.ok(args.includes("--model") && args[args.indexOf("--model") + 1] === "p/m");
   assert.ok(args.includes("--thinking") && args[args.indexOf("--thinking") + 1] === "low");
 });
 
 test("buildResearchArgs defaults tools to the research set, mapped for the platform", () => {
-  const args = buildResearchArgs({ agent: embeddedResearcher(), task: "T", findingsPath: "/tmp/f.md" });
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "T",
+    findingsPath: "/tmp/f.md",
+    promptPath: "/tmp/p.md",
+  });
   const i = args.indexOf("--tools");
   assert.ok(i >= 0);
   assert.deepEqual(args[i + 1].split(","), TOOLS_EXPECTED);
@@ -203,18 +215,37 @@ test("buildResearchArgs honors explicit tools over role defaults", () => {
     task: "T",
     findingsPath: "/tmp/f.md",
     tools: ["read", "write"],
+    promptPath: "/tmp/p.md",
   });
   const i = args.indexOf("--tools");
   assert.deepEqual(args[i + 1].split(","), ["read", "write"]);
 });
 
-test("buildResearchArgs ends with the research prompt carrying findings path and task", () => {
-  const agent = embeddedResearcher();
-  const args = buildResearchArgs({ agent, task: "investigate X", findingsPath: "/tmp/f.md" });
-  const prompt = args[args.length - 1];
-  assert.equal(prompt, buildResearchPrompt(agent, "investigate X", "/tmp/f.md"));
-  assert.ok(prompt.includes("/tmp/f.md"));
-  assert.ok(prompt.includes("investigate X"));
+test("buildResearchArgs routes the prompt file via --append-system-prompt and keeps the task positional", () => {
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "investigate X",
+    findingsPath: "/tmp/f.md",
+    promptPath: "/tmp/p.md",
+  });
+  const i = args.indexOf("--append-system-prompt");
+  assert.ok(i >= 0);
+  assert.equal(args[i + 1], "/tmp/p.md");
+  assert.equal(args[args.length - 1], "Task: investigate X");
+  assert.ok(
+    !args.some((a) => a.includes("/tmp/f.md")),
+    "findings path must not leak into argv (it lives in the prompt file instead)",
+  );
+  assert.ok(
+    !args.some((a) => a.includes("SP")),
+    "role prompt text must not leak into argv (it lives in the prompt file instead)",
+  );
+});
+
+test("scopeAllowsProject is true only for project and both", () => {
+  assert.equal(scopeAllowsProject("user"), false);
+  assert.equal(scopeAllowsProject("project"), true);
+  assert.equal(scopeAllowsProject("both"), true);
 });
 
 // S7 — runBackgroundResearch
@@ -269,6 +300,14 @@ test("runBackgroundResearch backgrounds the researcher, wiring the log fd, and r
   assert.ok(c.args.includes("--mode"));
   assert.ok(c.args.includes("--model"));
   assert.ok(c.args.includes("--tools"));
+  assert.ok(c.args.includes("--append-system-prompt"));
+
+  // the prompt file sits next to the log and carries role prompt + findings path
+  const promptFile = path.join(path.dirname(handle.logPath), "prompt.md");
+  const promptText = fs.readFileSync(promptFile, "utf8");
+  assert.ok(promptText.includes("SP"), "role system prompt should be in the file");
+  assert.ok(promptText.includes("/tmp/f.md"), "findings path should be in the file, not argv");
+  assert.ok(promptText.includes("T"), "task should be in the file");
 });
 
 test("runBackgroundResearch throws when no researcher role is available", () => {

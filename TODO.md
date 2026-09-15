@@ -11,8 +11,8 @@
 
 ## B. Spec 审查遗留（小修复）
 
-- [ ] **B1 — 后台 prompt 装配一致性**：阻塞路径用 `--append-system-prompt` 临时文件，后台路径把 role 内联进 positional prompt。可统一为 `--append-system-prompt`（对应 Spec 审查 c2）。
-- [ ] **B2 — 后台 `research` 暴露 `agentScope`**：目前固定 `user` scope，project 级 `researcher` 覆盖对后台路径不生效。可选给 `research` 工具加 `agentScope` 参数（含 trust 确认）。
+- [x] **B1 — 后台 prompt 装配一致性**：阻塞路径用 `--append-system-prompt` 临时文件，后台路径把 role 内联进 positional prompt。可统一为 `--append-system-prompt`（对应 Spec 审查 c2）。 — ✅ 已统一：`buildResearchArgs` 输出 `--append-system-prompt <prompt.md>` + positional `Task: <task>`，role prompt 与 findings path 全在文件（0600，写于 `pi-research-*` tmpdir，与 log 同生命周期），不再进 argv（Seam A 有断言）。测试迁移踩过坑：S6 曾只迁 1/5 调用点导致 `undefined` 进 argv——已全部补齐。
+- [x] **B2 — 后台 `research` 暴露 `agentScope`**：目前固定 `user` scope，project 级 `researcher` 覆盖对后台路径不生效。可选给 `research` 工具加 `agentScope` 参数（含 trust 确认）。 — ✅ 已实现：`ResearchParams.agentScope`（默认 `user`，TypeBox Union 运行时校验非法值）+ execute 用 scope 替换写死的 `"user"`；trust 确认与 `subagent` 工具共用 `confirmProjectAgents` helper（project/both + hasUI + 未信任 + 请求名含 project 源 → `ctx.ui.confirm`，拒绝返回 `Canceled: project-local agents not approved.`）。A2 重构使 lib.ts 零改动（`agents` 已注入）。另抽出 `scopeAllowsProject` 谓词消除枚举知识重复。
 
 ## C. 安装 / 分发
 

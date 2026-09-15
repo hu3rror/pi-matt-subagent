@@ -25,6 +25,10 @@ export interface RoleDef {
 export type AgentSource = "embedded" | "user" | "project" | "unknown";
 export type AgentScope = "user" | "project" | "both";
 
+export function scopeAllowsProject(scope: AgentScope): boolean {
+  return scope === "project" || scope === "both";
+}
+
 export interface AgentConfig {
   name: string;
   description: string;
@@ -235,7 +239,7 @@ export function discoverAgents(
   }
 
   const projectAgentsDir = findNearestProjectAgentsDir(cwd, configDirName);
-  if (scope === "project" || scope === "both") {
+  if (scopeAllowsProject(scope)) {
     if (projectAgentsDir) {
       for (const a of loadAgentsFromDir(projectAgentsDir, "project", parseFrontmatter)) map.set(a.name, a);
     }
@@ -276,17 +280,18 @@ export interface ResearchRunOptions {
 
 /**
  * Assembles the pi invocation args for a background researcher: fixed flags
- * first, then optional --model / --thinking / --tools, then the positionally
- * passed research prompt (which carries the findings path and task).
- * The shell command is resolved separately by `getPiInvocation`.
+ * first, then optional --model / --thinking / --tools, then the role prompt
+ * via --append-system-prompt (file path, keeping prompt text out of argv,
+ * consistent with the blocking path), then the task positionally.
  */
-export function buildResearchArgs(opts: ResearchRunOptions & { agent: AgentConfig }): string[] {
+export function buildResearchArgs(opts: ResearchRunOptions & { agent: AgentConfig; promptPath: string }): string[] {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
   const tools = resolveTools(opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
-  args.push(buildResearchPrompt(opts.agent, opts.task, opts.findingsPath));
+  args.push("--append-system-prompt", opts.promptPath);
+  args.push(`Task: ${opts.task}`);
   return args;
 }
 
@@ -340,6 +345,17 @@ export function runBackgroundResearch(
   const logPath = path.join(tmpDir, "research.log");
   const researchId = path.basename(tmpDir);
 
+  // The role prompt (with findings path) goes to a file, like the blocking
+  // path's --append-system-prompt, so prompt text never appears in argv.
+  // The file stays in the tmp dir for as long as the background subprocess
+  // needs to read it at startup (this dir already outlives the caller: the
+  // main session is not meant to wait or clean up after a background run).
+  const promptPath = path.join(tmpDir, "prompt.md");
+  fs.writeFileSync(promptPath, buildResearchPrompt(agent, opts.task, opts.findingsPath), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+
   const args = buildResearchArgs({
     agent,
     task: opts.task,
@@ -347,6 +363,7 @@ export function runBackgroundResearch(
     model: opts.model,
     thinkingLevel: opts.thinkingLevel,
     tools: opts.tools,
+    promptPath,
   });
   const invocation = getPiInvocation(args);
   const logFd = fs.openSync(logPath, "a");
