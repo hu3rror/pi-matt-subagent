@@ -6,7 +6,7 @@
   "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
   "keywords": ["pi-package"],
   "scripts": {
-    "test": "node --test src/lib.test.ts src/research-e2e.test.ts"
+    "test": "node --test src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
