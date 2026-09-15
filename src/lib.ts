@@ -33,6 +33,10 @@ export type AgentScope = (typeof AGENT_SCOPES)[number];
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
 export function scopeAllowsProject(scope: AgentScope): boolean {
   return scope === "project" || scope === "both";
 }
@@ -208,7 +212,7 @@ function loadAgentsFromDir(
       description: frontmatter.description,
       tools: parseToolList(frontmatter.tools),
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-      thinkingLevel: typeof frontmatter.thinkingLevel === "string" ? frontmatter.thinkingLevel : undefined,
+      thinkingLevel: isThinkingLevel(frontmatter.thinkingLevel) ? frontmatter.thinkingLevel : undefined,
       systemPrompt: body,
       source,
     });
@@ -431,9 +435,11 @@ export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | 
 /**
  * Decides the thinking level for a subagent's pi invocation.
  * Priority: per-call override > the role's configured level > the main
- * session's inherited level. When an agent pins its own model (agent.model),
- * level is undefined: a custom model brings its own reasoning configuration,
- * so the caller must not force --thinking (historical behavior preserved).
+ * session's inherited level. A per-call override wins even when the agent
+ * pins its own model (explicit escape hatch); without an override, a
+ * model-pinned agent gets undefined so the caller does not force --thinking
+ * on a model that brings its own reasoning configuration (historical
+ * behavior preserved).
  */
 export function resolveThinkingLevel(opts: {
   roleLevel?: string;
@@ -441,8 +447,9 @@ export function resolveThinkingLevel(opts: {
   inherited?: string;
   hasModel: boolean;
 }): string | undefined {
+  if (opts.override) return opts.override;
   if (opts.hasModel) return undefined;
-  return opts.override ?? opts.roleLevel ?? opts.inherited;
+  return opts.roleLevel ?? opts.inherited;
 }
 
 export function buildResearchPrompt(agent: AgentConfig, task: string, findingsPath: string): string {

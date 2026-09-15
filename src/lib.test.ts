@@ -349,6 +349,12 @@ test("resolveThinkingLevel returns undefined when the agent pins its own model",
   assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
 });
 
+test("resolveThinkingLevel honors the per-call override even for model-pinned agents", () => {
+  // the escape hatch beats everything, including a pinned model
+  assert.equal(resolveThinkingLevel({ hasModel: true, override: "low" }), "low");
+  assert.equal(resolveThinkingLevel({ hasModel: true, override: "low", roleLevel: "medium", inherited: "high" }), "low");
+});
+
 test("resolveThinkingLevel prefers a per-call override over role and inherited levels", () => {
   assert.equal(resolveThinkingLevel({ hasModel: false, override: "low", roleLevel: "medium", inherited: "high" }), "low");
 });
@@ -390,6 +396,24 @@ test("a user agent frontmatter can set a custom thinkingLevel", () => {
     const r = agents.find((a) => a.name === "researcher");
     assert.ok(r);
     assert.equal(r.thinkingLevel, "minimal");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a user agent frontmatter with an invalid thinkingLevel is ignored", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const agentDir = path.join(root, "agentDir");
+  try {
+    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, "agents", "researcher.md"),
+      "---\nname: researcher\ndescription: custom\nthinkingLevel: meduim\n---\nCUSTOM PROMPT\n",
+    );
+    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
+    const r = agents.find((a) => a.name === "researcher");
+    assert.ok(r);
+    assert.equal(r.thinkingLevel, undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
