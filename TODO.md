@@ -16,8 +16,8 @@
 
 ## C. 安装 / 分发
 
-- [ ] **C1 — `pi install <path>`（或 `-l`）**：安装后 `prompts/code-review.md`、`design-it-twice.md` 才能作为 `/code-review`、`/design-it-twice` slash command 被发现；顺带验证 `/reload`。会写 `~/.pi/agent/settings.json`。
-- [ ] **C2 — 测试命令固化**：package.json 加 `scripts.test` + `.gitignore`。（实测 node v26.8.2 直接 `node --test src/lib.test.ts` 即可跑通 13 个测试，无需 `--experimental-strip-types`）
+- [x] **C1 — `pi install <path>`（或 `-l`）**：安装后 `prompts/code-review.md`、`design-it-twice.md` 才能作为 `/code-review`、`/design-it-twice` slash command 被发现；顺带验证 `/reload`。会写 `~/.pi/agent/settings.json`。 — ✅ 已部分验证：`pi install -l <path>` 实测正常——写入测试项目 `.pi/settings.json`（相对路径 `..\..\x\Repos\pi-matt-subagent` 解析正确）；全局安装早已实证（本会话 `/code-review` 补全 + `subagent`/`research` 工具均在，prompts/extensions 静态检查存在）。🕓 TUI 待验：`/reload` 热重载、`/design-it-twice` 补全（同 `/code-review` 机制，TUI 输 `/` 确认即可）。
+- [x] **C2 — 测试命令固化**：package.json 加 `scripts.test` + `.gitignore`。（实测 node v26.8.2 直接 `node --test src/lib.test.ts` 即可跑通 13 个测试，无需 `--experimental-strip-types`） — ✅ 已完成：`scripts.test = node --test src/lib.test.ts src/research-e2e.test.ts`（显式文件列表，避免 Windows glob 差异）；新增 `.gitignore`（`node_modules/`）；`npm test` 实测 22/22 通过。说明：v26 无需 strip-types flag；旧 node 需自带 TS 支持或另行配置（可后续调整）。
 
 ## D. 子代理健壮性
 
