@@ -68,14 +68,18 @@ test("resolveTools passes tools through unchanged when no registry is provided",
   assert.deepEqual(resolveTools(["ffgrep", "ffind", "grep", "find"]), ["ffgrep", "ffind", "grep", "find"]);
 });
 
-test("resolveTools degrades only names with a known alias; unknown names pass through", () => {
+test("resolveTools degrades known aliases and drops unknown names against a registry", () => {
   const available = new Set(["grep", "ls"]);
-  assert.deepEqual(resolveTools(["ffgrep", "mystery", "ls"], available), ["grep", "mystery", "ls"]);
+  assert.deepEqual(resolveTools(["ffgrep", "mystery", "ls"], available), ["grep", "ls"]);
 });
 
-test("resolveTools does not degrade when the alias target is missing too", () => {
+test("resolveTools drops a declared tool when neither it nor its alias is available", () => {
   const available = new Set(["ls", "bash"]);
-  assert.deepEqual(resolveTools(["ffgrep", "ffind", "ls"], available), ["ffgrep", "ffind", "ls"]);
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "ls"], available), ["ls"]);
+});
+
+test("resolveTools drops every tool when the registry has none of them", () => {
+  assert.deepEqual(resolveTools(["ffgrep", "ffind"], new Set()), []);
 });
 
 test("TOOL_ALIASES maps only the fff search names to built-ins", () => {
@@ -83,7 +87,7 @@ test("TOOL_ALIASES maps only the fff search names to built-ins", () => {
 });
 
 test("resolveTools applies the win32 bash mapping alongside alias degradation", () => {
-  const available = new Set(["powershell", "grep", "find"]);
+  const available = new Set(["powershell", "grep", "find", "bash"]);
   const expected = process.platform === "win32" ? ["grep", "find", "powershell"] : ["grep", "find", "bash"];
   assert.deepEqual(resolveTools(["ffgrep", "ffind", "bash"], available), expected);
 });
@@ -269,7 +273,7 @@ test("buildResearchArgs degrades fff tool names against the given registry", () 
     task: "T",
     findingsPath: "/tmp/f.md",
     tools: ["ffgrep", "ffind", "ls"],
-    availableTools: new Set(["grep", "find", "ls"]),
+    availableToolNames: new Set(["grep", "find", "ls"]),
     promptPath: "/tmp/p.md",
   });
   const i = args.indexOf("--tools");

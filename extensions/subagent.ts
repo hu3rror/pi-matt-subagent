@@ -158,6 +158,19 @@ function formatAgentList(agents: AgentConfig[]): string {
 }
 
 /**
+ * Probes the tool registry of the current (main) session for the names a
+ * child subagent process can be handed via `--tools`. The child starts from
+ * the same settings and extensions as this session, so its registry is the
+ * main registry intersected with the `--tools` allowlist: probing here and
+ * filtering each role's declarations against it keeps names that only exist
+ * in this environment (e.g. fff's ffgrep/ffind outside override mode) or not
+ * at all out of the child's allowlist.
+ */
+function probeAvailableToolNames(pi: ExtensionAPI): ReadonlySet<string> {
+  return new Set(pi.getAllTools().map((t) => t.name));
+}
+
+/**
  * Gates project-local agents behind a trust confirmation, shared by the
  * blocking `subagent` tool and the background `research` tool. Returns true
  * when no confirmation is needed (user scope, headless, trusted project, or
@@ -256,7 +269,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdate | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
-  availableTools?: ReadonlySet<string>,
+  availableToolNames?: ReadonlySet<string>,
 ): Promise<SingleResult> {
   const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
@@ -312,7 +325,7 @@ async function runSingleAgent(
       model,
       thinking,
       tools: agent.tools,
-      availableTools,
+      availableToolNames,
       promptPath: tmpPromptPath ?? undefined,
       task,
     });
@@ -482,7 +495,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
-      const availableToolNames = new Set(pi.getAllTools().map((t) => t.name));
+      const availableToolNames = probeAvailableToolNames(pi);
       const dispatchDefaults: DispatchDefaults = {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinkingLevel: ctx.thinkingLevel,
@@ -745,7 +758,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
-      const availableToolNames = new Set(pi.getAllTools().map((t) => t.name));
+      const availableToolNames = probeAvailableToolNames(pi);
       const findingsPath = path.isAbsolute(params.findingsPath)
         ? params.findingsPath
         : path.join(ctx.cwd, params.findingsPath);
@@ -778,7 +791,7 @@ export default function (pi: ExtensionAPI) {
         tools: params.tools,
         task: params.task,
         findingsPath,
-        availableTools: availableToolNames,
+        availableToolNames,
         agents,
       });
 

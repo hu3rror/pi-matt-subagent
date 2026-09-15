@@ -297,24 +297,41 @@ export const TOOL_ALIASES: Record<string, string> = {
 /**
  * Resolves role tool names for a subagent's `--tools` allowlist:
  * - `bash` maps to `powershell` on win32 (no powershell on other platforms).
- * - A declared tool that is NOT in `availableTools` (the tool registry of the
- *   current environment, probed via `pi.getAllTools()` by the extension)
- *   falls back to its built-in alias when that alias IS available. Without
- *   `availableTools` the list passes through untouched (legacy behavior).
+ * - When `availableToolNames` (the tool registry of the current environment,
+ *   probed via `pi.getAllTools()` by the extension) is given, a declared tool
+ *   that is not in it falls back to its built-in alias when that alias IS
+ *   available, and is DROPPED when neither the declared name nor its alias
+ *   exists — passing an unknown name to the child's allowlist would silently
+ *   leave the agent without the tool until the first call. Without the
+ *   registry the list passes through untouched (legacy behavior).
  */
 export function resolveTools(
   tools: string[] | undefined,
-  availableTools?: ReadonlySet<string>,
+  availableToolNames?: ReadonlySet<string>,
 ): string[] | undefined {
   if (!tools || tools.length === 0) return tools;
-  return tools.map((t) => {
-    if (process.platform === "win32" && t === "bash") return "powershell";
-    if (availableTools && !availableTools.has(t)) {
-      const alias = TOOL_ALIASES[t];
-      if (alias && availableTools.has(alias)) return alias;
+  const resolved: string[] = [];
+  for (const t of tools) {
+    let name = t;
+    if (process.platform === "win32" && t === "bash") name = "powershell";
+    if (!availableToolNames) {
+      resolved.push(name);
+      continue;
     }
-    return t;
-  });
+    if (availableToolNames.has(name)) {
+      resolved.push(name);
+      continue;
+    }
+    const alias = TOOL_ALIASES[t];
+    if (alias && availableToolNames.has(alias)) {
+      resolved.push(alias);
+      continue;
+    }
+    // Neither the declared name nor its alias exists in this environment's
+    // tool registry: drop it rather than hand the child an unknown --tools
+    // entry.
+  }
+  return resolved;
 }
 
 export function emptyUsage(): UsageStats {
@@ -333,7 +350,7 @@ export interface ResearchRunOptions {
   model?: string;
   thinkingLevel?: string;
   tools?: string[];
-  availableTools?: ReadonlySet<string>;
+  availableToolNames?: ReadonlySet<string>;
 }
 
 /**
@@ -347,14 +364,14 @@ export function buildDispatchArgs(opts: {
   model?: string;
   thinking?: string;
   tools?: string[];
-  availableTools?: ReadonlySet<string>;
+  availableToolNames?: ReadonlySet<string>;
   promptPath?: string;
   task: string;
 }): string[] {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  const tools = resolveTools(opts.tools, opts.availableTools);
+  const tools = resolveTools(opts.tools, opts.availableToolNames);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   if (opts.promptPath) args.push("--append-system-prompt", opts.promptPath);
   args.push(`Task: ${opts.task}`);
@@ -374,7 +391,7 @@ export function buildResearchArgs(
     model: opts.model,
     thinking: opts.thinkingLevel,
     tools: opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS,
-    availableTools: opts.availableTools,
+    availableToolNames: opts.availableToolNames,
     promptPath: opts.promptPath,
     task: opts.task,
   });
@@ -448,7 +465,7 @@ export function runBackgroundResearch(
     model: opts.model,
     thinkingLevel: opts.thinkingLevel,
     tools: opts.tools,
-    availableTools: opts.availableTools,
+    availableToolNames: opts.availableToolNames,
     promptPath,
   });
   const invocation = getPiInvocation(args);
