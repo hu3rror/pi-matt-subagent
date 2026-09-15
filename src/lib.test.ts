@@ -173,8 +173,6 @@ function embeddedResearcher(): AgentConfig {
 // Expected tool list for the default research set after platform mapping.
 // Deliberately a literal, not derived from DEFAULT_RESEARCH_TOOLS, so the
 // mapping is verified independently of the implementation.
-// The S8 role-level expectations below are literals for the same reason: a
-// regression to a uniform level is caught here rather than in the fixtures.
 const TOOLS_EXPECTED = process.platform === "win32" ? ["read", "grep", "find", "ls", "powershell", "write"] : ["read", "grep", "find", "ls", "bash", "write"];
 
 test("buildResearchArgs prefixes the fixed pi flags", () => {
@@ -245,6 +243,7 @@ test("buildResearchArgs routes the prompt file via --append-system-prompt and ke
   );
 });
 
+// AgentScope helpers
 test("scopeAllowsProject is true only for project and both", () => {
   assert.equal(scopeAllowsProject("user"), false);
   assert.equal(scopeAllowsProject("project"), true);
@@ -360,6 +359,8 @@ test("resolveThinkingLevel falls back to the role level, then the inherited leve
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
 });
 
+// Literals, not derived from EMBEDDED_ROLES: a regression to a uniform role
+// level is caught here rather than in the fixtures.
 test("embedded roles carry per-role thinking levels", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   try {

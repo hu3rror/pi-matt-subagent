@@ -12,9 +12,6 @@ import { runBackgroundResearch, type AgentConfig } from "./lib.ts";
 
 test("background research writes findings without blocking the caller (real detached spawn)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a2-e2e-"));
-  t.after(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
   const findingsPath = path.join(dir, "findings.md");
   const script = [
     "const fs = require('node:fs');",
@@ -45,6 +42,4 @@ test("background research writes findings without blocking the caller (real deta
   assert.equal(fs.readFileSync(findingsPath, "utf8"), "E2E OK");
   assert.ok(fs.existsSync(handle.logPath), "research log should exist on disk");
   assert.equal(handle.findingsPath, findingsPath);
-
-  fs.rmSync(dir, { recursive: true, force: true });
 });

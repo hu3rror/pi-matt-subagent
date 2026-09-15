@@ -19,12 +19,15 @@ import { spawn, type SpawnOptions } from "node:child_process";
 export interface RoleDef {
   description: string;
   tools?: string[];
-  thinkingLevel?: string;
+  thinkingLevel?: ThinkingLevel;
   systemPrompt: string;
 }
 
 export type AgentSource = "embedded" | "user" | "project" | "unknown";
-export type AgentScope = "user" | "project" | "both";
+
+/** The pi agent-scope set, single source of truth for schema enums. */
+export const AGENT_SCOPES = ["user", "project", "both"] as const;
+export type AgentScope = (typeof AGENT_SCOPES)[number];
 
 /** The pi thinking-level set, single source of truth for schema enums. */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -294,20 +297,43 @@ export interface ResearchRunOptions {
 }
 
 /**
+ * Assembles a pi invocation for a subagent process, shared by the blocking
+ * runner and the background researcher: fixed flags first, then optional
+ * --model / --thinking / --tools, then the role prompt via
+ * --append-system-prompt (file path, keeping prompt text out of argv), then
+ * the task positionally.
+ */
+export function buildDispatchArgs(opts: {
+  model?: string;
+  thinking?: string;
+  tools?: string[];
+  promptPath?: string;
+  task: string;
+}): string[] {
+  const args: string[] = ["--mode", "json", "-p", "--no-session"];
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.thinking) args.push("--thinking", opts.thinking);
+  const tools = resolveTools(opts.tools);
+  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
+  if (opts.promptPath) args.push("--append-system-prompt", opts.promptPath);
+  args.push(`Task: ${opts.task}`);
+  return args;
+}
+
+/**
  * Assembles the pi invocation args for a background researcher: fixed flags
  * first, then optional --model / --thinking / --tools, then the role prompt
  * via --append-system-prompt (file path, keeping prompt text out of argv,
  * consistent with the blocking path), then the task positionally.
  */
 export function buildResearchArgs(opts: ResearchRunOptions & { agent: AgentConfig; promptPath: string }): string[] {
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  if (opts.model) args.push("--model", opts.model);
-  if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
-  const tools = resolveTools(opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS);
-  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
-  args.push("--append-system-prompt", opts.promptPath);
-  args.push(`Task: ${opts.task}`);
-  return args;
+  return buildDispatchArgs({
+    model: opts.model,
+    thinking: opts.thinkingLevel,
+    tools: opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS,
+    promptPath: opts.promptPath,
+    task: opts.task,
+  });
 }
 
 export interface ResearchHandle {

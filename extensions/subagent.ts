@@ -33,12 +33,13 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
+  AGENT_SCOPES,
   THINKING_LEVELS,
+  buildDispatchArgs,
   discoverAgents,
   emptyUsage,
   getPiInvocation,
   resolveThinkingLevel,
-  resolveTools,
   runBackgroundResearch,
   scopeAllowsProject,
   type AgentConfig,
@@ -219,6 +220,7 @@ interface DispatchDefaults {
   thinkingOverride?: string;
 }
 
+/**
  * Decides the thinking level for one subagent run, shared by the blocking
  * runner and the background researcher: per-call override > role level > the
  * inherited main-session level; undefined when the agent pins its own model.
@@ -272,13 +274,8 @@ async function runSingleAgent(
     };
   }
 
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
   const model = agent.model ?? dispatchDefaults.model;
-  if (model) args.push("--model", model);
   const thinking = resolveDispatchThinking(agent, dispatchDefaults);
-  if (thinking) args.push("--thinking", thinking);
-  const resolvedTools = resolveTools(agent.tools);
-  if (resolvedTools && resolvedTools.length > 0) args.push("--tools", resolvedTools.join(","));
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -309,10 +306,14 @@ async function runSingleAgent(
       const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
       tmpPromptDir = tmp.dir;
       tmpPromptPath = tmp.filePath;
-      args.push("--append-system-prompt", tmpPromptPath);
     }
-
-    args.push(`Task: ${task}`);
+    const args = buildDispatchArgs({
+      model,
+      thinking,
+      tools: agent.tools,
+      promptPath: tmpPromptPath ?? undefined,
+      task,
+    });
     let wasAborted = false;
 
     const exitCode = await new Promise<number>((resolve) => {
@@ -424,7 +425,7 @@ async function runSingleAgent(
 // Tool schemas
 // ---------------------------------------------------------------------------
 
-const AgentScopeSchema = Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")]);
+const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
 const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
 
 const TaskItem = Type.Object({
