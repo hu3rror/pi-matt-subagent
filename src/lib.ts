@@ -8,7 +8,9 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { spawn, type SpawnOptions } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -256,6 +258,108 @@ export function resolveTools(tools: string[] | undefined): string[] | undefined 
 
 export function emptyUsage(): UsageStats {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Background research
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "bash", "write"];
+
+export interface ResearchRunOptions {
+  task: string;
+  findingsPath: string;
+  model?: string;
+  thinkingLevel?: string;
+  tools?: string[];
+}
+
+/**
+ * Assembles the pi invocation args for a background researcher: fixed flags
+ * first, then optional --model / --thinking / --tools, then the positionally
+ * passed research prompt (which carries the findings path and task).
+ * The shell command is resolved separately by `getPiInvocation`.
+ */
+export function buildResearchArgs(opts: ResearchRunOptions & { agent: AgentConfig }): string[] {
+  const args: string[] = ["--mode", "json", "-p", "--no-session"];
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
+  const tools = resolveTools(opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS);
+  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
+  args.push(buildResearchPrompt(opts.agent, opts.task, opts.findingsPath));
+  return args;
+}
+
+export interface ResearchHandle {
+  researchId: string;
+  findingsPath: string;
+  logPath: string;
+}
+
+export type SpawnFn = (
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+) => { unref: () => void };
+
+/**
+ * Resolves how to invoke the pi CLI from this process: reuse the current
+ * script when run as a real pi entry point, otherwise fall back to `pi` on
+ * PATH (node/bun generic runtimes) or the current executable (e.g. the pi
+ * binary itself).
+ */
+export function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+  const execName = path.basename(process.execPath).toLowerCase();
+  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+  if (!isGenericRuntime) {
+    return { command: process.execPath, args };
+  }
+  return { command: "pi", args };
+}
+
+/**
+ * Spawns a background researcher that writes findings to `findingsPath`, and
+ * returns immediately with a handle. The caller does not wait for the
+ * subprocess (background semantics per ADR 0001): the result is found later
+ * by reading the findings file; the child process is unref'd so it keeps
+ * running after the main session exits.
+ * `spawnImpl` is injectable for tests.
+ */
+export function runBackgroundResearch(
+  opts: ResearchRunOptions & { cwd: string; agents: AgentConfig[] },
+  spawnImpl: SpawnFn = spawn as SpawnFn,
+): ResearchHandle {
+  const agent = resolveRole(opts.agents, "researcher");
+  if (!agent) throw new Error('No "researcher" role available');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-research-"));
+  const logPath = path.join(tmpDir, "research.log");
+  const researchId = path.basename(tmpDir);
+
+  const args = buildResearchArgs({
+    agent,
+    task: opts.task,
+    findingsPath: opts.findingsPath,
+    model: opts.model,
+    thinkingLevel: opts.thinkingLevel,
+    tools: opts.tools,
+  });
+  const invocation = getPiInvocation(args);
+  const logFd = fs.openSync(logPath, "a");
+  const proc = spawnImpl(invocation.command, invocation.args, {
+    cwd: opts.cwd,
+    shell: false,
+    stdio: ["ignore", logFd, logFd],
+    detached: true,
+  });
+  proc.unref();
+  fs.closeSync(logFd);
+
+  return { researchId, findingsPath: opts.findingsPath, logPath };
 }
 
 // ---------------------------------------------------------------------------

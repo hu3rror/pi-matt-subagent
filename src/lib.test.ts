@@ -4,11 +4,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  buildResearchArgs,
   buildResearchPrompt,
   discoverAgents,
   emptyUsage,
   resolveRole,
   resolveTools,
+  runBackgroundResearch,
   type AgentConfig,
   type FrontmatterParser,
 } from "./lib.ts";
@@ -159,6 +161,128 @@ test("buildResearchPrompt embeds the agent system prompt, findings path, and tas
   assert.ok(p.includes("CUSTOM PROMPT"));
   assert.ok(p.includes("/tmp/out.md"));
   assert.ok(p.includes("do the thing"));
+});
+
+// S6 — buildResearchArgs
+function embeddedResearcher(): AgentConfig {
+  return { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
+}
+
+// Expected tool list for the default research set after platform mapping.
+// Deliberately a literal, not derived from DEFAULT_RESEARCH_TOOLS, so the
+// mapping is verified independently of the implementation.
+const TOOLS_EXPECTED = process.platform === "win32" ? ["read", "grep", "find", "ls", "powershell", "write"] : ["read", "grep", "find", "ls", "bash", "write"];
+
+test("buildResearchArgs prefixes the fixed pi flags", () => {
+  const args = buildResearchArgs({ agent: embeddedResearcher(), task: "T", findingsPath: "/tmp/f.md" });
+  assert.deepEqual(args.slice(0, 4), ["--mode", "json", "-p", "--no-session"]);
+});
+
+test("buildResearchArgs renders model and thinkingLevel when given", () => {
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "T",
+    findingsPath: "/tmp/f.md",
+    model: "p/m",
+    thinkingLevel: "low",
+  });
+  assert.ok(args.includes("--model") && args[args.indexOf("--model") + 1] === "p/m");
+  assert.ok(args.includes("--thinking") && args[args.indexOf("--thinking") + 1] === "low");
+});
+
+test("buildResearchArgs defaults tools to the research set, mapped for the platform", () => {
+  const args = buildResearchArgs({ agent: embeddedResearcher(), task: "T", findingsPath: "/tmp/f.md" });
+  const i = args.indexOf("--tools");
+  assert.ok(i >= 0);
+  assert.deepEqual(args[i + 1].split(","), TOOLS_EXPECTED);
+});
+
+test("buildResearchArgs honors explicit tools over role defaults", () => {
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "T",
+    findingsPath: "/tmp/f.md",
+    tools: ["read", "write"],
+  });
+  const i = args.indexOf("--tools");
+  assert.deepEqual(args[i + 1].split(","), ["read", "write"]);
+});
+
+test("buildResearchArgs ends with the research prompt carrying findings path and task", () => {
+  const agent = embeddedResearcher();
+  const args = buildResearchArgs({ agent, task: "investigate X", findingsPath: "/tmp/f.md" });
+  const prompt = args[args.length - 1];
+  assert.equal(prompt, buildResearchPrompt(agent, "investigate X", "/tmp/f.md"));
+  assert.ok(prompt.includes("/tmp/f.md"));
+  assert.ok(prompt.includes("investigate X"));
+});
+
+// S7 — runBackgroundResearch
+test("runBackgroundResearch backgrounds the researcher, wiring the log fd, and returns a handle", (t) => {
+  const calls: Array<{ cmd: string; args: string[]; opts: { detached?: boolean; shell?: boolean; cwd?: string; stdio?: unknown[] } }> = [];
+  const unrefCalls: boolean[] = [];
+  const fakeSpawn = (cmd: string, args: string[], opts: { detached?: boolean; shell?: boolean; cwd?: string; stdio?: unknown[] }) => {
+    calls.push({ cmd, args, opts });
+    return {
+      unref: () => {
+        unrefCalls.push(true);
+      },
+    };
+  };
+  const agents: AgentConfig[] = [embeddedResearcher()];
+
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      model: "p/m",
+      thinkingLevel: "low",
+      tools: ["read", "write"],
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      agents,
+    },
+    fakeSpawn as never,
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  // handle shape: researchId names the tmp dir, logPath is a research.log inside it
+  assert.equal(handle.findingsPath, "/tmp/f.md");
+  assert.match(handle.researchId, /^pi-research-/);
+  assert.match(handle.logPath, /research\.log$/);
+  assert.ok(handle.logPath.includes(handle.researchId));
+
+  // exactly one spawn, with background semantics
+  assert.equal(calls.length, 1);
+  const c = calls[0];
+  assert.equal(c.opts.detached, true);
+  assert.equal(c.opts.shell, false);
+  assert.equal(c.opts.cwd, "/w");
+  assert.equal(c.opts.stdio[0], "ignore");
+  assert.equal(typeof c.opts.stdio[1], "number");
+  assert.equal(c.opts.stdio[1], c.opts.stdio[2]); // stdout+stderr share the log fd
+  assert.equal(unrefCalls.length, 1);
+
+  // args routed through buildResearchArgs (token presence; exact structure is Seam A's job, and
+  // getPiInvocation prepends the current script under node --test)
+  assert.ok(c.args.includes("--mode"));
+  assert.ok(c.args.includes("--model"));
+  assert.ok(c.args.includes("--tools"));
+});
+
+test("runBackgroundResearch throws when no researcher role is available", () => {
+  const fakeSpawn = () => {
+    throw new Error("must not spawn");
+  };
+  assert.throws(
+    () =>
+      runBackgroundResearch(
+        { cwd: "/w", task: "T", findingsPath: "/tmp/f.md", agents: [] },
+        fakeSpawn as never,
+      ),
+    /No "researcher" role available/,
+  );
 });
 
 // tracer bullet for Spec-9: an overridden researcher role must win in the background path

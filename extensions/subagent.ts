@@ -33,16 +33,17 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
-  buildResearchPrompt,
   discoverAgents,
   emptyUsage,
-  resolveRole,
+  getPiInvocation,
   resolveTools,
+  runBackgroundResearch,
   type AgentConfig,
   type AgentScope,
   type AgentSource,
   type AgentFrontmatter,
   type FrontmatterParser,
+  type ResearchHandle,
   type UsageStats,
 } from "../src/lib.ts";
 
@@ -146,20 +147,6 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
     await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
   });
   return { dir: tmpDir, filePath };
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  const currentScript = process.argv[1];
-  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
-  }
-  const execName = path.basename(process.execPath).toLowerCase();
-  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-  if (!isGenericRuntime) {
-    return { command: process.execPath, args };
-  }
-  return { command: "pi", args };
 }
 
 function formatAgentList(agents: AgentConfig[]): string {
@@ -377,51 +364,9 @@ async function runSingleAgent(
 
 // ---------------------------------------------------------------------------
 // Background research runner
+//   Implementation lives in src/lib.ts (runBackgroundResearch) so it is
+//   testable under `node --test`; spawn is injectable there.
 // ---------------------------------------------------------------------------
-
-interface ResearchHandle {
-  researchId: string;
-  findingsPath: string;
-  logPath: string;
-}
-
-function runBackgroundResearch(opts: {
-  cwd: string;
-  model?: string;
-  thinkingLevel?: string;
-  tools?: string[];
-  task: string;
-  findingsPath: string;
-  agents: AgentConfig[];
-}): ResearchHandle {
-  const agent = resolveRole(opts.agents, "researcher");
-  if (!agent) throw new Error('No "researcher" role available');
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-research-"));
-  const logPath = path.join(tmpDir, "research.log");
-  const researchId = path.basename(tmpDir);
-
-  const prompt = buildResearchPrompt(agent, opts.task, opts.findingsPath);
-
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  if (opts.model) args.push("--model", opts.model);
-  if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
-  const tools = resolveTools(opts.tools ?? agent.tools ?? ["read", "grep", "find", "ls", "bash", "write"]);
-  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
-  args.push(prompt);
-
-  const invocation = getPiInvocation(args);
-  const logFd = fs.openSync(logPath, "a");
-  const proc = spawn(invocation.command, invocation.args, {
-    cwd: opts.cwd,
-    shell: false,
-    stdio: ["ignore", logFd, logFd],
-    detached: true,
-  });
-  proc.unref();
-  fs.closeSync(logFd);
-
-  return { researchId, findingsPath: opts.findingsPath, logPath };
-}
 
 // ---------------------------------------------------------------------------
 // Tool schemas
