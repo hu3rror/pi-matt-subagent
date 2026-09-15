@@ -1,9 +1,11 @@
 {
   "name": "pi-matt-subagent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -31,7 +33,11 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "prompts": ["./prompts"]
+    "extensions": [
+      "./extensions"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
   }
 }
