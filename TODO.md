@@ -26,5 +26,5 @@
 
 ## E. 实战 dogfood
 
-- [ ] **E1 — 真实 `/code-review`**：装好后对某个真实 commit 跑一次两轴 review，验证 Standards+Spec 并行阻塞效果。
+- [x] **E1 — 真实 `/code-review`**：装好后对某个真实 commit 跑一次两轴 review，验证 Standards+Spec 并行阻塞效果。 — ✅ 已完成：对 `6c33cf4`（/research prompt，固定点 `d3aa5fc`）跑完整两轴 review——一次 `subagent` 调用 + `tasks` 数组，standards-reviewer/spec-reviewer 并行阻塞、返回时两轴同时到手、分开报告（符合 blocking 语义与 ADR 0001）。结果：Standards 0 硬违规 + 3 判断项（已顺手修 #1 绝对路径措辞）；Spec 4 项无缺失/越界/错误实现（最重仅「未显式说 single Markdown file」，researcher role prompt 已强制）。
 - [ ] **E2 — 真实 `/design-it-twice`**：对某个深化候选跑一次 3+ 并行接口设计。
