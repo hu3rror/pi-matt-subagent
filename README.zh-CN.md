@@ -40,11 +40,19 @@ Matt Pocock 的 skills 到处都在要求子代理，却没说明 pi 里具体�
 
 ## 安装
 
+从 npm 安装：
+
+```sh
+pi install npm:pi-matt-subagent
+```
+
+或从本地仓库安装：
+
 ```sh
 pi install <本仓库路径>
 ```
 
-安装扩展（两个工具）和 prompts（三个 slash command）。用 `pi list` 确认；prompts 会出现在 TUI 的 `/` 补全里。
+两种方式都会安装扩展（两个工具）和 prompts（三个 slash command）。用 `pi list` 确认；prompts 会出现在 TUI 的 `/` 补全里。
 
 ## 项目结构
 

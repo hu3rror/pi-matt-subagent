@@ -40,11 +40,19 @@ Three slash commands, each a direct entry into one upstream pattern:
 
 ## Install
 
+From npm:
+
+```sh
+pi install npm:pi-matt-subagent
+```
+
+Or from a local checkout:
+
 ```sh
 pi install <path-to-this-repo>
 ```
 
-Installs the extension (the two tools) and the prompts (the three slash commands). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
+Both install the extension (the two tools) and the prompts (the three slash commands). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
 
 ## Project layout
 

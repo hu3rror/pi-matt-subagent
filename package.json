@@ -1,10 +1,21 @@
 {
   "name": "pi-matt-subagent",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
   "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hu3rror/pi-matt-subagent.git"
+  },
+  "files": [
+    "extensions",
+    "prompts",
+    "src",
+    "README.md",
+    "README.zh-CN.md",
+    "CONTEXT.md"
+  ],
   "scripts": {
     "test": "node --test src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts"
   },

@@ -1,0 +1,45 @@
+# npm publish workflow — Trusted Publisher / OIDC, zero token.
+# Mode A (staged): `npm stage publish`; the maintainer approves locally with 2FA.
+# Prereq: package exists on npmjs with this repo + workflow filename bound as trusted publisher.
+# (First OIDC publish of a new package creates it and binds the workflow automatically.)
+
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # Trusted Publishing (OIDC); also generates provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24 # npm 11+ for `npm stage` (Node 24 ships it)
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm install # no package-lock.json in this repo
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify tag matches package.json version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v${tag} does not match package.json version ${version}"
+            exit 1
+          fi
+
+      - name: Stage package on npm registry
+        run: npm stage publish --provenance
