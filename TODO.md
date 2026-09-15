@@ -21,7 +21,7 @@
 
 ## D. 子代理健壮性
 
-- [ ] **D1 — 思维等级继承**：子代理继承默认 `thinking=high`，复杂任务（如「自己跑 git」）在 `deepseek-v4-flash` 下会打转到上限而不收敛。给 role 加 `thinkingLevel` 字段（默认低一档），或让工具支持 per-call 覆盖。
+- [x] **D1 — 思维等级继承**：子代理继承默认 `thinking=high`，复杂任务（如「自己跑 git」）在 `deepseek-v4-flash` 下会打转到上限而不收敛。给 role 加 `thinkingLevel` 字段（默认低一档），或让工具支持 per-call 覆盖。 — ✅ 已实现（TDD，seam 预确认：lib 纯函数 + 扩展透传）。前置查证：`deepseek-v4-flash` 的 `thinkingLevelMap = {off:none, minimal:low, low:low, medium:medium, high:high}` → medium/low 均受支持（无 xhigh/max）。`resolveThinkingLevel`（lib.ts，优先级 override > role > inherited，agent 钉 model 时 undefined 不传 `--thinking`）；embedded roles 差异化：standard/spec/architecture/design/researcher → `medium`，fact-finder → `low`；frontmatter `thinkingLevel` 可覆盖；subagent/research 工具加 per-call `thinkingLevel` 逃生舱（`THINKING_LEVELS` 枚举单一来源 + TypeBox Union 校验）。测试 27/27。🕓 真实生效验证：需**重启会话**（扩展重载）后跑 `/code-review` 对比 medium——本会话扩展为旧代码，子代理仍继承 high。
 - [ ] **D2 — fff 工具名映射**：`resolveTools` 只处理 `bash`→`powershell`；若 fff 切到 `override` 模式，`grep`/`find` 会失效。可检测 fff override 并映射 `grep`→`ffgrep`、`find`→`fffind`。
 
 ## E. 实战 dogfood

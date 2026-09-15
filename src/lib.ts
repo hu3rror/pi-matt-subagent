@@ -19,11 +19,16 @@ import { spawn, type SpawnOptions } from "node:child_process";
 export interface RoleDef {
   description: string;
   tools?: string[];
+  thinkingLevel?: string;
   systemPrompt: string;
 }
 
 export type AgentSource = "embedded" | "user" | "project" | "unknown";
 export type AgentScope = "user" | "project" | "both";
+
+/** The pi thinking-level set, single source of truth for schema enums. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export function scopeAllowsProject(scope: AgentScope): boolean {
   return scope === "project" || scope === "both";
@@ -34,6 +39,7 @@ export interface AgentConfig {
   description: string;
   tools?: string[];
   model?: string;
+  thinkingLevel?: string;
   systemPrompt: string;
   source: AgentSource;
 }
@@ -43,6 +49,7 @@ export type AgentFrontmatter = {
   description?: unknown;
   tools?: unknown;
   model?: unknown;
+  thinkingLevel?: unknown;
 };
 
 export type FrontmatterParser = (content: string) => { frontmatter: AgentFrontmatter; body: string };
@@ -66,6 +73,7 @@ export const EMBEDDED_ROLES: Record<string, RoleDef> = {
     description:
       "Standards axis of a two-axis review: does the diff conform to the repo's documented standards (and the smell baseline)?",
     tools: ["read", "grep", "find", "ls", "bash"],
+    thinkingLevel: "medium",
     systemPrompt: `You are the Standards axis of a two-axis code review. You receive a diff command and commit list, the standards-source files, and the full smell baseline, and you report violations.
 
 Report, per file/hunk where relevant:
@@ -81,6 +89,7 @@ The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only com
     description:
       "Spec axis of a two-axis review: does the diff faithfully implement the originating issue / spec?",
     tools: ["read", "grep", "find", "ls", "bash"],
+    thinkingLevel: "medium",
     systemPrompt: `You are the Spec axis of a two-axis code review. You receive a diff command and commit list, and the originating spec (path or fetched contents), and you report fidelity.
 
 Report:
@@ -97,6 +106,7 @@ The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only com
     description:
       "Produces one radically different interface design for a deepened module, under a given design constraint.",
     tools: ["read", "grep", "find", "ls"],
+    thinkingLevel: "medium",
     systemPrompt: `You are a design explorer. Produce ONE radically different interface design for a deepened module, given a technical brief and a single design constraint. Do NOT make changes; read and design only.
 
 Output:
@@ -113,6 +123,7 @@ Name concepts using the brief's architecture vocabulary and the project's CONTEX
     description:
       "Walks a codebase organically and reports architectural friction (shallow modules, poor locality, leaking seams).",
     tools: ["read", "grep", "find", "ls", "bash"],
+    thinkingLevel: "medium",
     systemPrompt: `You are an architecture scout. Walk the codebase organically and note where you experience friction. Do NOT make changes.
 
 Look for:
@@ -131,6 +142,7 @@ Report findings with exact file paths and line ranges, grouped by severity, and 
     description:
       "Investigates a question against primary sources and writes cited findings to a Markdown file.",
     tools: ["read", "grep", "find", "ls", "bash", "write"],
+    thinkingLevel: "medium",
     systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
 
 Write your findings to a single Markdown file at the findings path given in your task, citing each claim's source. The file is the deliverable; do not answer in chat.`,
@@ -140,6 +152,7 @@ Write your findings to a single Markdown file at the findings path given in your
     description:
       "Answers a precise factual question using the environment (filesystem, tools), citing sources.",
     tools: ["read", "grep", "find", "ls", "bash"],
+    thinkingLevel: "low",
     systemPrompt: `You are a fact-finder. Answer a precise factual question using the environment (filesystem, tools). Report only what you can verify, with the source (file path + line, or command output). Do not speculate; if a fact is unverifiable, say so explicitly.`,
   },
 };
@@ -192,6 +205,7 @@ function loadAgentsFromDir(
       description: frontmatter.description,
       tools: parseToolList(frontmatter.tools),
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+      thinkingLevel: typeof frontmatter.thinkingLevel === "string" ? frontmatter.thinkingLevel : undefined,
       systemPrompt: body,
       source,
     });
@@ -229,6 +243,7 @@ export function discoverAgents(
       name,
       description: role.description,
       tools: role.tools,
+      thinkingLevel: role.thinkingLevel,
       systemPrompt: role.systemPrompt,
       source: "embedded",
     });
@@ -385,6 +400,23 @@ export function runBackgroundResearch(
 
 export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | undefined {
   return agents.find((a) => a.name === name);
+}
+
+/**
+ * Decides the thinking level for a subagent's pi invocation.
+ * Priority: per-call override > the role's configured level > the main
+ * session's inherited level. When an agent pins its own model (agent.model),
+ * level is undefined: a custom model brings its own reasoning configuration,
+ * so the caller must not force --thinking (historical behavior preserved).
+ */
+export function resolveThinkingLevel(opts: {
+  roleLevel?: string;
+  override?: string;
+  inherited?: string;
+  hasModel: boolean;
+}): string | undefined {
+  if (opts.hasModel) return undefined;
+  return opts.override ?? opts.roleLevel ?? opts.inherited;
 }
 
 export function buildResearchPrompt(agent: AgentConfig, task: string, findingsPath: string): string {

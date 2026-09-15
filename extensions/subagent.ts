@@ -7,8 +7,8 @@
  *   - `subagent` (blocking): single / parallel / chain. Does not return until
  *     every subagent finishes; full results come back in one tool result. This
  *     is the primitive a skill means when it says "spawn sub-agents".
- *   - `research` (background): spawns a detached researcher that writes
- *     findings to a file, then returns immediately with a handle.
+ *   - `research` (background): spawns a background researcher process that
+ *     writes findings to a file, then returns immediately with a handle.
  *
  * Six bundled roles live in src/lib.ts (standards-reviewer, spec-reviewer,
  * design-explorer, architecture-scout, researcher, fact-finder). User agents
@@ -33,9 +33,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
+  THINKING_LEVELS,
   discoverAgents,
   emptyUsage,
   getPiInvocation,
+  resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
   scopeAllowsProject,
@@ -214,6 +216,23 @@ type OnUpdate = (partial: AgentToolResult<SubagentDetails>) => void;
 interface DispatchDefaults {
   model?: string;
   thinkingLevel?: string;
+  thinkingOverride?: string;
+}
+
+ * Decides the thinking level for one subagent run, shared by the blocking
+ * runner and the background researcher: per-call override > role level > the
+ * inherited main-session level; undefined when the agent pins its own model.
+ */
+function resolveDispatchThinking(
+  agent: AgentConfig | undefined,
+  d: { thinkingLevel?: string; thinkingOverride?: string },
+): string | undefined {
+  return resolveThinkingLevel({
+    roleLevel: agent?.thinkingLevel,
+    override: d.thinkingOverride,
+    inherited: d.thinkingLevel,
+    hasModel: Boolean(agent?.model),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +275,8 @@ async function runSingleAgent(
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   const model = agent.model ?? dispatchDefaults.model;
   if (model) args.push("--model", model);
-  if (!agent.model && dispatchDefaults.thinkingLevel) args.push("--thinking", dispatchDefaults.thinkingLevel);
+  const thinking = resolveDispatchThinking(agent, dispatchDefaults);
+  if (thinking) args.push("--thinking", thinking);
   const resolvedTools = resolveTools(agent.tools);
   if (resolvedTools && resolvedTools.length > 0) args.push("--tools", resolvedTools.join(","));
 
@@ -405,6 +425,7 @@ async function runSingleAgent(
 // ---------------------------------------------------------------------------
 
 const AgentScopeSchema = Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")]);
+const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
 
 const TaskItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -424,6 +445,7 @@ const SubagentParams = Type.Object({
   tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
   chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
   agentScope: Type.Optional(AgentScopeSchema),
+  thinkingLevel: Type.Optional(ThinkingLevelSchema),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
 
@@ -435,6 +457,7 @@ const ResearchParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory for the researcher process" })),
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
   agentScope: Type.Optional(AgentScopeSchema),
+  thinkingLevel: Type.Optional(ThinkingLevelSchema),
 });
 
 // ---------------------------------------------------------------------------
@@ -459,6 +482,7 @@ export default function (pi: ExtensionAPI) {
       const dispatchDefaults: DispatchDefaults = {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinkingLevel: ctx.thinkingLevel,
+        thinkingOverride: params.thinkingLevel,
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
       const agents = discovery.agents;
@@ -733,10 +757,16 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }] };
       }
 
+      const researcher = agents.find((a) => a.name === "researcher");
+      const thinking = resolveDispatchThinking(researcher, {
+        thinkingLevel: ctx.thinkingLevel,
+        thinkingOverride: params.thinkingLevel,
+      });
+
       const handle = runBackgroundResearch({
         cwd: params.cwd ?? ctx.cwd,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-        thinkingLevel: ctx.thinkingLevel,
+        thinkingLevel: thinking,
         tools: params.tools,
         task: params.task,
         findingsPath,

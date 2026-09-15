@@ -9,6 +9,7 @@ import {
   discoverAgents,
   emptyUsage,
   resolveRole,
+  resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
   scopeAllowsProject,
@@ -172,6 +173,8 @@ function embeddedResearcher(): AgentConfig {
 // Expected tool list for the default research set after platform mapping.
 // Deliberately a literal, not derived from DEFAULT_RESEARCH_TOOLS, so the
 // mapping is verified independently of the implementation.
+// The S8 role-level expectations below are literals for the same reason: a
+// regression to a uniform level is caught here rather than in the fixtures.
 const TOOLS_EXPECTED = process.platform === "win32" ? ["read", "grep", "find", "ls", "powershell", "write"] : ["read", "grep", "find", "ls", "bash", "write"];
 
 test("buildResearchArgs prefixes the fixed pi flags", () => {
@@ -336,6 +339,56 @@ test("background research prompt uses an overridden researcher role", () => {
     const prompt = buildResearchPrompt(agent, "task", "/tmp/f.md");
     assert.ok(prompt.includes("CUSTOM OVERRIDE PROMPT"));
     assert.ok(!prompt.includes("You are a researcher."));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S8 — resolveThinkingLevel
+test("resolveThinkingLevel returns undefined when the agent pins its own model", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), undefined);
+  assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
+});
+
+test("resolveThinkingLevel prefers a per-call override over role and inherited levels", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, override: "low", roleLevel: "medium", inherited: "high" }), "low");
+});
+
+test("resolveThinkingLevel falls back to the role level, then the inherited level", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
+  assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
+});
+
+test("embedded roles carry per-role thinking levels", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  try {
+    const { agents } = discoverAgents(root, path.join(root, "agentDir"), ".pi", "user", stubParser);
+    const levelOf = (name: string) => agents.find((a) => a.name === name)?.thinkingLevel;
+    assert.equal(levelOf("standards-reviewer"), "medium");
+    assert.equal(levelOf("spec-reviewer"), "medium");
+    assert.equal(levelOf("architecture-scout"), "medium");
+    assert.equal(levelOf("design-explorer"), "medium");
+    assert.equal(levelOf("researcher"), "medium");
+    assert.equal(levelOf("fact-finder"), "low");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a user agent frontmatter can set a custom thinkingLevel", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const agentDir = path.join(root, "agentDir");
+  try {
+    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, "agents", "researcher.md"),
+      "---\nname: researcher\ndescription: custom\nthinkingLevel: minimal\n---\nCUSTOM PROMPT\n",
+    );
+    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
+    const r = agents.find((a) => a.name === "researcher");
+    assert.ok(r);
+    assert.equal(r.thinkingLevel, "minimal");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
