@@ -274,12 +274,47 @@ export function discoverAgents(
 // Tool resolution and usage
 // ---------------------------------------------------------------------------
 
-export function resolveTools(tools: string[] | undefined): string[] | undefined {
+/**
+ * Tool-name aliases for third-party enhanced search tools (e.g. fff's
+ * `ffgrep`/`ffind`). Keys are the enhanced names, values are the built-in
+ * names they replace. This is declarative data about fff's naming convention
+ * only — nothing here imports or configures fff itself.
+ *
+ * Verified behavior (pi-fff source + headless child probes): fff registers
+ * `ffgrep`/`ffind` in tools/tools-and-ui mode and `grep`/`find` (same names,
+ * fff implementations) in override mode; the built-in `grep`/`find` exist in
+ * every mode and are always enabled by the subagent's `--tools` allowlist.
+ * So a role declaring `grep`/`find` always works, while a role declaring
+ * `ffgrep`/`ffind` breaks in override mode or without fff installed. The
+ * alias below degrades those declarations to the built-in names instead of
+ * the other way around.
+ */
+export const TOOL_ALIASES: Record<string, string> = {
+  ffgrep: "grep",
+  ffind: "find",
+};
+
+/**
+ * Resolves role tool names for a subagent's `--tools` allowlist:
+ * - `bash` maps to `powershell` on win32 (no powershell on other platforms).
+ * - A declared tool that is NOT in `availableTools` (the tool registry of the
+ *   current environment, probed via `pi.getAllTools()` by the extension)
+ *   falls back to its built-in alias when that alias IS available. Without
+ *   `availableTools` the list passes through untouched (legacy behavior).
+ */
+export function resolveTools(
+  tools: string[] | undefined,
+  availableTools?: ReadonlySet<string>,
+): string[] | undefined {
   if (!tools || tools.length === 0) return tools;
-  if (process.platform === "win32") {
-    return tools.map((t) => (t === "bash" ? "powershell" : t));
-  }
-  return tools;
+  return tools.map((t) => {
+    if (process.platform === "win32" && t === "bash") return "powershell";
+    if (availableTools && !availableTools.has(t)) {
+      const alias = TOOL_ALIASES[t];
+      if (alias && availableTools.has(alias)) return alias;
+    }
+    return t;
+  });
 }
 
 export function emptyUsage(): UsageStats {
@@ -298,6 +333,7 @@ export interface ResearchRunOptions {
   model?: string;
   thinkingLevel?: string;
   tools?: string[];
+  availableTools?: ReadonlySet<string>;
 }
 
 /**
@@ -311,13 +347,14 @@ export function buildDispatchArgs(opts: {
   model?: string;
   thinking?: string;
   tools?: string[];
+  availableTools?: ReadonlySet<string>;
   promptPath?: string;
   task: string;
 }): string[] {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  const tools = resolveTools(opts.tools);
+  const tools = resolveTools(opts.tools, opts.availableTools);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   if (opts.promptPath) args.push("--append-system-prompt", opts.promptPath);
   args.push(`Task: ${opts.task}`);
@@ -330,11 +367,14 @@ export function buildDispatchArgs(opts: {
  * via --append-system-prompt (file path, keeping prompt text out of argv,
  * consistent with the blocking path), then the task positionally.
  */
-export function buildResearchArgs(opts: ResearchRunOptions & { agent: AgentConfig; promptPath: string }): string[] {
+export function buildResearchArgs(
+  opts: ResearchRunOptions & { agent: AgentConfig; promptPath: string },
+): string[] {
   return buildDispatchArgs({
     model: opts.model,
     thinking: opts.thinkingLevel,
     tools: opts.tools ?? opts.agent.tools ?? DEFAULT_RESEARCH_TOOLS,
+    availableTools: opts.availableTools,
     promptPath: opts.promptPath,
     task: opts.task,
   });
@@ -408,6 +448,7 @@ export function runBackgroundResearch(
     model: opts.model,
     thinkingLevel: opts.thinkingLevel,
     tools: opts.tools,
+    availableTools: opts.availableTools,
     promptPath,
   });
   const invocation = getPiInvocation(args);

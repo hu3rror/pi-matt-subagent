@@ -256,6 +256,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdate | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  availableTools?: ReadonlySet<string>,
 ): Promise<SingleResult> {
   const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
@@ -311,6 +312,7 @@ async function runSingleAgent(
       model,
       thinking,
       tools: agent.tools,
+      availableTools,
       promptPath: tmpPromptPath ?? undefined,
       task,
     });
@@ -480,6 +482,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
+      const availableToolNames = new Set(pi.getAllTools().map((t) => t.name));
       const dispatchDefaults: DispatchDefaults = {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinkingLevel: ctx.thinkingLevel,
@@ -554,6 +557,7 @@ export default function (pi: ExtensionAPI) {
             signal,
             chainUpdate,
             makeDetails,
+            availableToolNames,
           );
           results.push(result);
 
@@ -628,6 +632,7 @@ export default function (pi: ExtensionAPI) {
               }
             },
             makeDetails,
+            availableToolNames,
           );
           allResults[index] = result;
           emitParallelUpdate();
@@ -662,6 +667,7 @@ export default function (pi: ExtensionAPI) {
           signal,
           onUpdate,
           makeDetails,
+          availableToolNames,
         );
         if (isFailedResult(result)) {
           return {
@@ -739,6 +745,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
+      const availableToolNames = new Set(pi.getAllTools().map((t) => t.name));
       const findingsPath = path.isAbsolute(params.findingsPath)
         ? params.findingsPath
         : path.join(ctx.cwd, params.findingsPath);
@@ -771,6 +778,7 @@ export default function (pi: ExtensionAPI) {
         tools: params.tools,
         task: params.task,
         findingsPath,
+        availableTools: availableToolNames,
         agents,
       });
 

@@ -13,6 +13,7 @@ import {
   resolveTools,
   runBackgroundResearch,
   scopeAllowsProject,
+  TOOL_ALIASES,
   type AgentConfig,
   type FrontmatterParser,
 } from "./lib.ts";
@@ -45,6 +46,46 @@ test("resolveTools leaves non-bash tools untouched", () => {
 
 test("resolveTools returns undefined for undefined input", () => {
   assert.equal(resolveTools(undefined), undefined);
+});
+
+// S1a — fff tool-name degradation (D2).
+// pi-fff registers ffgrep/ffind (tools/tools-and-ui) or grep/find
+// (override mode); the built-in grep/find exist in every mode and are
+// always enabled by the --tools allowlist. So a role declaring the fff
+// names degrades to the built-in names when the fff names are missing
+// from the current environment's tool registry — never the other way.
+test("resolveTools degrades ffgrep/ffind to grep/find when the fff names are unavailable", () => {
+  const available = new Set(["grep", "find", "ls"]);
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "ls"], available), ["grep", "find", "ls"]);
+});
+
+test("resolveTools keeps ffgrep/ffind when the fff names are available", () => {
+  const available = new Set(["ffgrep", "ffind", "grep", "find", "ls", "bash"]);
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "ls"], available), ["ffgrep", "ffind", "ls"]);
+});
+
+test("resolveTools passes tools through unchanged when no registry is provided", () => {
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "grep", "find"]), ["ffgrep", "ffind", "grep", "find"]);
+});
+
+test("resolveTools degrades only names with a known alias; unknown names pass through", () => {
+  const available = new Set(["grep", "ls"]);
+  assert.deepEqual(resolveTools(["ffgrep", "mystery", "ls"], available), ["grep", "mystery", "ls"]);
+});
+
+test("resolveTools does not degrade when the alias target is missing too", () => {
+  const available = new Set(["ls", "bash"]);
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "ls"], available), ["ffgrep", "ffind", "ls"]);
+});
+
+test("TOOL_ALIASES maps only the fff search names to built-ins", () => {
+  assert.deepEqual(TOOL_ALIASES, { ffgrep: "grep", ffind: "find" });
+});
+
+test("resolveTools applies the win32 bash mapping alongside alias degradation", () => {
+  const available = new Set(["powershell", "grep", "find"]);
+  const expected = process.platform === "win32" ? ["grep", "find", "powershell"] : ["grep", "find", "bash"];
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "bash"], available), expected);
 });
 
 // S2 — emptyUsage
@@ -220,6 +261,19 @@ test("buildResearchArgs honors explicit tools over role defaults", () => {
   });
   const i = args.indexOf("--tools");
   assert.deepEqual(args[i + 1].split(","), ["read", "write"]);
+});
+
+test("buildResearchArgs degrades fff tool names against the given registry", () => {
+  const args = buildResearchArgs({
+    agent: embeddedResearcher(),
+    task: "T",
+    findingsPath: "/tmp/f.md",
+    tools: ["ffgrep", "ffind", "ls"],
+    availableTools: new Set(["grep", "find", "ls"]),
+    promptPath: "/tmp/p.md",
+  });
+  const i = args.indexOf("--tools");
+  assert.deepEqual(args[i + 1].split(","), ["grep", "find", "ls"]);
 });
 
 test("buildResearchArgs routes the prompt file via --append-system-prompt and keeps the task positional", () => {
