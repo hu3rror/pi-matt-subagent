@@ -20,6 +20,7 @@ export interface RoleDef {
   description: string;
   tools?: string[];
   thinkingLevel?: ThinkingLevel;
+  budget?: ResearchBudgetTier;
   systemPrompt: string;
 }
 
@@ -41,12 +42,119 @@ export function scopeAllowsProject(scope: AgentScope): boolean {
   return scope === "project" || scope === "both";
 }
 
+// ---------------------------------------------------------------------------
+// Research budget (D4)
+//   Effort control for the background researcher: 3 soft budget dimensions
+//   (fetch pages, search rounds, findings lines) written into the prompt as
+//   guidance, 2 hard control dimensions (log bytes, wall clock) enforced by
+//   the runner. Tier table frozen in ADR 0003; overrides follow
+//   overrides > tier > system default, and hard caps may only tighten.
+// ---------------------------------------------------------------------------
+
+export const RESEARCH_BUDGET_TIERS = ["standard", "tight"] as const;
+export type ResearchBudgetTier = (typeof RESEARCH_BUDGET_TIERS)[number];
+
+export function isResearchBudgetTier(value: unknown): value is ResearchBudgetTier {
+  return typeof value === "string" && (RESEARCH_BUDGET_TIERS as readonly string[]).includes(value);
+}
+
+export interface ResearchBudget {
+  maxSearchRounds: number;
+  maxFetchPages: number;
+  maxFindingLines: number;
+  maxLogBytes: number;
+  maxWallClockMs: number;
+}
+
+/** The two runner-enforced hard control dimensions. */
+export const HARD_BUDGET_DIMS = ["maxLogBytes", "maxWallClockMs"] as const;
+export type HardBudgetDim = (typeof HARD_BUDGET_DIMS)[number];
+
+export interface ResearchBudgetOverrides {
+  maxSearchRounds?: number;
+  maxFetchPages?: number;
+  maxFindingLines?: number;
+  maxLogBytes?: number;
+  maxWallClockMs?: number;
+}
+
+/** The five budget keys, single source for unknown-key rejection. */
+export const RESEARCH_BUDGET_KEYS = [
+  "maxSearchRounds",
+  "maxFetchPages",
+  "maxFindingLines",
+  "maxLogBytes",
+  "maxWallClockMs",
+] as const;
+
+export const RESEARCH_BUDGETS: Record<ResearchBudgetTier, ResearchBudget> = {
+  standard: {
+    maxSearchRounds: 10,
+    maxFetchPages: 20,
+    maxFindingLines: 500,
+    maxLogBytes: 8 * 1024 * 1024,
+    maxWallClockMs: 15 * 60 * 1000,
+  },
+  tight: {
+    maxSearchRounds: 5,
+    maxFetchPages: 8,
+    maxFindingLines: 200,
+    maxLogBytes: 2 * 1024 * 1024,
+    maxWallClockMs: 5 * 60 * 1000,
+  },
+};
+
+/**
+ * Resolves the effective budget for a research run: per-call overrides win
+ * over the tier defaults, which win over the system default. Hard-dimension
+ * overrides may only tighten (never exceed the tier ceiling); invalid values
+ * throw instead of being silently clamped.
+ */
+export function resolveResearchBudget(tier: ResearchBudgetTier, overrides?: ResearchBudgetOverrides): ResearchBudget {
+  const base = RESEARCH_BUDGETS[tier];
+  if (!base) throw new Error(`Unknown research budget tier: ${String(tier)}`);
+  if (!overrides) return base;
+  const result: ResearchBudget = { ...base };
+  for (const key of Object.keys(overrides)) {
+    const value = (overrides as Record<string, number | undefined>)[key];
+    if (value === undefined) continue;
+    if (!RESEARCH_BUDGET_KEYS.includes(key as (typeof RESEARCH_BUDGET_KEYS)[number])) {
+      throw new Error(`Unknown budget override key: ${key}`);
+    }
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`Invalid budget override ${key}: ${value} (must be a positive integer)`);
+    }
+    if ((HARD_BUDGET_DIMS as readonly string[]).includes(key) && value > base[key as HardBudgetDim]) {
+      throw new Error(
+        `Budget override ${key}: ${value} exceeds the ${tier} ceiling ${base[key as HardBudgetDim]}; hard caps may only be tightened`,
+      );
+    }
+    result[key as keyof ResearchBudget] = value as number;
+  }
+  return result;
+}
+
+/**
+ * Resolves the effective budget for a research run, guaranteeing a budget is
+ * always present (per ADR 0003 / spec: every run carries one). Precedence:
+ * per-call tier > the role's frontmatter tier > the system default (standard).
+ */
+export function resolveEffectiveResearchBudget(opts: {
+  tier?: ResearchBudgetTier;
+  roleTier?: ResearchBudgetTier;
+  overrides?: ResearchBudgetOverrides;
+}): ResearchBudget {
+  const tier: ResearchBudgetTier = opts.tier ?? opts.roleTier ?? "standard";
+  return resolveResearchBudget(tier, opts.overrides);
+}
+
 export interface AgentConfig {
   name: string;
   description: string;
   tools?: string[];
   model?: string;
   thinkingLevel?: string;
+  budget?: ResearchBudgetTier;
   systemPrompt: string;
   source: AgentSource;
 }
@@ -57,6 +165,7 @@ export type AgentFrontmatter = {
   tools?: unknown;
   model?: unknown;
   thinkingLevel?: unknown;
+  budget?: unknown;
 };
 
 export type FrontmatterParser = (content: string) => { frontmatter: AgentFrontmatter; body: string };
@@ -150,6 +259,7 @@ Report findings with exact file paths and line ranges, grouped by severity, and 
       "Investigates a question against primary sources and writes cited findings to a Markdown file.",
     tools: ["read", "grep", "find", "ls", "bash", "write"],
     thinkingLevel: "medium",
+    budget: "standard",
     systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
 
 Write your findings to a single Markdown file at the findings path given in your task, citing each claim's source. The file is the deliverable; do not answer in chat.`,
@@ -213,6 +323,7 @@ function loadAgentsFromDir(
       tools: parseToolList(frontmatter.tools),
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
       thinkingLevel: isThinkingLevel(frontmatter.thinkingLevel) ? frontmatter.thinkingLevel : undefined,
+      budget: isResearchBudgetTier(frontmatter.budget) ? frontmatter.budget : undefined,
       systemPrompt: body,
       source,
     });
@@ -251,6 +362,7 @@ export function discoverAgents(
       description: role.description,
       tools: role.tools,
       thinkingLevel: role.thinkingLevel,
+      budget: role.budget,
       systemPrompt: role.systemPrompt,
       source: "embedded",
     });
@@ -351,6 +463,10 @@ export interface ResearchRunOptions {
   thinkingLevel?: string;
   tools?: string[];
   availableToolNames?: ReadonlySet<string>;
+  /** Resolved research budget: enables the prompt budget block and the runner watcher. */
+  budget?: ResearchBudget;
+  /** Injectable timer/stat/append deps for the watcher (tests). */
+  watcherDeps?: ResearchWatcherDeps;
 }
 
 /**
@@ -403,11 +519,23 @@ export interface ResearchHandle {
   logPath: string;
 }
 
+/**
+ * The minimal handle the runner needs on a spawned research child: detach it,
+ * kill it, and observe whether it has exited. node's ChildProcess satisfies
+ * all three; fakes in tests implement them trivially.
+ */
+export interface ResearchChild {
+  unref(): void;
+  kill(signal?: string): boolean;
+  /** null while the child is still running; set once it has exited. */
+  exitCode: number | null;
+}
+
 export type SpawnFn = (
   command: string,
   args: string[],
   options: SpawnOptions,
-) => { unref: () => void };
+) => ResearchChild;
 
 /**
  * Resolves how to invoke the pi CLI from this process: reuse the current
@@ -453,7 +581,7 @@ export function runBackgroundResearch(
   // needs to read it at startup (this dir already outlives the caller: the
   // main session is not meant to wait or clean up after a background run).
   const promptPath = path.join(tmpDir, "prompt.md");
-  fs.writeFileSync(promptPath, buildResearchPrompt(agent, opts.task, opts.findingsPath), {
+  fs.writeFileSync(promptPath, buildResearchPrompt(agent, opts.task, opts.findingsPath, opts.budget), {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -478,6 +606,18 @@ export function runBackgroundResearch(
   });
   proc.unref();
   fs.closeSync(logFd);
+
+  if (opts.budget) {
+    const nowFn = opts.watcherDeps?.now ?? Date.now;
+    startResearchWatcher({
+      child: proc,
+      logPath,
+      findingsPath: opts.findingsPath,
+      budget: opts.budget,
+      startedAt: nowFn(),
+      deps: opts.watcherDeps,
+    });
+  }
 
   return { researchId, findingsPath: opts.findingsPath, logPath };
 }
@@ -510,6 +650,244 @@ export function resolveThinkingLevel(opts: {
   return opts.roleLevel ?? opts.inherited;
 }
 
-export function buildResearchPrompt(agent: AgentConfig, task: string, findingsPath: string): string {
-  return [agent.systemPrompt, "", `Findings path: ${findingsPath}`, "", `Task: ${task}`].join("\n");
+/**
+ * The budget paragraph appended to a researcher prompt when a budget applies.
+ * Must guide the model on the three soft dimensions (fetch pages, search
+ * rounds, findings lines) and the wall-clock number it can self-manage, state
+ * the enough-to-answer rule, and describe wind-down + the soft-limit marker.
+ */
+export function buildResearchBudgetBlock(budget: ResearchBudget): string {
+  return [
+    "## Research budget",
+    "Stay within these limits unless answering requires it:",
+    `- search rounds: at most ${budget.maxSearchRounds}`,
+    `- fetch pages (total): at most ${budget.maxFetchPages}`,
+    `- findings: at most ${budget.maxFindingLines} lines`,
+    `- wall clock: at most ${formatDuration(budget.maxWallClockMs)}`,
+    "",
+    "Stop as soon as you have enough information to answer well — do not chase source code or implementation details beyond that. That is the enough-to-answer rule.",
+    "",
+    "If a limit gets exceeded, do NOT keep going: enter wind-down — freeze that dimension (no further fetches/search rounds; stop appending findings once the line count is reached), finish your summary, and add `soft_limit_exceeded` next to it.",
+  ].join("\n");
+}
+
+export function buildResearchPrompt(
+  agent: AgentConfig,
+  task: string,
+  findingsPath: string,
+  budget?: ResearchBudget,
+): string {
+  return [
+    agent.systemPrompt,
+    "",
+    `Findings path: ${findingsPath}`,
+    budget ? ["", buildResearchBudgetBlock(budget)].join("\n") : "",
+    "",
+    `Task: ${task}`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Research budget enforcement (D4)
+//   The hard-cap decision (100% warn / 110% kill) and the termination marker
+//   are pure; the runner watcher in runBackgroundResearch drives them.
+// ---------------------------------------------------------------------------
+
+export type ResearchHardCap = "log_bytes" | "wall_clock";
+
+export interface ResearchRunCheck {
+  action: "continue" | "warn" | "kill";
+  /** The caps that crossed the relevant line: >=110% for kill, >=100% for warn. */
+  caps: ResearchHardCap[];
+}
+
+/**
+ * Decides what the runner should do for a research run at this instant.
+ * 100% of a hard cap -> warn; 110% -> kill. A kill records only the caps that
+ * crossed 110%; a warn only the caps in [100%, 110%).
+ */
+export function evaluateResearchRun(
+  now: number,
+  startedAt: number,
+  logBytes: number,
+  budget: ResearchBudget,
+): ResearchRunCheck {
+  const elapsed = now - startedAt;
+  const killCaps: ResearchHardCap[] = [];
+  const warnCaps: ResearchHardCap[] = [];
+  if (logBytes / budget.maxLogBytes >= 1.1) killCaps.push("log_bytes");
+  else if (logBytes / budget.maxLogBytes >= 1.0) warnCaps.push("log_bytes");
+  if (elapsed / budget.maxWallClockMs >= 1.1) killCaps.push("wall_clock");
+  else if (elapsed / budget.maxWallClockMs >= 1.0) warnCaps.push("wall_clock");
+  if (killCaps.length > 0) return { action: "kill", caps: killCaps };
+  if (warnCaps.length > 0) return { action: "warn", caps: warnCaps };
+  return { action: "continue", caps: [] };
+}
+
+/** Human-readable byte size: "512 B", "1 KiB", "8.83 MiB". */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${trimNumber(bytes / 1024)} KiB`;
+  return `${trimNumber(bytes / (1024 * 1024))} MiB`;
+}
+
+/** Human-readable duration: "900 ms", "2.2 s", "15 min". */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${trimNumber(ms / 1000)} s`;
+  return `${trimNumber(ms / 60_000)} min`;
+}
+
+function trimNumber(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  const fixed = n.toFixed(2);
+  return fixed.replace(/\.?0+$/, "");
+}
+
+export interface TerminationMarkerEntry {
+  cap: ResearchHardCap;
+  limit: number;
+  observed: number;
+}
+
+export interface TerminationMarkerData {
+  entries: TerminationMarkerEntry[];
+  at: string;
+}
+
+const REASON_LABELS: Record<ResearchHardCap, string> = {
+  log_bytes: "log_bytes_exceeded",
+  wall_clock: "wall_clock_exceeded",
+};
+
+/** Formats one hard-cap value in its own unit (bytes vs duration). */
+export function formatCapValue(cap: ResearchHardCap, value: number): string {
+  return cap === "log_bytes" ? formatBytes(value) : formatDuration(value);
+}
+
+/**
+ * Appends the frozen termination marker to the findings file (creating it if
+ * absent), so the main session can tell a hard-capped run from a complete one.
+ */
+export function appendResearchTerminationMarker(findingsPath: string, data: TerminationMarkerData): void {
+  const reasons = data.entries.map((e) => REASON_LABELS[e.cap]);
+  const lines = [
+    "<!-- research-terminated",
+    `reason: ${reasons.join(", ")}`,
+    "partial: true",
+    `limit: ${data.entries.map((e) => formatCapValue(e.cap, e.limit)).join(", ")}`,
+    `observed: ${data.entries.map((e) => formatCapValue(e.cap, e.observed)).join(", ")}`,
+    `at: ${data.at}`,
+    "-->",
+  ];
+  fs.appendFileSync(findingsPath, `\n${lines.join("\n")}\n`, "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Hard-cap watcher
+// ---------------------------------------------------------------------------
+
+export interface ResearchWatcherDeps {
+  now?: () => number;
+  stat?: (filePath: string) => { size: number } | undefined;
+  setInterval?: (fn: () => void, ms?: number) => unknown;
+  clearInterval?: (id?: unknown) => void;
+}
+
+export interface StartResearchWatcherOptions {
+  child: ResearchChild;
+  logPath: string;
+  findingsPath: string;
+  budget: ResearchBudget;
+  startedAt: number;
+  deps?: ResearchWatcherDeps;
+}
+
+const RESEARCH_WATCH_INTERVAL_MS = 2000;
+
+/**
+ * Watches a background research run against its hard caps. Every tick it stats
+ * the log file and checks the wall clock: at 100% of a cap it writes a
+ * one-time warning into the log; at 110% it kills the child and appends the
+ * termination marker to the findings file. Stops itself once the child exits.
+ * The interval is unref'd so it never holds the host process alive;
+ * enforcement is best-effort while the host lives (ADR 0003).
+ */
+export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
+  const deps = opts.deps ?? {};
+  const now = deps.now ?? Date.now;
+  const stat =
+    deps.stat ??
+    ((p: string) => {
+      try {
+        return { size: fs.statSync(p).size };
+      } catch {
+        return undefined;
+      }
+    });
+  const setIntervalFn = deps.setInterval ?? ((fn: () => void, ms?: number) => setInterval(fn, ms));
+  const clearIntervalFn = deps.clearInterval ?? ((id?: unknown) => clearInterval(id as ReturnType<typeof setInterval>));
+  const append = fs.appendFileSync;
+  let intervalId: unknown;
+  let stopped = false;
+  let logWarned = false;
+
+  const stop = () => {
+    stopped = true;
+    if (intervalId !== undefined) clearIntervalFn(intervalId);
+  };
+
+  const check = () => {
+    if (stopped) return;
+    if (opts.child.exitCode !== null) {
+      stop();
+      return;
+    }
+    const t = now();
+    const elapsed = t - opts.startedAt;
+    const logSize = stat(opts.logPath)?.size ?? 0;
+    const result = evaluateResearchRun(t, opts.startedAt, logSize, opts.budget);
+
+    if (result.action === "kill") {
+      opts.child.kill("SIGKILL");
+      appendResearchTerminationMarker(opts.findingsPath, {
+        entries: result.caps.map((cap) => ({
+          cap,
+          limit: cap === "log_bytes" ? opts.budget.maxLogBytes : opts.budget.maxWallClockMs,
+          observed: cap === "log_bytes" ? logSize : elapsed,
+        })),
+        at: new Date(t).toISOString(),
+      });
+      // human-readable kill reason at the log tail (ADR 0003)
+      const reasons = result.caps
+        .map((cap) =>
+          cap === "log_bytes"
+            ? `log exceeded ${formatBytes(logSize)} (cap ${formatBytes(opts.budget.maxLogBytes)}) at 110%`
+            : `wall clock exceeded ${formatDuration(elapsed)} (cap ${formatDuration(opts.budget.maxWallClockMs)}) at 110%`,
+        )
+        .join("; ");
+      append(opts.logPath, `\n[research-budget] killed: ${reasons}\n`);
+      stop();
+      return;
+    }
+
+    if (result.action === "warn" && !logWarned && result.caps.includes("log_bytes")) {
+      // Only the log dimension is surfaced by the runner; the wall-clock
+      // dimension is self-managed by the model from its prompt (ADR 0003).
+      logWarned = true;
+      append(
+        opts.logPath,
+        `\n[research-budget] warning: log ${formatBytes(logSize)} approaching cap ${formatBytes(
+          opts.budget.maxLogBytes,
+        )} (100%); killed at 110%\n`,
+      );
+    }
+  };
+
+  check();
+  if (!stopped) {
+    intervalId = setIntervalFn(check, RESEARCH_WATCH_INTERVAL_MS);
+    const asTimeout = intervalId as { unref?: () => void } | undefined;
+    asTimeout?.unref?.();
+  }
 }

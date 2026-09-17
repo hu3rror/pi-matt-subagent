@@ -4,18 +4,27 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  appendResearchTerminationMarker,
   buildResearchArgs,
   buildResearchPrompt,
   discoverAgents,
   emptyUsage,
+  evaluateResearchRun,
+  RESEARCH_BUDGETS,
+  resolveEffectiveResearchBudget,
+  resolveResearchBudget,
   resolveRole,
   resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
   scopeAllowsProject,
+  startResearchWatcher,
   TOOL_ALIASES,
   type AgentConfig,
   type FrontmatterParser,
+  type ResearchBudgetOverrides,
+  type ResearchBudgetTier,
+  type ResearchChild,
 } from "./lib.ts";
 
 const stubParser: FrontmatterParser = (content) => {
@@ -474,5 +483,539 @@ test("a user agent frontmatter with an invalid thinkingLevel is ignored", () => 
     assert.equal(r.thinkingLevel, undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S9 — research budget (D4). Literals, not derived from RESEARCH_BUDGETS: the
+// tier table was frozen in the design session (ADR 0003) and a regression to
+// different numbers is caught here.
+test("RESEARCH_BUDGETS freezes the tier table at the agreed values", () => {
+  assert.deepEqual(RESEARCH_BUDGETS.standard, {
+    maxSearchRounds: 10,
+    maxFetchPages: 20,
+    maxFindingLines: 500,
+    maxLogBytes: 8 * 1024 * 1024,
+    maxWallClockMs: 15 * 60 * 1000,
+  });
+  assert.deepEqual(RESEARCH_BUDGETS.tight, {
+    maxSearchRounds: 5,
+    maxFetchPages: 8,
+    maxFindingLines: 200,
+    maxLogBytes: 2 * 1024 * 1024,
+    maxWallClockMs: 5 * 60 * 1000,
+  });
+});
+
+test("resolveResearchBudget returns the tier defaults when no overrides are given", () => {
+  assert.deepEqual(resolveResearchBudget("standard"), RESEARCH_BUDGETS.standard);
+  assert.deepEqual(resolveResearchBudget("tight"), RESEARCH_BUDGETS.tight);
+});
+
+test("resolveResearchBudget merges overrides over tier defaults", () => {
+  const b = resolveResearchBudget("standard", { maxFetchPages: 6, maxFindingLines: 100 });
+  assert.equal(b.maxFetchPages, 6);
+  assert.equal(b.maxFindingLines, 100);
+  assert.equal(b.maxLogBytes, RESEARCH_BUDGETS.standard.maxLogBytes); // untouched dim
+  assert.equal(b.maxWallClockMs, RESEARCH_BUDGETS.standard.maxWallClockMs);
+});
+
+test("resolveResearchBudget allows tightening a hard cap within the ceiling", () => {
+  const b = resolveResearchBudget("standard", { maxLogBytes: 1024 * 1024, maxWallClockMs: 5 * 60 * 1000 });
+  assert.equal(b.maxLogBytes, 1024 * 1024);
+  assert.equal(b.maxWallClockMs, 5 * 60 * 1000);
+});
+
+test("resolveResearchBudget rejects a hard override above the tier ceiling", () => {
+  assert.throws(() => resolveResearchBudget("standard", { maxLogBytes: 16 * 1024 * 1024 }), /may only be tightened/);
+  assert.throws(() => resolveResearchBudget("tight", { maxWallClockMs: 20 * 60 * 1000 }), /may only be tightened/);
+});
+
+test("resolveResearchBudget rejects non-positive or non-integer overrides", () => {
+  assert.throws(() => resolveResearchBudget("standard", { maxSearchRounds: 0 }), /positive/);
+  assert.throws(() => resolveResearchBudget("standard", { maxFetchPages: -1 }), /positive/);
+  assert.throws(() => resolveResearchBudget("standard", { maxFindingLines: 1.5 }), /positive/);
+});
+
+test("resolveResearchBudget rejects an unknown tier", () => {
+  assert.throws(() => resolveResearchBudget("deep" as ResearchBudgetTier), /Unknown research budget tier/);
+});
+
+test("resolveResearchBudget rejects an unknown override key", () => {
+  assert.throws(
+    () => resolveResearchBudget("standard", { maxDepth: 5 } as unknown as ResearchBudgetOverrides),
+    /Unknown budget override key/,
+  );
+});
+
+test("resolveEffectiveResearchBudget always yields a budget: call tier > role tier > system default", () => {
+  // role has no tier -> system default standard
+  assert.deepEqual(resolveEffectiveResearchBudget({}), RESEARCH_BUDGETS.standard);
+  assert.deepEqual(resolveEffectiveResearchBudget({ roleTier: undefined }), RESEARCH_BUDGETS.standard);
+  // role tier applies when no per-call tier
+  assert.deepEqual(resolveEffectiveResearchBudget({ roleTier: "tight" }), RESEARCH_BUDGETS.tight);
+  // per-call tier beats the role tier
+  assert.deepEqual(
+    resolveEffectiveResearchBudget({ tier: "standard", roleTier: "tight" }),
+    RESEARCH_BUDGETS.standard,
+  );
+  // overrides still apply on top
+  const b = resolveEffectiveResearchBudget({ roleTier: "tight", overrides: { maxSearchRounds: 3 } });
+  assert.equal(b.maxSearchRounds, 3);
+  assert.equal(b.maxFetchPages, RESEARCH_BUDGETS.tight.maxFetchPages);
+});
+
+// S10 — evaluateResearchRun (hard-cap decision). 100% line = warn, 110% line
+// = kill; a kill records only the caps that caused it, a warn only the caps
+// that crossed 100% but not 110%.
+test("evaluateResearchRun continues below both 100% lines", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(0, 0, 0, b), { action: "continue", caps: [] });
+  assert.deepEqual(evaluateResearchRun(1_000, 0, b.maxLogBytes - 1, b), { action: "continue", caps: [] });
+});
+
+test("evaluateResearchRun warns at exactly 100% of the log cap", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(0, 0, b.maxLogBytes, b), { action: "warn", caps: ["log_bytes"] });
+});
+
+test("evaluateResearchRun warns between 100% and 110% of the log cap", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(0, 0, Math.floor(b.maxLogBytes * 1.05), b), {
+    action: "warn",
+    caps: ["log_bytes"],
+  });
+});
+
+test("evaluateResearchRun kills at 110% of the log cap", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(0, 0, Math.ceil(b.maxLogBytes * 1.1), b), {
+    action: "kill",
+    caps: ["log_bytes"],
+  });
+});
+
+test("evaluateResearchRun warns at 100% of the wall clock cap", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, 0, b), { action: "warn", caps: ["wall_clock"] });
+});
+
+test("evaluateResearchRun kills at 110% of the wall clock cap", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.1), 0, 0, b), {
+    action: "kill",
+    caps: ["wall_clock"],
+  });
+});
+
+test("evaluateResearchRun records both caps when both exceed 110%", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(
+    evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.2), 0, Math.ceil(b.maxLogBytes * 1.2), b),
+    { action: "kill", caps: ["log_bytes", "wall_clock"] },
+  );
+});
+
+test("evaluateResearchRun prefers kill over warn and keeps only the kill reasons", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  // log at 120% (kill), wall clock at exactly 100% (would warn) -> kill with only log_bytes
+  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, Math.ceil(b.maxLogBytes * 1.2), b), {
+    action: "kill",
+    caps: ["log_bytes"],
+  });
+});
+
+// S11 — appendResearchTerminationMarker. Expected strings are hand-written
+// literals (the frozen format), not derived from the implementation.
+test("appendResearchTerminationMarker appends the frozen marker for a log-cap kill", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(findingsPath, "# Findings\n\nsome content\n");
+    appendResearchTerminationMarker(findingsPath, {
+      entries: [{ cap: "log_bytes", limit: 8 * 1024 * 1024, observed: Math.floor(8.83 * 1024 * 1024) }],
+      at: "2026-09-17T10:00:00.000Z",
+    });
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("<!-- research-terminated"));
+    assert.ok(text.includes("reason: log_bytes_exceeded"));
+    assert.ok(text.includes("partial: true"));
+    assert.ok(text.includes("limit: 8 MiB"));
+    assert.ok(text.includes("observed: 8.83 MiB"));
+    assert.ok(text.includes("at: 2026-09-17T10:00:00.000Z"));
+    assert.ok(text.includes("-->"), "marker must be closed");
+    assert.ok(text.includes("some content"), "existing findings content is preserved");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendResearchTerminationMarker creates the findings file when it does not exist", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    appendResearchTerminationMarker(findingsPath, {
+      entries: [{ cap: "wall_clock", limit: 5 * 60 * 1000, observed: 5 * 60 * 1000 + 12_000 }],
+      at: "2026-09-17T10:00:00.000Z",
+    });
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("reason: wall_clock_exceeded"));
+    assert.ok(text.includes("limit: 5 min"));
+    assert.ok(text.includes("observed: 5.2 min"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendResearchTerminationMarker records both caps with per-cap units, comma-joined", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    appendResearchTerminationMarker(findingsPath, {
+      entries: [
+        { cap: "log_bytes", limit: 8 * 1024 * 1024, observed: Math.floor(8.83 * 1024 * 1024) },
+        { cap: "wall_clock", limit: 15 * 60 * 1000, observed: 16.2 * 60 * 1000 },
+      ],
+      at: "2026-09-17T10:00:00.000Z",
+    });
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("reason: log_bytes_exceeded, wall_clock_exceeded"));
+    assert.ok(text.includes("limit: 8 MiB, 15 min"));
+    assert.ok(text.includes("observed: 8.83 MiB, 16.2 min"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendResearchTerminationMarker formats small values in B/KiB and seconds", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    appendResearchTerminationMarker(findingsPath, {
+      entries: [
+        { cap: "log_bytes", limit: 1024, observed: 2048 },
+        { cap: "wall_clock", limit: 1000, observed: 2200 },
+      ],
+      at: "2026-09-17T10:00:00.000Z",
+    });
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("limit: 1 KiB, 1 s"));
+    assert.ok(text.includes("observed: 2 KiB, 2.2 s"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// S12 — budget block in the research prompt (D4). The block carries the soft
+// dimension numbers + the wall-clock number (self-managed by the model), the
+// enough-to-answer rule, and the wind-down / soft_limit_exceeded behaviour.
+test("buildResearchPrompt appends the budget block when a budget is given", () => {
+  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
+  const p = buildResearchPrompt(agent, "do the thing", "/tmp/out.md", RESEARCH_BUDGETS.standard);
+  assert.ok(p.includes("SP"));
+  assert.ok(p.includes("/tmp/out.md"));
+  assert.ok(p.includes("do the thing"));
+  assert.ok(p.includes("search rounds: at most 10"));
+  assert.ok(p.includes("fetch pages (total): at most 20"));
+  assert.ok(p.includes("findings: at most 500 lines"));
+  assert.ok(p.includes("wall clock: at most 15 min"));
+  assert.ok(p.includes("enough-to-answer"), "the enough-to-answer rule must be in the prompt");
+  assert.ok(p.includes("wind-down"), "wind-down behaviour must be in the prompt");
+  assert.ok(p.includes("soft_limit_exceeded"), "the soft-limit marker format must be in the prompt");
+});
+
+test("buildResearchPrompt budget block reflects the tight tier numbers", () => {
+  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
+  const p = buildResearchPrompt(agent, "T", "/tmp/out.md", RESEARCH_BUDGETS.tight);
+  assert.ok(p.includes("search rounds: at most 5"));
+  assert.ok(p.includes("fetch pages (total): at most 8"));
+  assert.ok(p.includes("findings: at most 200 lines"));
+  assert.ok(p.includes("wall clock: at most 5 min"));
+});
+
+test("buildResearchPrompt without a budget stays unchanged", () => {
+  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
+  const p = buildResearchPrompt(agent, "T", "/tmp/out.md");
+  assert.ok(!p.includes("Research budget"));
+});
+
+// S13 — budget tier on roles (frontmatter, same pattern as thinkingLevel).
+test("embedded researcher role declares the standard budget tier", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  try {
+    const { agents } = discoverAgents(root, path.join(root, "agentDir"), ".pi", "user", stubParser);
+    assert.equal(agents.find((a) => a.name === "researcher")?.budget, "standard");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a user agent frontmatter can set a custom budget tier", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const agentDir = path.join(root, "agentDir");
+  try {
+    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, "agents", "researcher.md"),
+      "---\nname: researcher\ndescription: custom\nbudget: tight\n---\nCUSTOM PROMPT\n",
+    );
+    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
+    const r = agents.find((a) => a.name === "researcher");
+    assert.ok(r);
+    assert.equal(r.budget, "tight");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a user agent frontmatter with an invalid budget tier is ignored", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const agentDir = path.join(root, "agentDir");
+  try {
+    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, "agents", "researcher.md"),
+      "---\nname: researcher\ndescription: custom\nbudget: deep\n---\nCUSTOM PROMPT\n",
+    );
+    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
+    const r = agents.find((a) => a.name === "researcher");
+    assert.ok(r);
+    assert.equal(r.budget, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S14 — runBackgroundResearch budget integration + startResearchWatcher.
+// Fake deps make the watcher deterministic: immediate check + manual ticks.
+test("runBackgroundResearch with a budget embeds the budget block and starts a watcher", (t) => {
+  const fakeSpawn = () => ({ unref() {}, kill: () => true, exitCode: null as number | null });
+  let tick: (() => void) | undefined;
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      agents: [embeddedResearcher()],
+      budget: RESEARCH_BUDGETS.tight,
+      watcherDeps: {
+        now: () => 0,
+        stat: () => ({ size: 0 }),
+        setInterval: (fn: () => void) => {
+          tick = fn;
+          return { unref() {} } as never;
+        },
+        clearInterval: () => {},
+      },
+    },
+    fakeSpawn as never,
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  const promptText = fs.readFileSync(path.join(path.dirname(handle.logPath), "prompt.md"), "utf8");
+  assert.ok(promptText.includes("Research budget"), "budget block must reach the prompt file");
+  assert.ok(promptText.includes("search rounds: at most 5"), "tight numbers must reach the prompt file");
+  assert.ok(typeof tick === "function", "a watcher interval must be scheduled when a budget is present");
+});
+
+test("startResearchWatcher kills the child and appends the termination marker when the log cap is exceeded", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "x".repeat(4096));
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 1000,
+      deps: {
+        now: () => 1000,
+        stat: (p) => (p === logPath ? { size: 4096 } : undefined),
+        setInterval: () => ({ unref() {} }) as never,
+        clearInterval: () => {},
+      },
+    });
+    // immediate check: 4096 > 1.1 * 1024 -> kill before any tick
+    assert.deepEqual(killed, ["SIGKILL"]);
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("research-terminated"));
+    assert.ok(text.includes("reason: log_bytes_exceeded"));
+    assert.ok(text.includes("limit: 1 KiB"));
+    assert.ok(text.includes("observed: 4 KiB"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher warns once on the log dimension at 100% and does not kill", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    let tick: (() => void) | undefined;
+    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      deps: {
+        now: () => 0,
+        stat: () => ({ size: 1024 }), // exactly 100% of the log cap
+        setInterval: (fn: () => void) => {
+          tick = fn;
+          return { unref() {} } as never;
+        },
+        clearInterval: () => {},
+      },
+    });
+    tick?.();
+    tick?.();
+    const logText = fs.readFileSync(logPath, "utf8");
+    assert.equal((logText.match(/approaching cap/g) ?? []).length, 1, "the 100% warning must be written exactly once");
+    assert.deepEqual(killed, [], "warn must not kill");
+    assert.ok(!fs.existsSync(findingsPath), "no termination marker without a kill");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher writes the human-readable kill reason to the log tail", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024, maxWallClockMs: 60_000 };
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      deps: {
+        now: () => 4000,
+        stat: () => ({ size: 2048 }), // 2x cap -> kill; wall clock 4s < 110% of 60s
+        setInterval: () => ({ unref() {} }) as never,
+        clearInterval: () => {},
+      },
+    });
+    assert.deepEqual(killed, ["SIGKILL"]);
+    const logText = fs.readFileSync(logPath, "utf8");
+    assert.ok(logText.includes("[research-budget] killed: log exceeded 2 KiB (cap 1 KiB) at 110%"), "kill reason must be in the log tail");
+    // 100% warning happens only if a tick saw [100%,110%); the kill jump skips it
+    assert.ok(!logText.includes("approaching cap"), "no 100% warning when log jumps straight past 110%");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher does not surface the wall-clock 100% line (model self-manages it)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 64 * 1024 * 1024 }; // log far from cap
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      deps: {
+        now: () => budget.maxWallClockMs, // exactly 100% of the wall clock cap
+        stat: () => ({ size: 0 }),
+        setInterval: () => ({ unref() {} }) as never,
+        clearInterval: () => {},
+      },
+    });
+    assert.deepEqual(killed, [], "wall-clock warn must not kill");
+    const logText = fs.readFileSync(logPath, "utf8");
+    assert.ok(!logText.includes("[research-budget]"), "no runner warning for the wall-clock dimension (ADR 0003)");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher stops itself when the child has already exited", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const killed: string[] = [];
+    let scheduled = false;
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: 0,
+    };
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget: RESEARCH_BUDGETS.standard,
+      startedAt: 0,
+      deps: {
+        now: () => 0,
+        stat: () => ({ size: 10 * 1024 * 1024 }), // would kill if the child were alive
+        setInterval: () => {
+          scheduled = true;
+          return { unref() {} } as never;
+        },
+        clearInterval: () => {},
+      },
+    });
+    assert.deepEqual(killed, [], "an exited child must not be killed");
+    assert.ok(!scheduled, "no ticks must be scheduled for an already-exited child");
+    assert.ok(!fs.existsSync(findingsPath), "no termination marker for an exited child");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

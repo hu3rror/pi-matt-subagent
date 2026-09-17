@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { runBackgroundResearch, type AgentConfig } from "./lib.ts";
+import { runBackgroundResearch, RESEARCH_BUDGETS, type AgentConfig } from "./lib.ts";
 
 test("background research writes findings without blocking the caller (real detached spawn)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a2-e2e-"));
@@ -42,4 +42,90 @@ test("background research writes findings without blocking the caller (real deta
   assert.equal(fs.readFileSync(findingsPath, "utf8"), "E2E OK");
   assert.ok(fs.existsSync(handle.logPath), "research log should exist on disk");
   assert.equal(handle.findingsPath, findingsPath);
+});
+
+// Seam C — D4. A runaway researcher is a detached child that floods the log
+// beyond maxLogBytes; the watcher (with DEFAULT deps: real setInterval/stat)
+// must kill it and append the termination marker.
+test("a runaway researcher hitting the log cap is killed and marked (real detached spawn)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  // loop forever, writing ~64 KiB to stdout every 100ms: the redirected stdout
+  // becomes the research log, which grows past maxLogBytes quickly
+  const script = [
+    "let buf='x'.repeat(65536);",
+    "process.stdout.write(buf);",
+    "setInterval(() => process.stdout.write(buf), 100);",
+  ].join(" ");
+  const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "embedded", systemPrompt: "SP" }];
+  const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 128 * 1024, maxWallClockMs: 60_000 };
+
+  const handle = runBackgroundResearch(
+    { cwd: dir, task: "T", findingsPath, agents, budget },
+    // swap the pi invocation for a plain node process that floods its stdout
+    (_cmd, _args, opts) => spawn(process.execPath, ["-e", script, findingsPath], opts),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  // the child never writes findings; the watcher must create the file with the
+  // termination marker within the watch interval
+  const deadline = Date.now() + 15_000;
+  let text = "";
+  while (Date.now() < deadline) {
+    if (fs.existsSync(findingsPath)) {
+      text = fs.readFileSync(findingsPath, "utf8");
+      if (text.includes("research-terminated")) break;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.ok(text.includes("research-terminated"), "findings must carry the termination marker");
+  assert.ok(text.includes("reason: log_bytes_exceeded"), "reason must say which cap was exceeded");
+  assert.ok(text.includes("partial: true"));
+  assert.ok(text.includes("limit: 128 KiB"));
+  // observed is whatever the flood reached before the kill; require the shape
+  assert.match(text, /observed: \d+(\.\d+)? (KiB|MiB)/);
+  // the log tail carries the human-readable kill reason (ADR 0003)
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  assert.ok(logText.includes("[research-budget] killed: log exceeded"), "kill reason must be in the log tail");
+});
+
+// Seam C — D4. A researcher that neither writes findings nor exits is killed
+// by the wall-clock cap alone.
+test("a sleeping researcher is killed by the wall-clock cap and marked (real detached spawn)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  // run forever without writing anything
+  const script = "setInterval(() => {}, 1000);";
+  const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "embedded", systemPrompt: "SP" }];
+  const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 64 * 1024 * 1024, maxWallClockMs: 2000 };
+
+  const handle = runBackgroundResearch(
+    { cwd: dir, task: "T", findingsPath, agents, budget },
+    (_cmd, _args, opts) => spawn(process.execPath, ["-e", script], opts),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  // the watcher ticks every 2s: at ~2s it warns (100%), at ~4s it kills (110%)
+  const deadline = Date.now() + 15_000;
+  let text = "";
+  while (Date.now() < deadline) {
+    if (fs.existsSync(findingsPath)) {
+      text = fs.readFileSync(findingsPath, "utf8");
+      if (text.includes("research-terminated")) break;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.ok(text.includes("research-terminated"), "findings must carry the termination marker");
+  assert.ok(text.includes("reason: wall_clock_exceeded"), "reason must say which cap was exceeded");
+  assert.ok(text.includes("partial: true"));
+  assert.match(text, /limit: 2 s/);
+  assert.match(text, /observed: \d+(\.\d+)? s/);
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  assert.ok(logText.includes("[research-budget] killed: wall clock exceeded"), "kill reason must be in the log tail");
 });

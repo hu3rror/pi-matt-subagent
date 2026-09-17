@@ -34,11 +34,13 @@ import { Type } from "typebox";
 
 import {
   AGENT_SCOPES,
+  RESEARCH_BUDGET_TIERS,
   THINKING_LEVELS,
   buildDispatchArgs,
   discoverAgents,
   emptyUsage,
   getPiInvocation,
+  resolveEffectiveResearchBudget,
   resolveThinkingLevel,
   runBackgroundResearch,
   scopeAllowsProject,
@@ -47,7 +49,10 @@ import {
   type AgentSource,
   type AgentFrontmatter,
   type FrontmatterParser,
+  type ResearchBudgetTier,
   type ResearchHandle,
+  type ResearchBudget,
+  type ResearchBudgetOverrides,
   type UsageStats,
 } from "../src/lib.ts";
 
@@ -442,6 +447,17 @@ async function runSingleAgent(
 
 const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
 const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
+const BudgetTierSchema = Type.Union(RESEARCH_BUDGET_TIERS.map((b) => Type.Literal(b)));
+const BudgetOverridesSchema = Type.Object(
+  {
+    maxSearchRounds: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max search rounds." })),
+    maxFetchPages: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max total fetch pages." })),
+    maxFindingLines: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max findings lines." })),
+    maxLogBytes: Type.Optional(Type.Integer({ minimum: 1, description: "Hard: max log bytes (runner-enforced; may only tighten)." })),
+    maxWallClockMs: Type.Optional(Type.Integer({ minimum: 1, description: "Hard: max wall clock ms (runner-enforced; may only tighten)." })),
+  },
+  { additionalProperties: false },
+);
 
 const TaskItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -474,6 +490,8 @@ const ResearchParams = Type.Object({
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
   agentScope: Type.Optional(AgentScopeSchema),
   thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  budget: Type.Optional(BudgetTierSchema),
+  budgetOverrides: Type.Optional(BudgetOverridesSchema),
 });
 
 // ---------------------------------------------------------------------------
@@ -753,6 +771,7 @@ export default function (pi: ExtensionAPI) {
       "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, then read the returned findingsPath later to collect the results.",
       "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
       'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
+      "Budget (optional): `budget` picks the effort tier (standard | tight) and `budgetOverrides` adjusts individual caps — 3 soft (maxSearchRounds, maxFetchPages, maxFindingLines) written into the prompt, 2 hard (maxLogBytes, maxWallClockMs) enforced by the runner (killed at 110%). Hard overrides may only tighten.",
     ].join(" "),
     parameters: ResearchParams,
 
@@ -784,6 +803,18 @@ export default function (pi: ExtensionAPI) {
         thinkingOverride: params.thinkingLevel,
       });
 
+      let effectiveBudget: ResearchBudget;
+      try {
+        // every run carries a budget: call tier > role frontmatter tier > standard (ADR 0003)
+        effectiveBudget = resolveEffectiveResearchBudget({
+          tier: params.budget as ResearchBudgetTier | undefined,
+          roleTier: researcher?.budget,
+          overrides: params.budgetOverrides as ResearchBudgetOverrides | undefined,
+        });
+      } catch (err) {
+        return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }] };
+      }
+
       const handle = runBackgroundResearch({
         cwd: params.cwd ?? ctx.cwd,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -791,6 +822,7 @@ export default function (pi: ExtensionAPI) {
         tools: params.tools,
         task: params.task,
         findingsPath,
+        budget: effectiveBudget,
         availableToolNames,
         agents,
       });
