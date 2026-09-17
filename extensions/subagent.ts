@@ -36,11 +36,18 @@ import {
   AGENT_SCOPES,
   RESEARCH_BUDGET_TIERS,
   THINKING_LEVELS,
+  blockingRunStatus,
   buildDispatchArgs,
+  createRunRegistry,
   discoverAgents,
   emptyUsage,
+  formatRunSnapshot,
+  formatTokens,
   getPiInvocation,
+  isActiveRunStatus,
+  readLogTail,
   resolveEffectiveResearchBudget,
+  resolveResearchRunStatus,
   resolveThinkingLevel,
   runBackgroundResearch,
   scopeAllowsProject,
@@ -53,6 +60,7 @@ import {
   type ResearchHandle,
   type ResearchBudget,
   type ResearchBudgetOverrides,
+  type RunRegistry,
   type UsageStats,
 } from "../src/lib.ts";
 
@@ -65,13 +73,6 @@ const PER_TASK_OUTPUT_CAP = 50 * 1024;
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  return `${(count / 1000000).toFixed(1)}M`;
-}
 
 function formatUsageStats(
   usage: {
@@ -160,6 +161,32 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 
 function formatAgentList(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+}
+
+/**
+ * Last non-empty line of a text block (used for a run's live progress line).
+ */
+function lastLine(text: string): string | undefined {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] : undefined;
+}
+
+/**
+ * Keeps the footer count in sync with the run registry. Counts active runs
+ * (queued + running); clears the status when nothing is active. No-op
+ * without a UI (headless / print / json mode).
+ */
+function updateSubagentFooter(
+  ctx: { hasUI: boolean; ui: { setStatus: (key: string, value?: string) => void } },
+  registry: RunRegistry,
+): void {
+  if (!ctx.hasUI) return;
+  const active = registry.snapshot().filter((r) => isActiveRunStatus(r.status)).length;
+  if (active === 0) ctx.ui.setStatus("subagents", undefined);
+  else ctx.ui.setStatus("subagents", `⧗ ${active} subagent${active > 1 ? "s" : ""} running`);
 }
 
 /**
@@ -499,6 +526,35 @@ const ResearchParams = Type.Object({
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+  // D3 — in-session registry of every tracked subagent run (blocking +
+  // background). Cleared on session teardown so no stale state survives into
+  // a new session.
+  const subagentRuns = createRunRegistry();
+
+  pi.on("session_shutdown", () => {
+    subagentRuns.clear();
+  });
+
+  // D3 — unified overview of all tracked runs; use when idle to read the
+  // snapshot (blocking runs are not reachable mid-run by design, since input
+  // queues until the agent finishes).
+  pi.registerCommand("subagents", {
+    description: "List all tracked subagent runs (role, status, start time, last output)",
+    handler: async (_args, ctx) => {
+      // Background runs don't stream output through onUpdate; read their log
+      // tail live so the snapshot still shows a last-output line (spec: 每条
+      // 运行显示最后输出行).
+      const runs = subagentRuns.snapshot().map((r) => {
+        if (r.channel === "background" && !r.lastOutput && r.logPath) {
+          const tail = lastLine(readLogTail(r.logPath));
+          return tail ? { ...r, lastOutput: tail } : r;
+        }
+        return r;
+      });
+      ctx.ui.notify(formatRunSnapshot(runs), "info");
+    },
+  });
+
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
@@ -567,11 +623,21 @@ export default function (pi: ExtensionAPI) {
         for (let i = 0; i < params.chain.length; i++) {
           const step = params.chain[i];
           const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
+          const runId = subagentRuns.register({
+            role: step.agent,
+            source: agents.find((a) => a.name === step.agent)?.source ?? "unknown",
+            channel: "blocking",
+            status: "running",
+            startedAt: Date.now(),
+          });
+          updateSubagentFooter(ctx, subagentRuns);
 
           const chainUpdate: OnUpdate | undefined = onUpdate
             ? (partial) => {
                 const current = partial.details?.results[0];
                 if (current) {
+                  const out = getFinalOutput(current.messages);
+                  if (out) subagentRuns.update(runId, { lastOutput: lastLine(out), usage: current.usage });
                   onUpdate({
                     content: partial.content,
                     details: makeDetails([...results, current]),
@@ -580,17 +646,30 @@ export default function (pi: ExtensionAPI) {
               }
             : undefined;
 
-          const result = await runSingleAgent(
-            ctx.cwd,
-            dispatchDefaults,
-            agents,
-            { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
-            signal,
-            chainUpdate,
-            makeDetails,
-            availableToolNames,
-          );
+          let result: SingleResult;
+          try {
+            result = await runSingleAgent(
+              ctx.cwd,
+              dispatchDefaults,
+              agents,
+              { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
+              signal,
+              chainUpdate,
+              makeDetails,
+              availableToolNames,
+            );
+          } catch (err) {
+            subagentRuns.update(runId, { status: "aborted" });
+            updateSubagentFooter(ctx, subagentRuns);
+            throw err;
+          }
           results.push(result);
+          subagentRuns.update(runId, {
+            status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
+            lastOutput: lastLine(getFinalOutput(result.messages)),
+            usage: result.usage,
+          });
+          updateSubagentFooter(ctx, subagentRuns);
 
           if (isFailedResult(result)) {
             return {
@@ -603,6 +682,7 @@ export default function (pi: ExtensionAPI) {
           }
           previousOutput = getFinalOutput(result.messages);
         }
+
         return {
           content: [
             { type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" },
@@ -625,6 +705,18 @@ export default function (pi: ExtensionAPI) {
         }
 
         const allResults: SingleResult[] = new Array(params.tasks.length);
+        // D3: pre-register every task as queued; each flips to running when
+        // its concurrency slot actually opens (inside the map worker).
+        const runIds: string[] = params.tasks.map((t) =>
+          subagentRuns.register({
+            role: t.agent,
+            source: agents.find((a) => a.name === t.agent)?.source ?? "unknown",
+            channel: "blocking",
+            status: "queued",
+            startedAt: Date.now(),
+          }),
+        );
+        updateSubagentFooter(ctx, subagentRuns);
         for (let i = 0; i < params.tasks.length; i++) {
           allResults[i] = {
             agent: params.tasks[i].agent,
@@ -649,26 +741,61 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
-        const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-          const result = await runSingleAgent(
-            ctx.cwd,
-            dispatchDefaults,
-            agents,
-            { agentName: t.agent, task: t.task, cwd: t.cwd },
-            signal,
-            (partial) => {
-              if (partial.details?.results[0]) {
-                allResults[index] = partial.details.results[0];
-                emitParallelUpdate();
-              }
-            },
-            makeDetails,
-            availableToolNames,
-          );
-          allResults[index] = result;
-          emitParallelUpdate();
-          return result;
-        });
+        let results: SingleResult[];
+        try {
+          results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
+            subagentRuns.update(runIds[index], { status: "running" });
+            updateSubagentFooter(ctx, subagentRuns);
+            let result: SingleResult;
+            try {
+              result = await runSingleAgent(
+                ctx.cwd,
+                dispatchDefaults,
+                agents,
+                { agentName: t.agent, task: t.task, cwd: t.cwd },
+                signal,
+                (partial) => {
+                  if (partial.details?.results[0]) {
+                    const current = partial.details.results[0];
+                    allResults[index] = current;
+                    const out = getFinalOutput(current.messages);
+                    if (out) subagentRuns.update(runIds[index], { lastOutput: lastLine(out), usage: current.usage });
+                    emitParallelUpdate();
+                  }
+                },
+                makeDetails,
+                availableToolNames,
+              );
+            } catch (err) {
+              subagentRuns.update(runIds[index], { status: "aborted" });
+              updateSubagentFooter(ctx, subagentRuns);
+              throw err;
+            }
+            allResults[index] = result;
+            subagentRuns.update(runIds[index], {
+              status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
+              lastOutput: lastLine(getFinalOutput(result.messages)),
+              usage: result.usage,
+            });
+            updateSubagentFooter(ctx, subagentRuns);
+            emitParallelUpdate();
+            return result;
+          });
+        } catch (err) {
+          // An abort surfaces here (user Esc). Leftover workers never started:
+          // their runs sit in queued (active). Mark every still-active run
+          // aborted so the footer stops counting them and /subagents shows the
+          // truth instead of zombie queued entries (spec: queued may be
+          // aborted directly — card cancelled before its slot opens).
+          for (const id of runIds) {
+            const r = subagentRuns.get(id);
+            if (r && isActiveRunStatus(r.status)) {
+              subagentRuns.update(id, { status: "aborted" });
+            }
+          }
+          updateSubagentFooter(ctx, subagentRuns);
+          throw err;
+        }
 
         const successCount = results.filter((r) => !isFailedResult(r)).length;
         const summaries = results.map((r) => {
@@ -690,16 +817,45 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (hasSingle && params.agent && params.task) {
-        const result = await runSingleAgent(
-          ctx.cwd,
-          dispatchDefaults,
-          agents,
-          { agentName: params.agent, task: params.task, cwd: params.cwd },
-          signal,
-          onUpdate,
-          makeDetails,
-          availableToolNames,
-        );
+        const runId = subagentRuns.register({
+          role: params.agent,
+          source: agents.find((a) => a.name === params.agent)?.source ?? "unknown",
+          channel: "blocking",
+          status: "running",
+          startedAt: Date.now(),
+        });
+        updateSubagentFooter(ctx, subagentRuns);
+        let result: SingleResult;
+        try {
+          result = await runSingleAgent(
+            ctx.cwd,
+            dispatchDefaults,
+            agents,
+            { agentName: params.agent, task: params.task, cwd: params.cwd },
+            signal,
+            (partial) => {
+              // live progress: keep the registry's last output current
+              const current = partial.details?.results[0];
+              if (current) {
+                const out = getFinalOutput(current.messages);
+                if (out) subagentRuns.update(runId, { lastOutput: lastLine(out), usage: current.usage });
+              }
+              onUpdate?.(partial);
+            },
+            makeDetails,
+            availableToolNames,
+          );
+        } catch (err) {
+          subagentRuns.update(runId, { status: "aborted" });
+          updateSubagentFooter(ctx, subagentRuns);
+          throw err;
+        }
+        subagentRuns.update(runId, {
+          status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
+          lastOutput: lastLine(getFinalOutput(result.messages)),
+          usage: result.usage,
+        });
+        updateSubagentFooter(ctx, subagentRuns);
         if (isFailedResult(result)) {
           return {
             content: [
@@ -815,6 +971,16 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }] };
       }
 
+      const runId = subagentRuns.register({
+        role: "researcher",
+        source: researcher?.source ?? "embedded",
+        channel: "background",
+        status: "running",
+        startedAt: Date.now(),
+        findingsPath,
+      });
+      updateSubagentFooter(ctx, subagentRuns);
+
       const handle = runBackgroundResearch({
         cwd: params.cwd ?? ctx.cwd,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -825,7 +991,32 @@ export default function (pi: ExtensionAPI) {
         budget: effectiveBudget,
         availableToolNames,
         agents,
+        // The watcher fires this on natural exit and on hard-cap kill (after
+        // the termination marker is on disk); resolve the run to its terminal
+        // status and refresh the footer.
+        onExit: (info) => {
+          let findingsText: string | undefined;
+          try {
+            findingsText = fs.readFileSync(findingsPath, "utf8");
+          } catch {
+            /* findings not written yet */
+          }
+          subagentRuns.update(runId, {
+            status: resolveResearchRunStatus({ killed: info.killed, exitCode: info.exitCode, findingsText }),
+          });
+          updateSubagentFooter(ctx, subagentRuns);
+        },
       });
+      // logPath is only known after the runner allocates its tmp dir. The
+      // watcher's first check() is synchronous, so the run may already be
+      // terminal (frozen) by the time we get here — a failed update must not
+      // surface as a tool error.
+      try {
+        subagentRuns.update(runId, { logPath: handle.logPath });
+      } catch {
+        /* run already frozen by onExit */
+      }
+      updateSubagentFooter(ctx, subagentRuns);
 
       return {
         content: [

@@ -129,3 +129,83 @@ test("a sleeping researcher is killed by the wall-clock cap and marked (real det
   const logText = fs.readFileSync(handle.logPath, "utf8");
   assert.ok(logText.includes("[research-budget] killed: wall clock exceeded"), "kill reason must be in the log tail");
 });
+
+// Seam C — D3. The watcher's onExit callback fires for a real detached child
+// that exits on its own (natural path) AND for one killed by a hard cap
+// (kill path, marker already on disk). Earlier unit tests cover the wiring;
+// this proves it end-to-end with a real spawn.
+test("background watcher reports onExit for a naturally-exiting child (real detached spawn)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d3-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const script = "const fs=require('node:fs');setTimeout(()=>fs.writeFileSync(process.argv[1],'E2E OK','utf8'),200);";
+  const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "embedded", systemPrompt: "SP" }];
+
+  let exitInfo: { killed: boolean; exitCode: number | null } | undefined;
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents,
+      budget: { ...RESEARCH_BUDGETS.standard, maxLogBytes: 64 * 1024 * 1024, maxWallClockMs: 60_000 },
+      onExit: (info) => {
+        exitInfo = info;
+      },
+    },
+    (_cmd, _args, opts) => spawn(process.execPath, ["-e", script, findingsPath], opts),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && !exitInfo) {
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.ok(exitInfo, "onExit must fire when the detached child exits");
+  assert.equal(exitInfo!.killed, false);
+  assert.equal(exitInfo!.exitCode, 0);
+  assert.equal(fs.readFileSync(findingsPath, "utf8"), "E2E OK");
+});
+
+test("background watcher reports onExit with killed:true after a hard-cap kill (real detached spawn)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d3-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const script = "setInterval(()=>process.stdout.write('x'.repeat(65536)),100);";
+  const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "embedded", systemPrompt: "SP" }];
+  const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 128 * 1024, maxWallClockMs: 60_000 };
+
+  let exitInfo: { killed: boolean; exitCode: number | null } | undefined;
+  let markerSeenAtCallback = false;
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents,
+      budget,
+      onExit: (info) => {
+        exitInfo = info;
+        if (fs.existsSync(findingsPath)) {
+          markerSeenAtCallback = fs.readFileSync(findingsPath, "utf8").includes("research-terminated");
+        }
+      },
+    },
+    (_cmd, _args, opts) => spawn(process.execPath, ["-e", script], opts),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && !exitInfo) {
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.ok(exitInfo, "onExit must fire when the watcher kills the child");
+  assert.equal(exitInfo!.killed, true);
+  assert.ok(markerSeenAtCallback, "termination marker must be on disk before onExit fires");
+  const text = fs.readFileSync(findingsPath, "utf8");
+  assert.ok(text.includes("research-terminated"));
+});

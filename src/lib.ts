@@ -467,6 +467,16 @@ export interface ResearchRunOptions {
   budget?: ResearchBudget;
   /** Injectable timer/stat/append deps for the watcher (tests). */
   watcherDeps?: ResearchWatcherDeps;
+  /** Fired (best-effort) when the background child exits or is killed. */
+  onExit?: (info: ResearchExitInfo) => void;
+}
+
+/** The research child's exit, as observed by the runner's watcher. */
+export interface ResearchExitInfo {
+  /** True when the run was killed by a hard cap (vs. a natural exit). */
+  killed: boolean;
+  /** Exit code on natural exit; null on a kill. */
+  exitCode: number | null;
 }
 
 /**
@@ -616,6 +626,7 @@ export function runBackgroundResearch(
       budget: opts.budget,
       startedAt: nowFn(),
       deps: opts.watcherDeps,
+      onExit: opts.onExit,
     });
   }
 
@@ -772,7 +783,7 @@ export function formatCapValue(cap: ResearchHardCap, value: number): string {
 export function appendResearchTerminationMarker(findingsPath: string, data: TerminationMarkerData): void {
   const reasons = data.entries.map((e) => REASON_LABELS[e.cap]);
   const lines = [
-    "<!-- research-terminated",
+    `<!-- ${RESEARCH_TERMINATED_MARKER}`,
     `reason: ${reasons.join(", ")}`,
     "partial: true",
     `limit: ${data.entries.map((e) => formatCapValue(e.cap, e.limit)).join(", ")}`,
@@ -781,6 +792,291 @@ export function appendResearchTerminationMarker(findingsPath: string, data: Term
     "-->",
   ];
   fs.appendFileSync(findingsPath, `\n${lines.join("\n")}\n`, "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Run registry (D3)
+//   In-process registry of every tracked subagent run — blocking (single /
+//   parallel / chain steps) and background (research) alike — plus the pure
+//   display layer (`formatRunSnapshot`) and the outcome mappings used by the
+//   extension to move runs to their terminal status. Zero pi-runtime imports
+//   so it is testable with `node --test`.
+// ---------------------------------------------------------------------------
+
+export const RUN_STATUSES = ["queued", "running", "succeeded", "failed", "aborted", "terminated"] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
+export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running"];
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = ["succeeded", "failed", "aborted", "terminated"];
+
+export function isActiveRunStatus(status: RunStatus): boolean {
+  return (ACTIVE_RUN_STATUSES as readonly string[]).includes(status);
+}
+
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * The legal status transitions. A queued run may be aborted before its slot
+ * opens; a running run may terminate into any terminal status.
+ */
+const RUN_STATUS_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
+  queued: ["running", "aborted"],
+  running: ["succeeded", "failed", "aborted", "terminated"],
+  succeeded: [],
+  failed: [],
+  aborted: [],
+  terminated: [],
+};
+
+/** The marker string the runner appends to a hard-capped run's findings file. */
+export const RESEARCH_TERMINATED_MARKER = "research-terminated";
+
+/**
+ * One tracked run. `channel` is which of the two plugin channels spawned it:
+ * blocking (subagent tool) or background (research tool). Display fields are
+ * optional and channel-dependent: blocking runs carry usage; background runs
+ * carry findings/log paths.
+ */
+export interface RunEntry {
+  id: string;
+  role: string;
+  source: AgentSource;
+  channel: "blocking" | "background";
+  status: RunStatus;
+  startedAt: number;
+  lastOutput?: string;
+  usage?: UsageStats;
+  findingsPath?: string;
+  logPath?: string;
+}
+
+export type RunPatch = Partial<Omit<RunEntry, "id" | "status">> & { status?: RunStatus };
+
+export interface RunRegistry {
+  register(entry: Omit<RunEntry, "id">): string;
+  update(id: string, patch: RunPatch): void;
+  get(id: string): RunEntry | undefined;
+  /** All entries in insertion order (unsorted). */
+  list(): RunEntry[];
+  snapshot(): RunEntry[];
+  clear(): void;
+}
+
+/**
+ * In-process registry of subagent runs. Terminal runs are frozen: any further
+ * update throws, and illegal transitions throw without mutating. `snapshot`
+ * returns a detached, startedAt-ascending copy for display.
+ */
+export function createRunRegistry(): RunRegistry {
+  const runs = new Map<string, RunEntry>();
+  let nextId = 1;
+
+  const register = (entry: Omit<RunEntry, "id">): string => {
+    const id = `run-${nextId++}`;
+    runs.set(id, { ...entry, id, status: entry.status ?? "queued" });
+    return id;
+  };
+
+  const update = (id: string, patch: RunPatch): void => {
+    const run = runs.get(id);
+    if (!run) return;
+    if (isTerminalRunStatus(run.status)) {
+      throw new Error(`run ${id} is terminal (${run.status}); updates are frozen`);
+    }
+    const next = patch.status ?? run.status;
+    if (next !== run.status && !RUN_STATUS_TRANSITIONS[run.status].includes(next)) {
+      throw new Error(`illegal status transition ${run.status} -> ${next} for run ${id}`);
+    }
+    runs.set(id, { ...run, ...patch, status: next });
+  };
+
+  const snapshot = (): RunEntry[] =>
+    Array.from(runs.values())
+      .map((r) => ({ ...r, usage: r.usage ? { ...r.usage } : undefined }))
+      .sort((a, b) => a.startedAt - b.startedAt);
+
+  return {
+    register,
+    update,
+    get: (id) => runs.get(id),
+    list: () => Array.from(runs.values()),
+    snapshot,
+    clear: () => runs.clear(),
+  };
+}
+
+/** The display icon per status (frozen mapping). */
+export const RUN_STATUS_ICONS: Record<RunStatus, string> = {
+  queued: "⏳",
+  running: "▶",
+  succeeded: "✓",
+  failed: "✗",
+  aborted: "⊘",
+  terminated: "⛔",
+};
+
+/** Formats the elapsed duration since `startedAt` (reuses formatDuration). */
+function formatElapsed(startedAt: number, now: number): string {
+  return formatDuration(Math.max(0, now - startedAt));
+}
+
+/** Human-readable start time: local HH:MM:SS. */
+function formatStartTime(startedAt: number): string {
+  const d = new Date(startedAt);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+/** Human-readable usage line for one blocking run. */
+export function formatRunUsage(usage: UsageStats): string {
+  const parts: string[] = [];
+  if (usage.turns) parts.push(`${usage.turns} turns`);
+  if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+  if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+  if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+  if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+  return parts.join(" ");
+}
+
+/** Human-readable token count (shared with the extension's renderer). */
+export function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000000).toFixed(1)}M`;
+}
+
+/**
+ * Renders one run as a display row: icon + role (source) + status label +
+ * started time + elapsed, then indented detail lines when present.
+ */
+function formatRunRow(run: RunEntry, now: number): string[] {
+  const icon = RUN_STATUS_ICONS[run.status];
+  const header = `${icon} ${run.role} (${run.source}) [${run.status}] — started ${formatStartTime(
+    run.startedAt,
+  )}, ${formatElapsed(run.startedAt, now)}`;
+  const lines = [header];
+  if (run.lastOutput) {
+    // keep the progress line to one display line (spec: "最后输出行（截断）")
+    const oneLine = run.lastOutput.split(/\s+/).join(" ").trim();
+    lines.push(`  last: ${oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine}`);
+  }
+  if (run.usage) {
+    const u = formatRunUsage(run.usage);
+    if (u) lines.push(`  usage: ${u}`);
+  }
+  if (run.findingsPath) lines.push(`  findings: ${run.findingsPath}`);
+  if (run.logPath) lines.push(`  log: ${run.logPath}`);
+  return lines;
+}
+
+/**
+ * Renders the registry snapshot as display text: empty-state message, or
+ * running runs first then finished runs, each group sorted by start time.
+ */
+export function formatRunSnapshot(runs: RunEntry[], now: number = Date.now()): string {
+  if (runs.length === 0) return "No subagents running.";
+  const byStart = (a: RunEntry, b: RunEntry) => a.startedAt - b.startedAt;
+  const active = runs.filter((r) => isActiveRunStatus(r.status)).sort(byStart);
+  const finished = runs.filter((r) => isTerminalRunStatus(r.status)).sort(byStart);
+  const sections: string[] = [];
+  if (active.length > 0) {
+    sections.push("[running]", ...active.flatMap((r) => formatRunRow(r, now)));
+  }
+  if (finished.length > 0) {
+    sections.push("[finished]", ...finished.flatMap((r) => formatRunRow(r, now)));
+  }
+  return sections.join("\n");
+}
+
+/**
+ * Injectable file-system surface for readLogTail (tests substitute fakes).
+ */
+export interface LogTailFs {
+  statSync: (p: string) => { size: number };
+  openSync: (p: string, flag: string) => number;
+  readSync: (fd: number, buf: Buffer, offset: number, length: number, position: number) => number;
+  closeSync: (fd: number) => void;
+}
+
+const defaultLogTailFs: LogTailFs = {
+  statSync: (p) => fs.statSync(p),
+  openSync: (p, flag) => fs.openSync(p, flag),
+  readSync: (fd, buf, offset, length, position) => fs.readSync(fd, buf, offset, length, position),
+  closeSync: (fd) => fs.closeSync(fd),
+};
+
+/**
+ * Reads the last `maxBytes` of a log file, dropping a partial leading line
+ * (the tail is meant to be read as whole lines). Missing/empty files are
+ * safe and return "". `fsImpl` is injectable for tests.
+ */
+export function readLogTail(logPath: string, maxBytes = 4096, fsImpl: LogTailFs = defaultLogTailFs): string {
+  let fd: number | undefined;
+  try {
+    const size = fsImpl.statSync(logPath).size;
+    if (size === 0) return "";
+    const start = Math.max(0, size - maxBytes);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    fd = fsImpl.openSync(logPath, "r");
+    fsImpl.readSync(fd, buf, 0, len, start);
+    let text = buf.toString("utf8");
+    if (start > 0) {
+      // We sliced into the middle of the file: drop the partial first line.
+      const newline = text.indexOf("\n");
+      if (newline >= 0) text = text.slice(newline + 1);
+    }
+    return text.replace(/\s+$/, "");
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fsImpl.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * Maps a blocking single-result to its run status. Mirrors isFailedResult
+ * semantics (nonzero exit / error stop reason) plus the abort flag the
+ * runner sets when the user cancels.
+ */
+export function blockingRunStatus(result: {
+  exitCode: number;
+  stopReason?: string;
+  aborted?: boolean;
+}): RunStatus {
+  if (result.aborted) return "aborted";
+  if (result.stopReason === "aborted") return "aborted";
+  if (result.exitCode !== 0 || result.stopReason === "error") return "failed";
+  return "succeeded";
+}
+
+/**
+ * Maps a background research child's exit info to its run status: a hard-cap
+ * kill with the termination marker on disk is `terminated`; a kill without
+ * the marker, or any nonzero natural exit, is `failed`; a clean exit is
+ * `succeeded`.
+ */
+export function resolveResearchRunStatus(info: {
+  killed: boolean;
+  exitCode: number | null;
+  findingsText?: string;
+}): RunStatus {
+  if (info.killed) {
+    return info.findingsText?.includes(RESEARCH_TERMINATED_MARKER) ? "terminated" : "failed";
+  }
+  return info.exitCode === 0 ? "succeeded" : "failed";
 }
 
 // ---------------------------------------------------------------------------
@@ -801,6 +1097,7 @@ export interface StartResearchWatcherOptions {
   budget: ResearchBudget;
   startedAt: number;
   deps?: ResearchWatcherDeps;
+  onExit?: (info: ResearchExitInfo) => void;
 }
 
 const RESEARCH_WATCH_INTERVAL_MS = 2000;
@@ -840,6 +1137,7 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
   const check = () => {
     if (stopped) return;
     if (opts.child.exitCode !== null) {
+      opts.onExit?.({ exitCode: opts.child.exitCode, killed: false });
       stop();
       return;
     }
@@ -867,6 +1165,9 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
         )
         .join("; ");
       append(opts.logPath, `\n[research-budget] killed: ${reasons}\n`);
+      // Tell the caller (the run registry) the child is gone. Runs after the
+      // termination marker so a killed-vs-failed decision can read it.
+      opts.onExit?.({ exitCode: null, killed: true });
       stop();
       return;
     }

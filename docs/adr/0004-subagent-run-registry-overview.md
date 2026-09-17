@@ -1,0 +1,17 @@
+# Subagent runs are tracked in a session-scoped in-process registry, surfaced by footer + command
+
+Running subagents were invisible: blocking calls only showed the currently-running tool card's stream (no aggregate view, no per-task progress in parallel), and background research returned a handle with zero tracking afterwards. Every subagent run (blocking single/parallel/chain tasks and background research) is now registered in a **session-scoped in-process registry** (src/lib.ts `createRunRegistry`) with a frozen status enum (`queued / running / succeeded / failed / aborted / terminated`) and transition guardrails: terminal runs are frozen, illegal transitions throw. Two visibility entries: a footer counter (`⧗ N subagents running`, refreshed on every registry change, visible during blocking runs because the extension code runs on the `onUpdate` stream) and a `/subagents` command (idle-only — during blocking runs input is queued by pi, which is inherent to the design). Background research terminal status is resolved by the runner's existing budget watcher via an `onExit` callback (natural exit → exitCode 0 = succeeded / non-zero = failed; hard-cap kill → `terminated`, distinguished from failed by the `research-terminated` marker being on disk before the callback fires — ADR 0003's marker, D3's status model, exactly the handoff ADR 0003's consequences reserved).
+
+## Considered options
+
+- **跨会话持久化（pi.appendEntry / 落盘）** — survives `/new` and restarts, but "运行中" is a session concept: after a session ends the child is detached and the main process can't update it anyway; persistence would freeze stale states and add an entry-write on every transition. Rejected for v1; listed as an enhancement in the spec's Out of Scope.
+- **Queries accessible to the main agent (a lookup tool)** — would let the LLM ask "is research done?" instead of polling findings files. Rejected for v1: the research/wayfinder skills already poll findings paths, and a query tool would complicate the background semantics; listed as an enhancement.
+- **TUI panel / editor widget / keyboard shortcut** — richer than a footer counter, but a persistent panel occupies screen space and needs invalidate plumbing; a shortcut collides with a busy keybinding table. Rejected for v1 in favour of footer + command.
+- **Workspace-global registry (module-level, not per-session)** — a module-level Map would survive extension reloads and leak runs across sessions. Rejected: the registry is created per extension instance and cleared on `session_shutdown`.
+
+## Consequences
+
+- The status enum corrects TODO D3's original `pending / running / blocked / failed / aborted` (also the reader's first look at the plan will expect `blocked`, which has no real counterpart here — no retries, no provider waits). `pending` became `queued` (parallel tasks waiting for a `MAX_CONCURRENCY` slot), `blocked` was deleted, and `terminated` was added for hard-cap kills.
+- The blocking and background channels share one registry but update it differently: blocking pushes every `onUpdate` (live last-output line + token usage), background only resolves at exit (its progress line is read live from the log tail when `/subagents` runs, via `readLogTail`).
+- The footer counter counts active runs (queued + running); it's a no-op without a UI (`ctx.hasUI` guard).
+- Enforcement of "running is session-scoped" is best-effort: if the main process dies, background children keep running detached (as before) but their registry entries freeze at the last known status.

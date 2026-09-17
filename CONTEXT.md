@@ -59,3 +59,15 @@ _Avoid_: rabbit hole, 打转
 **够用即停**:
 researcher 的停止规则：信息足够回答问题时立即收尾写 findings，不追源码/实现细节。由 budget 的 prompt 文案显式强调。
 _Avoid_: saturation, 信息饱和
+
+**run registry（运行注册表）**:
+进程内统一追踪每个 subagent 运行（blocking 的 single/parallel/chain 每任务一条 + background research 一条）的状态表：role、source、channel、status、startedAt、最后输出行、token 用量（blocking 侧）、findings/log 路径（background 侧）。会话内概念，`session_shutdown` 时清空。驱动 footer 计数与 `/subagents` 命令两条可见性入口。
+_Avoid_: session store, 状态表
+
+**run status（运行状态）**:
+一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`terminated` 是 background research 被 hard cap 击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+_Avoid_: pending, blocked, 状态机
+
+**subagent overview（运行总览）**:
+用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为。
+_Avoid_: status panel, 面板

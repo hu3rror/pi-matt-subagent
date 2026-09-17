@@ -5,26 +5,35 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   appendResearchTerminationMarker,
+  blockingRunStatus,
   buildResearchArgs,
   buildResearchPrompt,
+  createRunRegistry,
   discoverAgents,
   emptyUsage,
   evaluateResearchRun,
+  formatRunSnapshot,
+  readLogTail,
   RESEARCH_BUDGETS,
   resolveEffectiveResearchBudget,
   resolveResearchBudget,
+  resolveResearchRunStatus,
   resolveRole,
   resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
+  RUN_STATUS_ICONS,
+  RUN_STATUSES,
   scopeAllowsProject,
   startResearchWatcher,
   TOOL_ALIASES,
   type AgentConfig,
   type FrontmatterParser,
+  type LogTailFs,
   type ResearchBudgetOverrides,
   type ResearchBudgetTier,
   type ResearchChild,
+  type RunEntry,
 } from "./lib.ts";
 
 const stubParser: FrontmatterParser = (content) => {
@@ -1018,4 +1027,348 @@ test("startResearchWatcher stops itself when the child has already exited", () =
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// S15 — startResearchWatcher onExit (D3). The runner must tell the caller
+// when the child is done, both on natural exit and on a hard-cap kill, with
+// the marker written before the kill-path callback fires (the caller
+// distinguishes terminated from failed by the marker).
+test("startResearchWatcher calls onExit with killed:false when the child exits naturally", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: () => true,
+      exitCode: 0,
+    };
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget: RESEARCH_BUDGETS.standard,
+      startedAt: 0,
+      deps: {
+        now: () => 0,
+        stat: () => ({ size: 0 }),
+        setInterval: () => ({ unref() {} }) as never,
+        clearInterval: () => {},
+      },
+      onExit: (info) => exits.push(info),
+    });
+    assert.deepEqual(exits, [{ exitCode: 0, killed: false }], "natural exit must be reported exactly once");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher calls onExit with killed:true after a hard-cap kill, marker first", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    const killed: string[] = [];
+    let markerSeenAtCallback = false;
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
+    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      deps: {
+        now: () => 0,
+        stat: () => ({ size: 4096 }), // 4x cap -> kill on the immediate check
+        setInterval: () => ({ unref() {} }) as never,
+        clearInterval: () => {},
+      },
+      onExit: (info) => {
+        markerSeenAtCallback = fs.existsSync(findingsPath) && fs.readFileSync(findingsPath, "utf8").includes("research-terminated");
+        exits.push(info);
+      },
+    });
+    assert.deepEqual(killed, ["SIGKILL"]);
+    assert.deepEqual(exits, [{ exitCode: null, killed: true }], "kill must be reported exactly once");
+    assert.ok(markerSeenAtCallback, "the termination marker must be on disk before onExit fires");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// S16 — run registry (D3, Seam A). The status enum is frozen as a literal;
+// terminal states are frozen (no further updates); transitions are guarded.
+test("RUN_STATUSES freezes the D3 status enum", () => {
+  assert.deepEqual(RUN_STATUSES, ["queued", "running", "succeeded", "failed", "aborted", "terminated"]);
+});
+
+test("createRunRegistry registers a run, defaulting to queued, and returns its id", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "researcher", source: "embedded", channel: "background", startedAt: 1000 });
+  const run = reg.get(id);
+  assert.ok(run);
+  assert.equal(run.id, id);
+  assert.equal(run.status, "queued");
+  assert.equal(run.role, "researcher");
+  assert.equal(run.channel, "background");
+  assert.equal(run.startedAt, 1000);
+});
+
+test("createRunRegistry assigns distinct ids", () => {
+  const reg = createRunRegistry();
+  const a = reg.register({ role: "a", source: "embedded", channel: "blocking", startedAt: 0 });
+  const b = reg.register({ role: "b", source: "embedded", channel: "blocking", startedAt: 0 });
+  assert.notEqual(a, b);
+});
+
+test("register honors an explicit initial status", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "background", startedAt: 0, status: "running" });
+  assert.equal(reg.get(id)?.status, "running");
+});
+
+test("update mutates fields and follows legal transitions", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0 });
+  reg.update(id, { status: "running", lastOutput: "working..." });
+  reg.update(id, { status: "succeeded", usage: emptyUsage() });
+  const run = reg.get(id);
+  assert.equal(run?.status, "succeeded");
+  assert.equal(run?.lastOutput, "working...");
+  assert.ok(run?.usage);
+});
+
+test("update throws on a terminal run (frozen)", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(id, { status: "succeeded" });
+  assert.throws(() => reg.update(id, { status: "failed" }), /terminal/);
+  assert.throws(() => reg.update(id, { lastOutput: "late" }), /terminal/);
+});
+
+test("update rejects an illegal status transition", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0 });
+  // queued must pass through running before reaching a terminal state
+  assert.throws(() => reg.update(id, { status: "succeeded" }), /transition/);
+  assert.equal(reg.get(id)?.status, "queued", "failed transition must not corrupt the run");
+});
+
+test("running may terminate into any terminal status", () => {
+  const reg = createRunRegistry();
+  for (const s of ["succeeded", "failed", "aborted", "terminated"] as const) {
+    const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+    reg.update(id, { status: s });
+    assert.equal(reg.get(id)?.status, s);
+  }
+});
+
+test("queued may be aborted directly (call cancelled before the slot opens)", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0 });
+  reg.update(id, { status: "aborted" });
+  assert.equal(reg.get(id)?.status, "aborted");
+});
+
+test("snapshot returns a startedAt-ascending copy detached from the registry", () => {
+  const reg = createRunRegistry();
+  const a = reg.register({ role: "a", source: "embedded", channel: "blocking", startedAt: 300 });
+  const b = reg.register({ role: "b", source: "embedded", channel: "blocking", startedAt: 100 });
+  const snap = reg.snapshot();
+  assert.deepEqual(snap.map((r) => r.role), ["b", "a"]);
+  snap[0].role = "mutated";
+  assert.equal(reg.get(b)?.role, "b", "snapshot must not alias registry state");
+});
+
+test("list returns entries in insertion order", () => {
+  const reg = createRunRegistry();
+  const a = reg.register({ role: "a", source: "embedded", channel: "blocking", startedAt: 300 });
+  const b = reg.register({ role: "b", source: "embedded", channel: "blocking", startedAt: 100 });
+  assert.deepEqual(reg.list().map((r) => r.role), ["a", "b"], "list is insertion-ordered, unlike snapshot");
+});
+
+test("clear empties the registry", () => {
+  const reg = createRunRegistry();
+  reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0 });
+  reg.clear();
+  assert.deepEqual(reg.snapshot(), []);
+});
+
+test("get returns undefined for an unknown id", () => {
+  const reg = createRunRegistry();
+  assert.equal(reg.get("nope"), undefined);
+});
+
+test("RUN_STATUS_ICONS freezes the icon mapping", () => {
+  assert.deepEqual(RUN_STATUS_ICONS, {
+    queued: "⏳",
+    running: "▶",
+    succeeded: "✓",
+    failed: "✗",
+    aborted: "⊘",
+    terminated: "⛔",
+  });
+});
+
+// S17 — snapshot formatting (D3, display layer). Pure text, grouped
+// running-before-finished, startedAt-ascending within a group.
+test("formatRunSnapshot returns an empty-state message for no runs", () => {
+  assert.equal(formatRunSnapshot([], 1000), "No subagents running.");
+});
+
+test("formatRunSnapshot groups running before finished, sorted by start time", () => {
+  const runs: RunEntry[] = [
+    { id: "a", role: "spec-reviewer", source: "embedded", channel: "blocking", status: "succeeded", startedAt: 300 },
+    { id: "b", role: "researcher", source: "embedded", channel: "background", status: "running", startedAt: 100 },
+    { id: "c", role: "fact-finder", source: "embedded", channel: "blocking", status: "failed", startedAt: 200 },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  const runningIdx = text.indexOf("[running]");
+  const finishedIdx = text.indexOf("[finished]");
+  assert.ok(runningIdx >= 0 && finishedIdx > runningIdx, "running group must come before finished");
+  assert.ok(text.indexOf("researcher") < text.indexOf("spec-reviewer"), "running group sorts by start time");
+  assert.ok(text.indexOf("fact-finder") < text.indexOf("spec-reviewer"), "finished group sorts by start time");
+});
+
+test("formatRunSnapshot renders role, source, status, elapsed, and start time per run", () => {
+  const runs: RunEntry[] = [
+    { id: "a", role: "researcher", source: "user", channel: "background", status: "running", startedAt: 0 },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  assert.ok(text.includes("▶"), "running icon");
+  assert.ok(text.includes("researcher (user)"), "role + source");
+  assert.ok(text.includes("[running]"), "status label");
+  assert.ok(text.includes("1 s"), "elapsed 1000ms");
+  assert.ok(text.includes("started"), "start time marker");
+});
+
+test("formatRunSnapshot renders last output, usage, and paths when present", () => {
+  const runs: RunEntry[] = [
+    {
+      id: "a",
+      role: "researcher",
+      source: "embedded",
+      channel: "background",
+      status: "running",
+      startedAt: 0,
+      lastOutput: "Investigating...",
+      findingsPath: "/tmp/f.md",
+      logPath: "/tmp/research.log",
+      usage: { input: 1200, output: 800, cacheRead: 0, cacheWrite: 0, cost: 0.0012, contextTokens: 2000, turns: 3 },
+    },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  assert.ok(text.includes("Investigating..."), "last output line");
+  assert.ok(text.includes("3 turns"), "usage turns");
+  assert.ok(text.includes("↑1.2k"), "usage input");
+  assert.ok(text.includes("↓800"), "usage output");
+  assert.ok(text.includes("$0.0012"), "usage cost");
+  assert.ok(text.includes("/tmp/f.md"), "findings path");
+  assert.ok(text.includes("/tmp/research.log"), "log path");
+});
+
+test("formatRunSnapshot collapses and truncates an over-long last output to one line", () => {
+  const long = Array.from({ length: 200 }, (_, i) => `word${i}`).join(" ");
+  const runs: RunEntry[] = [
+    { id: "a", role: "researcher", source: "embedded", channel: "background", status: "running", startedAt: 0, lastOutput: long },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  const lastOutputLine = text.split("\n")[2]; // [running] / header / last:
+  const output = lastOutputLine.slice("  last: ".length);
+  assert.ok(lastOutputLine.startsWith("  last: "), "last output is a single indented line");
+  assert.ok(output.length <= 120, `last output must be capped, got ${output.length}`);
+  assert.ok(output.endsWith("..."), "over-long output is truncated");
+  assert.ok(!output.includes("word99"), "far tail is cut");
+});
+
+// S18 — readLogTail (D3). Last maxBytes of a log file, partial leading line
+// dropped, missing file safe.
+test("readLogTail returns the last lines of a log file, truncated to maxBytes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  try {
+    fs.writeFileSync(logPath, "line1\nline2\nline3\n");
+    const tail = readLogTail(logPath, 7); // "line3\n" is 6 bytes; a 7-byte window grabs it whole
+    assert.equal(tail, "line3");
+    assert.ok(!tail.includes("line1"), "old lines must not appear");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readLogTail returns the full text for a small file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  try {
+    fs.writeFileSync(logPath, "hello\nworld\n");
+    assert.equal(readLogTail(logPath, 4096), "hello\nworld");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readLogTail is safe for a missing or empty file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  try {
+    assert.equal(readLogTail(path.join(dir, "nope.log"), 4096), "");
+    fs.writeFileSync(path.join(dir, "empty.log"), "");
+    assert.equal(readLogTail(path.join(dir, "empty.log"), 4096), "");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readLogTail honors an injected fs surface", () => {
+  const calls: string[] = [];
+  const fakeFs: LogTailFs = {
+    statSync: () => {
+      calls.push("stat");
+      return { size: 10 };
+    },
+    openSync: () => {
+      calls.push("open");
+      return 3;
+    },
+    readSync: (fd, buf) => {
+      calls.push("read");
+      return buf.write("last line".padEnd(buf.length, " "));
+    },
+    closeSync: () => {
+      calls.push("close");
+    },
+  };
+  const tail = readLogTail("/virtual/log", 4096, fakeFs);
+  assert.equal(tail, "last line");
+  assert.deepEqual(calls, ["stat", "open", "read", "close"], "fs calls go through the injected surface");
+});
+
+// S19 — outcome mapping (D3). blockingRunStatus mirrors isFailedResult
+// semantics + the abort flag; resolveResearchRunStatus maps watcher exit
+// info, distinguishing terminated (kill + marker) from failed.
+test("blockingRunStatus maps a single result to a run status", () => {
+  assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "end" }), "succeeded");
+  assert.equal(blockingRunStatus({ exitCode: 0 }), "succeeded");
+  assert.equal(blockingRunStatus({ exitCode: 1 }), "failed");
+  assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "error" }), "failed");
+  assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "aborted" }), "aborted");
+  assert.equal(blockingRunStatus({ exitCode: 1, aborted: true }), "aborted", "abort wins over exit code");
+});
+
+test("resolveResearchRunStatus maps watcher exit info to a run status", () => {
+  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0 }), "succeeded");
+  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1 }), "failed");
+  assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "<!-- research-terminated" }), "terminated");
+  assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "# no marker" }), "failed", "kill without marker is a failure");
 });
