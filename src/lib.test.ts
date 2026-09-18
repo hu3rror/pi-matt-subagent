@@ -8,11 +8,14 @@ import {
   blockingRunStatus,
   buildResearchArgs,
   buildResearchPrompt,
+  cleanupAbortIntents,
   createRunRegistry,
   discoverAgents,
   emptyUsage,
   evaluateResearchRun,
   formatRunSnapshot,
+  killProcessGroup,
+  parseSubagentsArgs,
   readLogTail,
   RESEARCH_BUDGETS,
   resolveEffectiveResearchBudget,
@@ -1584,4 +1587,156 @@ test("resolveResearchRunStatus maps watcher exit info to a run status", () => {
   assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1 }), "failed");
   assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "<!-- research-terminated" }), "terminated");
   assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "# no marker" }), "failed", "kill without marker is a failure");
+});
+
+// S20 — run management (D6, ADR 0009): pid/remove, killProcessGroup, args, aborted, intents.
+test("createRunRegistry stores an optional pid on a registered run", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({
+    role: "researcher",
+    source: "embedded",
+    channel: "background",
+    startedAt: 0,
+    status: "running",
+    pid: 4242,
+  });
+  assert.equal(reg.get(id)?.pid, 4242);
+  const noPid = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  assert.equal(reg.get(noPid)?.pid, undefined, "pid is optional and absent by default");
+});
+
+test("createRunRegistry remove drops the entry and is safe for unknown ids", () => {
+  const reg = createRunRegistry();
+  const a = reg.register({ role: "a", source: "embedded", channel: "blocking", startedAt: 0, status: "succeeded" });
+  const b = reg.register({ role: "b", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.remove(a);
+  assert.equal(reg.get(a), undefined);
+  assert.deepEqual(reg.list().map((r) => r.id), [b]);
+  assert.equal(reg.snapshot().length, 1, "snapshot reflects the removal");
+  assert.doesNotThrow(() => reg.remove("nope"));
+});
+
+test("killProcessGroup sends SIGKILL to the negative pid on POSIX", () => {
+  const signals: Array<[number, string]> = [];
+  killProcessGroup(4242, {
+    platform: "linux",
+    kill: (pid, sig) => {
+      signals.push([pid, sig]);
+      return true;
+    },
+  });
+  assert.deepEqual(signals, [[-4242, "SIGKILL"]]);
+});
+
+test("killProcessGroup swallows ESRCH as success (process already gone)", () => {
+  const err = Object.assign(new Error("no such process"), { code: "ESRCH" });
+  assert.doesNotThrow(() =>
+    killProcessGroup(4242, {
+      platform: "linux",
+      kill: () => {
+        throw err;
+      },
+    }),
+  );
+});
+
+test("killProcessGroup rethrows a non-ESRCH kill error", () => {
+  const err = Object.assign(new Error("permission denied"), { code: "EPERM" });
+  assert.throws(() =>
+    killProcessGroup(4242, {
+      platform: "linux",
+      kill: () => {
+        throw err;
+      },
+    }),
+  );
+});
+
+test("killProcessGroup runs taskkill /T /F on win32 and treats a gone process as success", () => {
+  const calls: string[][] = [];
+  assert.doesNotThrow(() =>
+    killProcessGroup(4242, {
+      platform: "win32",
+      kill: () => {
+        throw new Error("must not use process.kill on win32");
+      },
+      spawnSync: (cmd, args) => {
+        calls.push([cmd, ...args]);
+        return { status: 128 }; // taskkill: no such process
+      },
+    }),
+  );
+  assert.deepEqual(calls, [["taskkill", "/pid", "4242", "/T", "/F"]]);
+});
+
+test("killProcessGroup rethrows a failed taskkill invocation", () => {
+  assert.throws(
+    () =>
+      killProcessGroup(4242, {
+        platform: "win32",
+        kill: () => {
+          throw new Error("must not use process.kill on win32");
+        },
+        spawnSync: () => ({ status: null, error: new Error("ENOENT: taskkill not found") }),
+      }),
+    /taskkill not found/,
+  );
+});
+
+test("parseSubagentsArgs maps the four command forms and rejects the rest", () => {
+  assert.deepEqual(parseSubagentsArgs(""), { action: "snapshot" });
+  assert.deepEqual(parseSubagentsArgs("   "), { action: "snapshot" });
+  assert.deepEqual(parseSubagentsArgs("snapshot"), { action: "snapshot" });
+  assert.deepEqual(parseSubagentsArgs("snapshot extra"), {
+    action: "invalid",
+    reason: "unexpected extra arguments: extra",
+  });
+  assert.deepEqual(parseSubagentsArgs("prune"), { action: "prune" });
+  assert.deepEqual(parseSubagentsArgs("kill run-3"), { action: "kill", id: "run-3" });
+  assert.deepEqual(parseSubagentsArgs("tail run-3"), { action: "tail", id: "run-3" });
+  assert.deepEqual(parseSubagentsArgs("kill"), { action: "invalid", reason: "kill requires a run id" });
+  assert.deepEqual(parseSubagentsArgs("tail"), { action: "invalid", reason: "tail requires a run id" });
+  assert.deepEqual(parseSubagentsArgs("prune extra"), { action: "invalid", reason: "unexpected extra arguments: extra" });
+  assert.deepEqual(parseSubagentsArgs("kill run-3 extra"), {
+    action: "invalid",
+    reason: "unexpected extra arguments: extra",
+  });
+  assert.deepEqual(parseSubagentsArgs("bogus"), { action: "invalid", reason: 'unknown action "bogus"' });
+});
+
+test("resolveResearchRunStatus honors an explicit abort over all exit info", () => {
+  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0, aborted: true }), "aborted");
+  assert.equal(
+    resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "<!-- research-terminated", aborted: true }),
+    "aborted",
+  );
+  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1, aborted: true }), "aborted");
+  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0 }), "succeeded", "no aborted flag keeps old semantics");
+});
+
+test("cleanupAbortIntents drops intents for terminal or missing runs, keeps active ones", () => {
+  const runs: RunEntry[] = [
+    { id: "r1", role: "researcher", source: "embedded", channel: "background", status: "running", startedAt: 0 },
+    { id: "r2", role: "researcher", source: "embedded", channel: "background", status: "aborted", startedAt: 0 },
+    { id: "r3", role: "researcher", source: "embedded", channel: "background", status: "queued", startedAt: 0 },
+  ];
+  const kept = cleanupAbortIntents(new Set(["r1", "r2", "r3", "gone"]), runs);
+  assert.deepEqual([...kept].sort(), ["r1", "r3"], "queued is active; terminal and missing ids are dropped");
+});
+
+test("runBackgroundResearch exposes the spawned child pid on the handle", (t) => {
+  const fakeSpawn = () => ({
+    unref() {},
+    kill: () => true,
+    exitCode: null as number | null,
+    pid: 7777,
+  });
+  const handle = runBackgroundResearch(
+    { cwd: "/w", task: "T", findingsPath: "/tmp/f.md", agents: [embeddedResearcher()] },
+    fakeSpawn as never,
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.equal(handle.pid, 7777);
 });

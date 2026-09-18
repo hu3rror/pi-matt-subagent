@@ -81,9 +81,14 @@ _Avoid_: saturation, 信息饱和
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
-一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`terminated` 是 background research 被硬上限击杀的终态——收尾宽限到期仍未自然退出，或 log 维度 110% 兜底触发（靠 findings 里的 `research-terminated` marker 判定）；宽限内自然退出则记 succeeded。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`aborted` 是用户主动终止——blocking 期间 Esc 整体中止，或空闲时手动 kill 一个 running 的 background research（见 run management）；`terminated` 严格保留给 background research 被硬上限击杀的终态——收尾宽限到期仍未自然退出，或 log 维度 110% 兜底触发（靠 findings 里的 `research-terminated` marker 判定），手动 kill 从不记作 terminated；宽限内自然退出则记 succeeded。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+_Avoid_: pending, blocked, 状态机
+
+**run management（运行管理）**:
+用户对 run registry 的可操作面，v1 三个动作：kill（手动终止 running 的 background research，终态 aborted）、prune（移除全部已结束 run 的注册记录，文件保留在 tmp）、tail（读取 research.log 末尾，沿用 readLogTail 的字节上限）。入口是 `/subagents` 命令本身：无参弹 interactive menu，带参直接操作。硬约束：blocking 期间命令不可达，可管理的活动 run 只有 background research——blocking 任务的中止仍是 Esc 整体终止，不经本语义。
+_Avoid_: 管理面板, panel
 _Avoid_: pending, blocked, 状态机
 
 **subagent overview（运行总览）**:
-用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为。
+用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为；`/subagents` 同时是 run management 的入口（无参菜单 / 带参直操作）。
 _Avoid_: status panel, 面板

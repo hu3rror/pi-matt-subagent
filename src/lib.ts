@@ -10,7 +10,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn, type SpawnOptions } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -530,6 +530,8 @@ export interface ResearchHandle {
   researchId: string;
   findingsPath: string;
   logPath: string;
+  /** The spawned child's pid, present on a real spawn (D6: kill target). */
+  pid?: number;
 }
 
 /**
@@ -542,6 +544,8 @@ export interface ResearchChild {
   kill(signal?: string): boolean;
   /** null while the child is still running; set once it has exited. */
   exitCode: number | null;
+  /** The spawned child's pid (D6: kill target); fakes may omit it. */
+  pid?: number;
 }
 
 export type SpawnFn = (
@@ -635,7 +639,7 @@ export function runBackgroundResearch(
     });
   }
 
-  return { researchId, findingsPath: opts.findingsPath, logPath };
+  return { researchId, findingsPath: opts.findingsPath, logPath, pid: proc.pid };
 }
 
 // ---------------------------------------------------------------------------
@@ -882,6 +886,8 @@ export interface RunEntry {
   usage?: UsageStats;
   findingsPath?: string;
   logPath?: string;
+  /** The spawned child's pid (background runs only; the /subagents kill target). */
+  pid?: number;
 }
 
 export type RunPatch = Partial<Omit<RunEntry, "id" | "status">> & { status?: RunStatus };
@@ -890,6 +896,8 @@ export interface RunRegistry {
   register(entry: Omit<RunEntry, "id">): string;
   update(id: string, patch: RunPatch): void;
   get(id: string): RunEntry | undefined;
+  /** Drops an entry entirely (prune); no frozen guards — the caller picks which runs are removable. */
+  remove(id: string): void;
   /** All entries in insertion order (unsorted). */
   list(): RunEntry[];
   snapshot(): RunEntry[];
@@ -938,6 +946,9 @@ export function createRunRegistry(now: () => number = Date.now): RunRegistry {
     register,
     update,
     get: (id) => runs.get(id),
+    remove: (id) => {
+      runs.delete(id);
+    },
     list: () => Array.from(runs.values()),
     snapshot,
     clear: () => runs.clear(),
@@ -1111,11 +1122,94 @@ export function resolveResearchRunStatus(info: {
   killed: boolean;
   exitCode: number | null;
   findingsText?: string;
+  /** D6: a manual kill (abortIntent) is the authoritative "who killed it" — beats every exit signal. */
+  aborted?: boolean;
 }): RunStatus {
+  if (info.aborted) return "aborted";
   if (info.killed) {
     return info.findingsText?.includes(RESEARCH_TERMINATED_MARKER) ? "terminated" : "failed";
   }
   return info.exitCode === 0 ? "succeeded" : "failed";
+}
+
+// ---------------------------------------------------------------------------
+// Run management (D6)
+//   Manual kill / prune / tail plumbing that lives in the pure layer so it is
+//   testable under `node --test`; the extension wires it to the /subagents
+//   command. Kill semantics are frozen by ADR 0009: a manual kill resolves to
+//   aborted (never terminated — that stays marker-based), kills the whole
+//   process tree hard (platform split), and treats an already-gone process as
+//   success.
+// ---------------------------------------------------------------------------
+
+export interface KillProcessGroupDeps {
+  /** Test override; defaults to process.platform. */
+  platform?: NodeJS.Platform;
+  /** Test override; defaults to process.kill. */
+  kill?: (pid: number, signal: string) => boolean;
+  /** Test override; defaults to a real taskkill invocation (win32 only). */
+  spawnSync?: (command: string, args: string[]) => { status: number | null; error?: Error } | undefined;
+}
+
+/**
+ * Hard-kill of the research process tree (ADR 0009): the child is detached,
+ * so POSIX signals the group via -pid and Windows reaps via taskkill /T /F;
+ * an already-gone process (ESRCH / nonzero taskkill status) is success.
+ */
+export function killProcessGroup(pid: number, deps: KillProcessGroupDeps = {}): void {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    const run = deps.spawnSync ?? ((cmd: string, args: string[]) => spawnSync(cmd, args, { stdio: "ignore" }));
+    const result = run("taskkill", ["/pid", String(pid), "/T", "/F"]);
+    // Nonzero taskkill status means "already gone" (success); a failed invocation is the only real error.
+    if (result?.error) throw result.error;
+    return;
+  }
+  const kill = deps.kill ?? process.kill;
+  try {
+    kill(-pid, "SIGKILL");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+  }
+}
+
+export type SubagentsCommand =
+  | { action: "snapshot" }
+  | { action: "kill"; id: string }
+  | { action: "tail"; id: string }
+  | { action: "prune" }
+  | { action: "invalid"; reason: string };
+
+/** Parses the /subagents argument string into a command the handler can dispatch. */
+export function parseSubagentsArgs(args: string): SubagentsCommand {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { action: "snapshot" };
+  const [verb, ...rest] = parts;
+  if (verb === "snapshot") {
+    if (rest.length > 0) return { action: "invalid", reason: `unexpected extra arguments: ${rest.join(" ")}` };
+    return { action: "snapshot" };
+  }
+  if (verb === "prune") {
+    if (rest.length > 0) return { action: "invalid", reason: `unexpected extra arguments: ${rest.join(" ")}` };
+    return { action: "prune" };
+  }
+  if (verb === "kill" || verb === "tail") {
+    if (rest.length === 0) return { action: "invalid", reason: `${verb} requires a run id` };
+    if (rest.length > 1) return { action: "invalid", reason: `unexpected extra arguments: ${rest.slice(1).join(" ")}` };
+    return { action: verb, id: rest[0] };
+  }
+  return { action: "invalid", reason: `unknown action "${verb}"` };
+}
+
+/** Keeps intents for still-active runs — prune-time consistency cleanup for never-settled kills (ADR 0009). */
+export function cleanupAbortIntents(intents: ReadonlySet<string>, runs: readonly RunEntry[]): Set<string> {
+  const byId = new Map(runs.map((r) => [r.id, r]));
+  const kept = new Set<string>();
+  for (const id of intents) {
+    const run = byId.get(id);
+    if (run && isActiveRunStatus(run.status)) kept.add(id);
+  }
+  return kept;
 }
 
 // ---------------------------------------------------------------------------

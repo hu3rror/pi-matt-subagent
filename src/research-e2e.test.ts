@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
-import { runBackgroundResearch, RESEARCH_BUDGETS, type AgentConfig } from "./lib.ts";
+import { spawn, type ChildProcess } from "node:child_process";
+import { killProcessGroup, runBackgroundResearch, RESEARCH_BUDGETS, type AgentConfig } from "./lib.ts";
 
 test("background research writes findings without blocking the caller (real detached spawn)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a2-e2e-"));
@@ -209,4 +209,66 @@ test("background watcher reports onExit with killed:true after a hard-cap kill (
   assert.ok(markerSeenAtCallback, "termination marker must be on disk before onExit fires");
   const text = fs.readFileSync(findingsPath, "utf8");
   assert.ok(text.includes("research-terminated"));
+});
+
+// Seam C — D6 (ADR 0009): killProcessGroup must reap a real detached tree
+// (child + grandchild) on the current platform's kill branch. The child's own
+// exit is read from its handle because a signal-killed child stays
+// zombie-visible to pid(0); the orphaned grandchild is reaped by init.
+test("killProcessGroup reaps a detached research process tree (real spawn)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d6-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const grandPidPath = path.join(dir, "grand.pid");
+  // the research child spawns a sleeping node grandchild, records its pid,
+  // then sleeps forever itself
+  const script = `
+    const fs = require('node:fs');
+    const { spawn } = require('node:child_process');
+    const grand = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    fs.writeFileSync(process.argv[1], String(grand.pid), 'utf8');
+    setInterval(()=>{},1000);
+  `;
+  const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "embedded", systemPrompt: "SP" }];
+  let researchProc: ChildProcess | undefined;
+  const handle = runBackgroundResearch(
+    { cwd: dir, task: "T", findingsPath, agents },
+    (_cmd, _args, opts) => {
+      researchProc = spawn(process.execPath, ["-e", script, grandPidPath], opts);
+      return researchProc;
+    },
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.ok(handle.pid, "the handle must expose the child pid");
+
+  // wait for the grandchild pid file, then confirm both processes are alive
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && !fs.existsSync(grandPidPath)) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(fs.existsSync(grandPidPath), "the grandchild must have been spawned");
+  const grandPid = Number(fs.readFileSync(grandPidPath, "utf8"));
+  assert.ok(Number.isInteger(grandPid) && grandPid > 0, `invalid grandchild pid ${grandPid}`);
+  const childAlive = () => researchProc?.exitCode === null && researchProc?.signalCode === null;
+  const grandAlive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.ok(childAlive(), "research child must be alive before the kill");
+  assert.ok(grandAlive(grandPid), "grandchild must be alive before the kill");
+
+  killProcessGroup(handle.pid!);
+
+  const goneDeadline = Date.now() + 10_000;
+  while (Date.now() < goneDeadline && (childAlive() || grandAlive(grandPid))) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(!childAlive(), "research child must be reaped");
+  assert.ok(!grandAlive(grandPid), "grandchild must be reaped with the research process tree");
 });

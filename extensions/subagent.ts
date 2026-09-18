@@ -38,6 +38,7 @@ import {
   THINKING_LEVELS,
   blockingRunStatus,
   buildDispatchArgs,
+  cleanupAbortIntents,
   createRunRegistry,
   discoverAgents,
   emptyUsage,
@@ -45,11 +46,15 @@ import {
   formatTokens,
   getPiInvocation,
   isActiveRunStatus,
+  isTerminalRunStatus,
+  killProcessGroup,
+  parseSubagentsArgs,
   readLogTail,
   resolveEffectiveResearchBudget,
   resolveResearchRunStatus,
   resolveThinkingLevel,
   runBackgroundResearch,
+  RUN_STATUS_ICONS,
   scopeAllowsProject,
   type AgentConfig,
   type AgentScope,
@@ -60,6 +65,7 @@ import {
   type ResearchHandle,
   type ResearchBudget,
   type ResearchBudgetOverrides,
+  type RunEntry,
   type RunRegistry,
   type UsageStats,
 } from "../src/lib.ts";
@@ -530,28 +536,154 @@ export default function (pi: ExtensionAPI) {
   // background). Cleared on session teardown so no stale state survives into
   // a new session.
   const subagentRuns = createRunRegistry();
+  // D6 — kill intent pre-registered before the signal so the watcher's onExit resolves to aborted, not failed.
+  let abortIntents = new Set<string>();
 
   pi.on("session_shutdown", () => {
     subagentRuns.clear();
+    abortIntents.clear();
   });
 
   // D3 — unified overview of all tracked runs; use when idle to read the
   // snapshot (blocking runs are not reachable mid-run by design, since input
   // queues until the agent finishes).
+  // D6 — /subagents surface: kill needs a live pid (never re-kill a finished run — PID reuse), prune is terminal-only, tail is byte-capped.
+  type SubagentsUi = {
+    hasUI: boolean;
+    ui: {
+      select(title: string, options: string[]): Promise<string | undefined>;
+      confirm(title: string, message: string): Promise<boolean>;
+      notify(message: string, type?: "info" | "warning" | "error"): void;
+      setStatus(key: string, text: string | undefined): void;
+    };
+  };
+
+  const MENU_SNAPSHOT = "📋 Snapshot";
+  const MENU_KILL = "⛔ Kill…";
+  const MENU_PRUNE = "🗑 Prune finished";
+  const MENU_TAIL = "📄 Tail log…";
+
+  const showSnapshot = (ctx: SubagentsUi) => {
+    const runs = subagentRuns.snapshot().map((r) => {
+      if (r.channel === "background" && !r.lastOutput && r.logPath) {
+        const tail = lastLine(readLogTail(r.logPath));
+        return tail ? { ...r, lastOutput: tail } : r;
+      }
+      return r;
+    });
+    ctx.ui.notify(formatRunSnapshot(runs), "info");
+  };
+
+  const runLabel = (r: RunEntry) => `${r.id} · ${RUN_STATUS_ICONS[r.status]} ${r.role} (${r.source})`;
+  const runRef = (r: RunEntry) => `${r.id} (${r.role})`;
+  const isKillable = (r: RunEntry) => r.status === "running" && r.pid != null;
+
+  const killRun = async (id: string, ctx: SubagentsUi) => {
+    const run = subagentRuns.get(id);
+    if (!run) {
+      ctx.ui.notify(`No run "${id}".`, "error");
+      return;
+    }
+    if (!isKillable(run)) {
+      ctx.ui.notify(`${runRef(run)} is not a killable running process.`, "error");
+      return;
+    }
+    if (ctx.hasUI) {
+      const ok = await ctx.ui.confirm("Kill subagent run?", `Kill ${runRef(run)}? Partial findings stay on disk.`);
+      if (!ok) return;
+    }
+    abortIntents.add(id);
+    try {
+      killProcessGroup(run.pid);
+    } catch (err) {
+      abortIntents.delete(id);
+      ctx.ui.notify(`Failed to kill ${runRef(run)}: ${(err as Error).message}`, "error");
+      return;
+    }
+    ctx.ui.notify(`Kill signal sent to ${runRef(run)}; status settles when the watcher observes the exit.`, "info");
+  };
+
+  const tailRun = (id: string, ctx: SubagentsUi) => {
+    const run = subagentRuns.get(id);
+    if (!run) {
+      ctx.ui.notify(`No run "${id}".`, "error");
+      return;
+    }
+    if (!run.logPath) {
+      ctx.ui.notify(`${runRef(run)} has no log to tail — only background runs keep a log file.`, "error");
+      return;
+    }
+    const tail = readLogTail(run.logPath);
+    ctx.ui.notify(tail ? `Log tail of ${runRef(run)}:\n${tail}` : `(empty log for ${id})`, "info");
+  };
+
+  const pruneFinishedRuns = async (ctx: SubagentsUi) => {
+    const terminal = subagentRuns.snapshot().filter((r) => isTerminalRunStatus(r.status));
+    if (terminal.length === 0) {
+      ctx.ui.notify("Nothing to prune — no finished runs.", "info");
+      return;
+    }
+    if (ctx.hasUI) {
+      const ok = await ctx.ui.confirm(
+        "Prune finished runs?",
+        `Remove ${terminal.length} finished run record(s)? Findings/log files stay on disk.`,
+      );
+      if (!ok) return;
+    }
+    for (const r of terminal) subagentRuns.remove(r.id);
+    abortIntents = cleanupAbortIntents(abortIntents, subagentRuns.list());
+    updateSubagentFooter(ctx, subagentRuns);
+    ctx.ui.notify(`Pruned ${terminal.length} finished run(s).`, "info");
+  };
+
+  const pickRun = async (
+    ctx: SubagentsUi,
+    title: string,
+    eligible: RunEntry[],
+  ): Promise<string | undefined> => {
+    if (eligible.length === 0) {
+      ctx.ui.notify("Nothing eligible for that action right now.", "info");
+      return undefined;
+    }
+    const choice = await ctx.ui.select(title, eligible.map(runLabel));
+    if (!choice) return undefined;
+    return choice.split(" · ")[0];
+  };
+
+  const openMenu = async (ctx: SubagentsUi) => {
+    const choice = await ctx.ui.select("Manage subagents", [MENU_SNAPSHOT, MENU_KILL, MENU_PRUNE, MENU_TAIL]);
+    if (!choice) return;
+    if (choice === MENU_SNAPSHOT) return showSnapshot(ctx);
+    if (choice === MENU_KILL) {
+      const id = await pickRun(
+        ctx,
+        "Kill which run?",
+        subagentRuns.snapshot().filter(isKillable),
+      );
+      if (id) await killRun(id, ctx);
+      return;
+    }
+    if (choice === MENU_PRUNE) return pruneFinishedRuns(ctx);
+    const id = await pickRun(ctx, "Tail which run?", subagentRuns.snapshot().filter((r) => r.logPath != null));
+    if (id) tailRun(id, ctx);
+  };
+
   pi.registerCommand("subagents", {
-    description: "List all tracked subagent runs (role, status, start time, last output)",
-    handler: async (_args, ctx) => {
-      // Background runs don't stream output through onUpdate; read their log
-      // tail live so the snapshot still shows a last-output line (spec: 每条
-      // 运行显示最后输出行).
-      const runs = subagentRuns.snapshot().map((r) => {
-        if (r.channel === "background" && !r.lastOutput && r.logPath) {
-          const tail = lastLine(readLogTail(r.logPath));
-          return tail ? { ...r, lastOutput: tail } : r;
-        }
-        return r;
-      });
-      ctx.ui.notify(formatRunSnapshot(runs), "info");
+    description:
+      "List and manage tracked subagent runs: no args opens the menu; snapshot, kill <id>, tail <id>, prune run directly",
+    handler: async (args, ctx) => {
+      const argText = args ?? "";
+      if (!argText.trim()) {
+        // non-TUI modes have no menu: fall back to the snapshot
+        if (!ctx.hasUI) return showSnapshot(ctx);
+        return openMenu(ctx);
+      }
+      const cmd = parseSubagentsArgs(argText);
+      if (cmd.action === "invalid") return ctx.ui.notify(cmd.reason, "error");
+      if (cmd.action === "snapshot") return showSnapshot(ctx);
+      if (cmd.action === "prune") return pruneFinishedRuns(ctx);
+      if (cmd.action === "kill") return killRun(cmd.id, ctx);
+      tailRun(cmd.id, ctx);
     },
   });
 
@@ -995,24 +1127,31 @@ export default function (pi: ExtensionAPI) {
         // the termination marker is on disk); resolve the run to its terminal
         // status and refresh the footer.
         onExit: (info) => {
+          // D6 — the watcher sees a signal kill as a plain exit; the intent keeps it aborted, not failed.
+          const aborted = abortIntents.has(runId);
+          if (aborted) abortIntents.delete(runId);
           let findingsText: string | undefined;
           try {
             findingsText = fs.readFileSync(findingsPath, "utf8");
           } catch {
             /* findings not written yet */
           }
-          subagentRuns.update(runId, {
-            status: resolveResearchRunStatus({ killed: info.killed, exitCode: info.exitCode, findingsText }),
-          });
+          try {
+            subagentRuns.update(runId, {
+              status: resolveResearchRunStatus({ killed: info.killed, exitCode: info.exitCode, findingsText, aborted }),
+            });
+          } catch {
+            /* run already terminal (frozen elsewhere) — the first terminal wins */
+          }
           updateSubagentFooter(ctx, subagentRuns);
         },
       });
-      // logPath is only known after the runner allocates its tmp dir. The
-      // watcher's first check() is synchronous, so the run may already be
-      // terminal (frozen) by the time we get here — a failed update must not
-      // surface as a tool error.
+      // logPath and pid are only known after the runner allocates its tmp dir
+      // and spawns the child. The watcher's first check() is synchronous, so
+      // the run may already be terminal (frozen) by the time we get here — a
+      // failed update must not surface as a tool error.
       try {
-        subagentRuns.update(runId, { logPath: handle.logPath });
+        subagentRuns.update(runId, { logPath: handle.logPath, pid: handle.pid });
       } catch {
         /* run already frozen by onExit */
       }
