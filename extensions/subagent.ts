@@ -610,7 +610,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!run.logPath) {
-      ctx.ui.notify(`${runRef(run)} has no log to tail — only background runs keep a log file.`, "error");
+      ctx.ui.notify(`${runRef(run)} has no log to show — only background runs keep a log file.`, "error");
       return;
     }
     const tail = readLogTail(run.logPath);
