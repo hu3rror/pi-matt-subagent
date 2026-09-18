@@ -1,34 +1,29 @@
-# TODO
+# TODO → 归档索引
 
-本插件（`pi-matt-subagent`）的待办事项，按「未验证 → 可修 → 可增强 → 实战验证」分档。勾选即完成；如需可拆成 issue。
+本文件已不再承载待办内容：所有条目均已实现，并迁移为 GitHub issues / ADR 作为定位记录（本地 Markdown 会污染 AI 上下文，检索请走 issue tracker / `docs/adr/`）。
 
-## A. 未验证的代码路径
+## 条目映射
 
-- [x] **A1 — `chain` 模式**：顺序执行 + `{previous}` 占位符传递整条分支未 smoke（只验证过 single/parallel）。需一次链式调用确认上下文逐级传递、失败即停。 — ✅ 已 smoke：顺序执行正常；第 2 步 task 中的 `{previous}` 已完成替换、子进程正常启动；因 provider 429 限流在第 2 步失败并按设计中断（`Chain stopped at step 2`）。成功路径的 `{previous}` 输出逐级传递仍缺一次完整观测。
-- [x] **A2 — 后台 `research`**：detached 落盘 + log 文件句柄是独立代码路径，从未实测。需确认子进程真的后台跑完并写出 findings 文件、父进程立即返回 handle。 — ✅ 以 TDD 完成（预确认 seam A/B/C）：`buildResearchArgs` 与 `runBackgroundResearch`（spawn 可注入）从扩展移入 `src/lib.ts`，扩展去重为纯消费者；新增 8 个测试（Seam A ×5 命令装配、Seam B ×2 spawn 语义 + role 缺失抛错、Seam C ×1 真实后台落盘：调用方 <800ms 返回 / 子进程睡 1000ms / findings 含 `E2E OK`），全量 21/21；tmpdir 泄漏已清（e2e 曾漏删 `pi-research-*`）。真实 pi 冒烟仍待限流缓解后另测（触发即 `research` 工具 + 轮询 findings 文件）。
-- [x] **A3 — project-agent 信任确认弹窗**：需 untrusted 项目 + TUI，未触发过（`ctx.ui.confirm` 分支）。 — ✅ 全验证。TUI 实测（`cd %TEMP%\a3-test-project` → `agentScope=both` 调 `a3-probe`）：① 弹窗出现（`Run project-local agents?` 列出 agent + 来源目录）；② 选 No → 返回 `Canceled: project-local agents not approved.`，子代理不执行；③ 重试批准 → `✓ a3-probe (project) A3 OK`，结果标注 `source=project`。发现逻辑：`both`/`project` scope 可发现 project agent，`user` 排除（单元已验证）。headless（`hasUI=false`）绕过确认直接执行（安全注意点）。**修正**：`ctx.ui.confirm` 是逐次授权，**不写 `trust.json`**（每次调用都会弹）；写 `trust.json` 的是 pi 内置的首次进入项目信任流程。
-- [x] **A4 — 错误路径**：子代理失败（非零退出 / `stopReason=error` / `aborted`）的报错文案与 `isError` 传播未验证。 — ✅ 已验证：并行 2 任务遇 429 → 报告 `1/2 succeeded` + `failed (error)` + 原始错误体；链式失败步返回 `isError: true` 并附 `Chain stopped at step N` 文案。`aborted`（用户中断）分支仍未测。另：并行多任务会加剧 provider 限流（4 并发下 429 频发）。
+| 原条目 | 载体 | 定位 |
+|---|---|---|
+| A1 chain 模式 smoke 验证 | Issue [#3](https://github.com/hu3rror/pi-matt-subagent/issues/3) | `{previous}` 逐级传递 + 失败即停 |
+| A2 后台 research 验证（Seam A/B/C） | Issue [#4](https://github.com/hu3rror/pi-matt-subagent/issues/4) | lib.ts 重构 + 8 测试，commit `797b5e1` |
+| A3 project-agent 信任确认弹窗 | Issue [#5](https://github.com/hu3rror/pi-matt-subagent/issues/5) + ADR 0007 | `ctx.ui.confirm` 逐次授权、不写 trust.json |
+| A4 错误路径验证 | Issue [#6](https://github.com/hu3rror/pi-matt-subagent/issues/6) | 429/error 报错 + isError 传播 |
+| B1 后台 prompt 装配统一 | [ADR 0006](docs/adr/0006-background-prompt-file-assembly.md) | 统一 `--append-system-prompt`，role 内容不进 argv |
+| B2 research 暴露 agentScope | [ADR 0007](docs/adr/0007-research-agentscope-trust-confirm.md) | `agentScope` + `confirmProjectAgents` 共用 |
+| C1 `pi install -l` 验证 | Issue [#7](https://github.com/hu3rror/pi-matt-subagent/issues/7) | slash command 发现；TUI 部分待验 |
+| C2 测试命令固化 + parse 守卫 | Issue [#8](https://github.com/hu3rror/pi-matt-subagent/issues/8) | `npm test` + `stripTypeScriptTypes` 守卫 |
+| D1 thinkingLevel 继承 | [ADR 0005](docs/adr/0005-thinking-level-inheritance.md) | override > role > inherited + per-call 逃生舱 |
+| D2 fff 工具名映射 | [ADR 0002](docs/adr/0002-tool-name-resolution-direction.md) | 增强名→内置名，绝不反向 |
+| D3 运行注册表总览 | Issue [#2](https://github.com/hu3rror/pi-matt-subagent/issues/2) + [ADR 0004](docs/adr/0004-subagent-run-registry-overview.md) | footer 计数 + `/subagents` |
+| D4 research budget | Issue [#1](https://github.com/hu3rror/pi-matt-subagent/issues/1) + [ADR 0003](docs/adr/0003-research-budget-effort-control.md) | 3 soft + 2 hard，110% kill |
+| E1 实战 /code-review | Issue [#9](https://github.com/hu3rror/pi-matt-subagent/issues/9) | 6c33cf4 两轴 review |
+| E2 实战 /design-it-twice | Issue [#10](https://github.com/hu3rror/pi-matt-subagent/issues/10) | 4 路并行接口设计 + 限流观测 |
 
-## B. Spec 审查遗留（小修复）
+## 未闭合注意点
 
-- [x] **B1 — 后台 prompt 装配一致性**：阻塞路径用 `--append-system-prompt` 临时文件，后台路径把 role 内联进 positional prompt。可统一为 `--append-system-prompt`（对应 Spec 审查 c2）。 — ✅ 已统一：`buildResearchArgs` 输出 `--append-system-prompt <prompt.md>` + positional `Task: <task>`，role prompt 与 findings path 全在文件（0600，写于 `pi-research-*` tmpdir，与 log 同生命周期），不再进 argv（Seam A 有断言）。测试迁移踩过坑：S6 曾只迁 1/5 调用点导致 `undefined` 进 argv——已全部补齐。
-- [x] **B2 — 后台 `research` 暴露 `agentScope`**：目前固定 `user` scope，project 级 `researcher` 覆盖对后台路径不生效。可选给 `research` 工具加 `agentScope` 参数（含 trust 确认）。 — ✅ 已实现：`ResearchParams.agentScope`（默认 `user`，TypeBox Union 运行时校验非法值）+ execute 用 scope 替换写死的 `"user"`；trust 确认与 `subagent` 工具共用 `confirmProjectAgents` helper（project/both + hasUI + 未信任 + 请求名含 project 源 → `ctx.ui.confirm`，拒绝返回 `Canceled: project-local agents not approved.`）。A2 重构使 lib.ts 零改动（`agents` 已注入）。另抽出 `scopeAllowsProject` 谓词消除枚举知识重复。
-
-## C. 安装 / 分发
-
-- [x] **C1 — `pi install <path>`（或 `-l`）**：安装后 `prompts/code-review.md`、`design-it-twice.md` 才能作为 `/code-review`、`/design-it-twice` slash command 被发现；顺带验证 `/reload`。会写 `~/.pi/agent/settings.json`。 — ✅ 已部分验证：`pi install -l <path>` 实测正常——写入测试项目 `.pi/settings.json`（相对路径 `..\..\x\Repos\pi-matt-subagent` 解析正确）；全局安装早已实证（本会话 `/code-review` 补全 + `subagent`/`research` 工具均在，prompts/extensions 静态检查存在）。🕓 TUI 待验：`/reload` 热重载、`/design-it-twice` 补全（同 `/code-review` 机制，TUI 输 `/` 确认即可）。
-- [x] **C2 — 测试命令固化**：package.json 加 `scripts.test` + `.gitignore`。（实测 node v26.8.2 直接 `node --test src/lib.test.ts` 即可跑通 13 个测试，无需 `--experimental-strip-types`） — ✅ 已完成并加固：`scripts.test = node --test src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts`（显式文件列表，避免 Windows glob 差异）；`.gitignore`（`node_modules/`）；`npm test` 30/30。**加固**：新增 `src/ext-check.test.ts`——提交态 parse 守卫（`node:module` 的 `stripTypeScriptTypes`）。背景：`node --check` 实测在 ESM+strip 项目作用域下对 `.ts` 一律放行（含坏形态），抓不到 `/**` 注释头丢失这类 parse 错误（曾致提交态扩展不可加载）；`stripTypeScriptTypes` 在 strip 阶段即抛 `ERR_INVALID_TYPESCRIPT_SYNTAX`，红绿演示验证有效。
-
-## D. 子代理健壮性
-
-- [x] **D1 — 思维等级继承**：子代理继承默认 `thinking=high`，复杂任务（如「自己跑 git」）在 `deepseek-v4-flash` 下会打转到上限而不收敛。给 role 加 `thinkingLevel` 字段（默认低一档），或让工具支持 per-call 覆盖。 — ✅ 已实现（TDD，seam 预确认：lib 纯函数 + 扩展透传）。前置查证：`deepseek-v4-flash` 的 `thinkingLevelMap = {off:none, minimal:low, low:low, medium:medium, high:high}` → medium/low 均受支持（无 xhigh/max）。`resolveThinkingLevel`（lib.ts，优先级 override > role > inherited，agent 钉 model 时 undefined 不传 `--thinking`）；embedded roles 差异化：standard/spec/architecture/design/researcher → `medium`，fact-finder → `low`；frontmatter `thinkingLevel` 可覆盖；subagent/research 工具加 per-call `thinkingLevel` 逃生舱（`THINKING_LEVELS` 枚举单一来源 + TypeBox Union 校验）。测试 27/27。🕓 真实生效验证：需**重启会话**（扩展重载）后跑 `/code-review` 对比 medium——本会话扩展为旧代码，子代理仍继承 high。
-- [x] **D2 — fff 工具名映射**：`resolveTools` 只处理 `bash`→`powershell`；若 fff 切到 `override` 模式，`grep`/`find` 会失效。可检测 fff override 并映射 `grep`→`ffgrep`、`find`→`fffind`。 — ✅ 已完成，但**修正了原假设**：pi-fff 源码（`OVERRIDE_TOOL_NAMES` 保留 `grep`/`find` 名）+ headless 实测双证「override 下 grep/find 失效」不成立——恰恰相反，`ffgrep`/`ffind` 才在 override 模式（及未装 fff）下失效；TODO 建议的 `grep→ffgrep` 映射在 override 下反而破坏默认角色。**实现**（低耦合，零 pi-fff import）：`TOOL_ALIASES`（`ffgrep→grep`、`ffind→find`）+ `resolveTools(tools, availableTools?)` 仅当声明名不在当前环境工具注册表（扩展侧 `pi.getAllTools()` 探测，主会话注册表全量可靠）时降级到内置名；`buildDispatchArgs`/`buildResearchArgs`/`runBackgroundResearch` 透传 `availableTools`，subagent/research 工具 execute 均接入。新增 8 测试（降级/保留/无注册表透传/未知名透传/别名缺失/TOOL_ALIASES 锁定/win32 bash 共存/buildResearchArgs 透传），38/38 绿；`node --check`（strip）两文件通过；e2e 实跑：override 下声明 `ffgrep/ffind` 的 project role 实际用 `grep` 完成任务，tools-and-ui 下保留 `ffgrep`/`fffind`。
-
-- [x] **D3 — subagent 运行状态总览**：目前运行中的 subagent 对用户完全不可见（无列表、无状态）。需提供统一查看入口（如 `/subagents` slash command、快捷键或 TUI 面板），列出所有运行中的 subagent 及其 role、状态（pending / running / blocked / failed / aborted）、开始时间，最好带实时输出或进度。可作为拆 issue 的候选。 — ✅ 已完成（TDD，seam 预确认：lib 纯函数 + 扩展透传；spec #2 `ready-for-agent` → ADR 0004）。**实现**：lib.ts 新增 `RUN_STATUSES`（`queued/running/succeeded/failed/aborted/terminated`，修正原枚举：`blocked` 删除、`pending`→`queued`、`terminated` 衔接 ADR 0003 的 marker，fallback 观察）、`createRunRegistry`（进程内注册表，终态冻结 + 转移守卫）、`formatRunSnapshot`（运行中/已结束分组、按开始时间排序、最后输出行截断）、`readLogTail`（fs 可注入）、`blockingRunStatus`/`resolveResearchRunStatus`；watcher 增加 kill-after-marker 的 `onExit` 回调。扩展：会话级注册表、subagent 工具登记（并行预填 queued→槽位转 running、中断把剩余 active run 全标 aborted）、research 工具经 onExit 解析终态、footer `setStatus` 计数、`/subagents` 命令（空闲快照，background 实时读 log tail）。CONTEXT.md 新增 run registry / run status / subagent overview。**验证**：103/103 绿（+29）；真实 pi 冒烟：subagent single 跑通、research 后台落盘、`/subagents` 注册确认；两轴 review 7 项全收敛。
-- [x] **D4 — research 力度控制**：research/researcher 的 prompt 没有深度上限，容易把任务带偏到无关深挖——实例：一个 PWA 开发问题被一路挖到 chromium 源代码，log 超 20 MiB 仍未收敛。需给 researcher 加力度约束：限制 fetch 页数、搜索轮数、findings 输出规模（行数/字符上限），并在 prompt 里显式强调「信息够用于回答即停，不要追到源码/实现细节」。 — ✅ 已完成（TDD，seam 预确认：lib 纯函数 + 扩展透传）。设计经 grill-with-docs 定稿 → spec (#1, `ready-for-agent`) → ADR 0003。**实现**：`RESEARCH_BUDGETS` 档位表（standard/tight × 5 维）；`resolveResearchBudget`（overrides > 档位 > 系统默认，hard 维只许收紧，非法报错）；`buildResearchPrompt` 追加 budget 块（soft 三维数字 + 墙钟自管理 + 够用即停 + wind-down + `soft_limit_exceeded`）；`evaluateResearchRun`（100% warn / 110% kill）＋ watcher 在 `runBackgroundResearch` 内跑（unref interval，宿主退出即止）；`appendResearchTerminationMarker` 固定格式；frontmatter `budget` 字段；research 工具 schema 加 `budget`/`budgetOverrides`。测试 70/70（含 2 个新 e2e：log 洪泛击杀 + 睡死墙钟击杀，真实 detached spawn）。
-
-## E. 实战 dogfood
-
-- [x] **E1 — 真实 `/code-review`**：装好后对某个真实 commit 跑一次两轴 review，验证 Standards+Spec 并行阻塞效果。 — ✅ 已完成：对 `6c33cf4`（/research prompt，固定点 `d3aa5fc`）跑完整两轴 review——一次 `subagent` 调用 + `tasks` 数组，standards-reviewer/spec-reviewer 并行阻塞、返回时两轴同时到手、分开报告（符合 blocking 语义与 ADR 0001）。结果：Standards 0 硬违规 + 3 判断项（已顺手修 #1 绝对路径措辞）；Spec 4 项无缺失/越界/错误实现（最重仅「未显式说 single Markdown file」，researcher role prompt 已强制）。
-- [x] **E2 — 真实 `/design-it-twice`**：对某个深化候选跑一次 3+ 并行接口设计。
-  - ✅ 全验证。候选：`src/lib.ts` 子代理进程启动簇（extensions/subagent.ts 的 `runSingleAgent` + lib.ts 的启动装配簇，依赖类别 in-process/local-substitutable）。跑法：`subagent` + `tasks` 数组并行 4 个 design-explorer（Minimize / Flexibility / Default-trivial / Ports & adapters），阻塞返回后逐一呈现 + 按 depth/locality/seam placement 横向比较，给出混合推荐（B 主干 `createRunner` + A 的解析器双消费者 `collectBackgroundRun`）。**限流观测**：4 并发首轮 2 成功 2 失败（429 rpm exhausted，印证 A4「并行加剧限流」）；重试 2 并行 2/2 成功；中间另有 1 次 `Subagent was aborted`（用户/会话中止）。失败报告格式正确（`Parallel: 2/4 succeeded` + 原始 429 体）。slash command 触发、模板展开、`$@` 占位符替换在上一轮已确认。
+- A1：成功路径的 `{previous}` 输出逐级传递缺一次完整观测。
+- A4：`aborted`（用户中断）分支仍未测。
+- C1：TUI `/reload` 热重载、`/design-it-twice` 补全待验。
+- A2：真实 pi 冒烟待 provider 限流缓解后另测。
