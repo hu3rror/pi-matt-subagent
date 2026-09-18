@@ -558,10 +558,10 @@ export default function (pi: ExtensionAPI) {
     };
   };
 
-  const MENU_SNAPSHOT = "📋 Snapshot";
-  const MENU_KILL = "⛔ Kill…";
-  const MENU_PRUNE = "🗑 Prune finished";
-  const MENU_TAIL = "📄 Tail log…";
+  const MENU_SNAPSHOT = "View runs";
+  const MENU_STOP = "Stop run…";
+  const MENU_CLEAR = "Clear finished";
+  const MENU_SHOW_LOG = "Show log…";
 
   const showSnapshot = (ctx: SubagentsUi) => {
     const runs = subagentRuns.snapshot().map((r) => {
@@ -585,11 +585,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!isKillable(run)) {
-      ctx.ui.notify(`${runRef(run)} is not a killable running process.`, "error");
+      ctx.ui.notify(`${runRef(run)} is not a stoppable running process.`, "error");
       return;
     }
     if (ctx.hasUI) {
-      const ok = await ctx.ui.confirm("Kill subagent run?", `Kill ${runRef(run)}? Partial findings stay on disk.`);
+      const ok = await ctx.ui.confirm("Stop subagent run?", `Stop ${runRef(run)}? Partial findings stay on disk.`);
       if (!ok) return;
     }
     abortIntents.add(id);
@@ -597,10 +597,10 @@ export default function (pi: ExtensionAPI) {
       killProcessGroup(run.pid);
     } catch (err) {
       abortIntents.delete(id);
-      ctx.ui.notify(`Failed to kill ${runRef(run)}: ${(err as Error).message}`, "error");
+      ctx.ui.notify(`Failed to stop ${runRef(run)}: ${(err as Error).message}`, "error");
       return;
     }
-    ctx.ui.notify(`Kill signal sent to ${runRef(run)}; status settles when the watcher observes the exit.`, "info");
+    ctx.ui.notify(`Stop signal sent to ${runRef(run)}; status settles when the watcher observes the exit.`, "info");
   };
 
   const tailRun = (id: string, ctx: SubagentsUi) => {
@@ -620,12 +620,12 @@ export default function (pi: ExtensionAPI) {
   const pruneFinishedRuns = async (ctx: SubagentsUi) => {
     const terminal = subagentRuns.snapshot().filter((r) => isTerminalRunStatus(r.status));
     if (terminal.length === 0) {
-      ctx.ui.notify("Nothing to prune — no finished runs.", "info");
+      ctx.ui.notify("Nothing to clear — no finished runs.", "info");
       return;
     }
     if (ctx.hasUI) {
       const ok = await ctx.ui.confirm(
-        "Prune finished runs?",
+        "Clear finished runs?",
         `Remove ${terminal.length} finished run record(s)? Findings/log files stay on disk.`,
       );
       if (!ok) return;
@@ -633,7 +633,7 @@ export default function (pi: ExtensionAPI) {
     for (const r of terminal) subagentRuns.remove(r.id);
     abortIntents = cleanupAbortIntents(abortIntents, subagentRuns.list());
     updateSubagentFooter(ctx, subagentRuns);
-    ctx.ui.notify(`Pruned ${terminal.length} finished run(s).`, "info");
+    ctx.ui.notify(`Cleared ${terminal.length} finished run(s).`, "info");
   };
 
   const pickRun = async (
@@ -651,20 +651,20 @@ export default function (pi: ExtensionAPI) {
   };
 
   const openMenu = async (ctx: SubagentsUi) => {
-    const choice = await ctx.ui.select("Manage subagents", [MENU_SNAPSHOT, MENU_KILL, MENU_PRUNE, MENU_TAIL]);
+    const choice = await ctx.ui.select("Subagent runs", [MENU_SNAPSHOT, MENU_STOP, MENU_CLEAR, MENU_SHOW_LOG]);
     if (!choice) return;
     if (choice === MENU_SNAPSHOT) return showSnapshot(ctx);
-    if (choice === MENU_KILL) {
+    if (choice === MENU_STOP) {
       const id = await pickRun(
         ctx,
-        "Kill which run?",
+        "Stop which run?",
         subagentRuns.snapshot().filter(isKillable),
       );
       if (id) await killRun(id, ctx);
       return;
     }
-    if (choice === MENU_PRUNE) return pruneFinishedRuns(ctx);
-    const id = await pickRun(ctx, "Tail which run?", subagentRuns.snapshot().filter((r) => r.logPath != null));
+    if (choice === MENU_CLEAR) return pruneFinishedRuns(ctx);
+    const id = await pickRun(ctx, "Show log for which run?", subagentRuns.snapshot().filter((r) => r.logPath != null));
     if (id) tailRun(id, ctx);
   };
 
