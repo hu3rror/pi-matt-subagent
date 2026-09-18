@@ -20,3 +20,4 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 - **First release exception**: OIDC and `npm stage` cannot create a package that does not exist yet — the first publish must be a local `npm publish` (login + 2FA) by the maintainer, then bind the Trusted Publisher on npmjs.com.
 - **Rollback**: a wrong staging is cleared with `npm stage reject <stage-id>`.
 - **Tag signing**: with `tag.gpgsign=true`, an agent cannot enter the passphrase — use `git -c tag.gpgsign=false tag -a vX.Y.Z -m ...` to stay consistent.
+- **Release notes**: the executing agent writes categorized release notes (per the npm-release skill's guide) and creates the GitHub Release after the maintainer approves the stage; the workflow builds no placeholder Release (Mode A).
