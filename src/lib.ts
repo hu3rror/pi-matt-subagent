@@ -43,11 +43,12 @@ export function scopeAllowsProject(scope: AgentScope): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Research budget (D4)
+// Research budget (D4, recalibrated in ADR 0008)
 //   Effort control for the background researcher: 3 soft budget dimensions
 //   (fetch pages, search rounds, findings lines) written into the prompt as
 //   guidance, 2 hard control dimensions (log bytes, wall clock) enforced by
-//   the runner. Tier table frozen in ADR 0003; overrides follow
+//   the runner. Tier table frozen in ADR 0003, revised by ADR 0008 (tight
+//   10/6/400, standard log 10 MiB); overrides follow
 //   overrides > tier > system default, and hard caps may only tighten.
 // ---------------------------------------------------------------------------
 
@@ -92,15 +93,15 @@ export const RESEARCH_BUDGETS: Record<ResearchBudgetTier, ResearchBudget> = {
     maxSearchRounds: 10,
     maxFetchPages: 20,
     maxFindingLines: 500,
-    maxLogBytes: 8 * 1024 * 1024,
+    maxLogBytes: 10 * 1024 * 1024,
     maxWallClockMs: 15 * 60 * 1000,
   },
   tight: {
     maxSearchRounds: 5,
     maxFetchPages: 8,
-    maxFindingLines: 200,
-    maxLogBytes: 2 * 1024 * 1024,
-    maxWallClockMs: 5 * 60 * 1000,
+    maxFindingLines: 400,
+    maxLogBytes: 6 * 1024 * 1024,
+    maxWallClockMs: 10 * 60 * 1000,
   },
 };
 
@@ -467,6 +468,8 @@ export interface ResearchRunOptions {
   budget?: ResearchBudget;
   /** Injectable timer/stat/append deps for the watcher (tests). */
   watcherDeps?: ResearchWatcherDeps;
+  /** Grace period after the 100% final notice before a kill (tests shorten it). */
+  graceMs?: number;
   /** Fired (best-effort) when the background child exits or is killed. */
   onExit?: (info: ResearchExitInfo) => void;
 }
@@ -583,6 +586,7 @@ export function runBackgroundResearch(
   if (!agent) throw new Error('No "researcher" role available');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-research-"));
   const logPath = path.join(tmpDir, "research.log");
+  const statusPath = researchStatusPath(logPath);
   const researchId = path.basename(tmpDir);
 
   // The role prompt (with findings path) goes to a file, like the blocking
@@ -591,7 +595,7 @@ export function runBackgroundResearch(
   // needs to read it at startup (this dir already outlives the caller: the
   // main session is not meant to wait or clean up after a background run).
   const promptPath = path.join(tmpDir, "prompt.md");
-  fs.writeFileSync(promptPath, buildResearchPrompt(agent, opts.task, opts.findingsPath, opts.budget), {
+  fs.writeFileSync(promptPath, buildResearchPrompt(agent, opts.task, opts.findingsPath, opts.budget, statusPath), {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -625,6 +629,7 @@ export function runBackgroundResearch(
       findingsPath: opts.findingsPath,
       budget: opts.budget,
       startedAt: nowFn(),
+      graceMs: opts.graceMs,
       deps: opts.watcherDeps,
       onExit: opts.onExit,
     });
@@ -666,9 +671,11 @@ export function resolveThinkingLevel(opts: {
  * Must guide the model on the three soft dimensions (fetch pages, search
  * rounds, findings lines) and the wall-clock number it can self-manage, state
  * the enough-to-answer rule, and describe wind-down + the soft-limit marker.
+ * With a statusPath (ADR 0008) it also asks for checkpoint writes and teaches
+ * the model to read the budget-status file and wind down on a final notice.
  */
-export function buildResearchBudgetBlock(budget: ResearchBudget): string {
-  return [
+export function buildResearchBudgetBlock(budget: ResearchBudget, statusPath?: string): string {
+  const lines = [
     "## Research budget",
     "Stay within these limits unless answering requires it:",
     `- search rounds: at most ${budget.maxSearchRounds}`,
@@ -678,8 +685,17 @@ export function buildResearchBudgetBlock(budget: ResearchBudget): string {
     "",
     "Stop as soon as you have enough information to answer well — do not chase source code or implementation details beyond that. That is the enough-to-answer rule.",
     "",
-    "If a limit gets exceeded, do NOT keep going: enter wind-down — freeze that dimension (no further fetches/search rounds; stop appending findings once the line count is reached), finish your summary, and add `soft_limit_exceeded` next to it.",
-  ].join("\n");
+    "Before each new search round, rewrite the findings file with everything gathered so far (a checkpoint), so a hard kill loses at most one round of work.",
+    "",
+    "If a soft limit gets exceeded, do NOT keep going: enter wind-down — freeze that dimension (no further fetches/search rounds; stop appending findings once the line count is reached), finish your summary, and add `soft_limit_exceeded` next to it.",
+  ];
+  if (statusPath) {
+    lines.push(
+      "",
+      `Budget status file: ${statusPath}. Read it before starting a new search round and before writing findings. If it contains "STATUS: FINAL", wind down immediately: stop new fetches/searches, first write a complete checkpoint of the findings file with your summary, ending with "<!-- wind-down-complete -->", then finish and end.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export function buildResearchPrompt(
@@ -687,12 +703,13 @@ export function buildResearchPrompt(
   task: string,
   findingsPath: string,
   budget?: ResearchBudget,
+  statusPath?: string,
 ): string {
   return [
     agent.systemPrompt,
     "",
     `Findings path: ${findingsPath}`,
-    budget ? ["", buildResearchBudgetBlock(budget)].join("\n") : "",
+    budget ? ["", buildResearchBudgetBlock(budget, statusPath)].join("\n") : "",
     "",
     `Task: ${task}`,
   ].join("\n");
@@ -707,31 +724,37 @@ export function buildResearchPrompt(
 export type ResearchHardCap = "log_bytes" | "wall_clock";
 
 export interface ResearchRunCheck {
-  action: "continue" | "warn" | "kill";
-  /** The caps that crossed the relevant line: >=110% for kill, >=100% for warn. */
+  action: "continue" | "final_notice" | "kill";
+  /** The caps that crossed the relevant line: >=110% for a backstop kill, >=100% for a final notice / grace-deadline kill. */
   caps: ResearchHardCap[];
 }
 
 /**
- * Decides what the runner should do for a research run at this instant.
- * 100% of a hard cap -> warn; 110% -> kill. A kill records only the caps that
- * crossed 110%; a warn only the caps in [100%, 110%).
+ * Decides what the runner should do for a research run at this instant
+ * (ADR 0008). 100% of a hard cap -> final notice (the watcher starts the
+ * grace period); once a grace deadline is set, now >= deadline -> kill. The
+ * log 110% line remains an immediate runaway backstop that beats the grace
+ * period; wall clock has no 110% line — the grace deadline governs it. A
+ * kill records the caps that caused it: the backstop caps for a backstop
+ * kill, the dims currently over 100% for a grace-deadline kill.
  */
 export function evaluateResearchRun(
   now: number,
   startedAt: number,
   logBytes: number,
   budget: ResearchBudget,
+  graceDeadline?: number,
 ): ResearchRunCheck {
   const elapsed = now - startedAt;
-  const killCaps: ResearchHardCap[] = [];
-  const warnCaps: ResearchHardCap[] = [];
-  if (logBytes / budget.maxLogBytes >= 1.1) killCaps.push("log_bytes");
-  else if (logBytes / budget.maxLogBytes >= 1.0) warnCaps.push("log_bytes");
-  if (elapsed / budget.maxWallClockMs >= 1.1) killCaps.push("wall_clock");
-  else if (elapsed / budget.maxWallClockMs >= 1.0) warnCaps.push("wall_clock");
-  if (killCaps.length > 0) return { action: "kill", caps: killCaps };
-  if (warnCaps.length > 0) return { action: "warn", caps: warnCaps };
+  const over100: ResearchHardCap[] = [];
+  if (logBytes / budget.maxLogBytes >= 1.0) over100.push("log_bytes");
+  if (elapsed / budget.maxWallClockMs >= 1.0) over100.push("wall_clock");
+  if (logBytes / budget.maxLogBytes >= 1.1) return { action: "kill", caps: ["log_bytes"] };
+  if (graceDeadline !== undefined) {
+    if (now >= graceDeadline) return { action: "kill", caps: over100 };
+    return { action: "continue", caps: [] };
+  }
+  if (over100.length > 0) return { action: "final_notice", caps: over100 };
   return { action: "continue", caps: [] };
 }
 
@@ -774,6 +797,13 @@ const REASON_LABELS: Record<ResearchHardCap, string> = {
 /** Formats one hard-cap value in its own unit (bytes vs duration). */
 export function formatCapValue(cap: ResearchHardCap, value: number): string {
   return cap === "log_bytes" ? formatBytes(value) : formatDuration(value);
+}
+
+/** A cap's live usage in human form: "2 KiB (cap 1 KiB)" / "3 s (cap 1 s)". */
+function capUsage(cap: ResearchHardCap, logBytes: number, elapsed: number, budget: ResearchBudget): string {
+  return cap === "log_bytes"
+    ? `${formatBytes(logBytes)} (cap ${formatBytes(budget.maxLogBytes)})`
+    : `${formatDuration(elapsed)} (cap ${formatDuration(budget.maxWallClockMs)})`;
 }
 
 /**
@@ -846,6 +876,8 @@ export interface RunEntry {
   channel: "blocking" | "background";
   status: RunStatus;
   startedAt: number;
+  /** Stamped on the terminal transition; display duration for finished runs. */
+  endedAt?: number;
   lastOutput?: string;
   usage?: UsageStats;
   findingsPath?: string;
@@ -869,7 +901,7 @@ export interface RunRegistry {
  * update throws, and illegal transitions throw without mutating. `snapshot`
  * returns a detached, startedAt-ascending copy for display.
  */
-export function createRunRegistry(): RunRegistry {
+export function createRunRegistry(now: () => number = Date.now): RunRegistry {
   const runs = new Map<string, RunEntry>();
   let nextId = 1;
 
@@ -889,7 +921,12 @@ export function createRunRegistry(): RunRegistry {
     if (next !== run.status && !RUN_STATUS_TRANSITIONS[run.status].includes(next)) {
       throw new Error(`illegal status transition ${run.status} -> ${next} for run ${id}`);
     }
-    runs.set(id, { ...run, ...patch, status: next });
+    runs.set(id, {
+      ...run,
+      ...patch,
+      status: next,
+      endedAt: isTerminalRunStatus(next) ? now() : undefined,
+    });
   };
 
   const snapshot = (): RunEntry[] =>
@@ -957,9 +994,11 @@ export function formatTokens(count: number): string {
  */
 function formatRunRow(run: RunEntry, now: number): string[] {
   const icon = RUN_STATUS_ICONS[run.status];
+  // terminal runs show their actual duration (endedAt), not elapsed since the
+  // snapshot was taken (D5: a terminated run must not keep counting).
   const header = `${icon} ${run.role} (${run.source}) [${run.status}] — started ${formatStartTime(
     run.startedAt,
-  )}, ${formatElapsed(run.startedAt, now)}`;
+  )}, ${formatElapsed(run.startedAt, run.endedAt ?? now)}`;
   const lines = [header];
   if (run.lastOutput) {
     // keep the progress line to one display line (spec: "最后输出行（截断）")
@@ -1096,19 +1135,31 @@ export interface StartResearchWatcherOptions {
   findingsPath: string;
   budget: ResearchBudget;
   startedAt: number;
+  /** Grace period after the 100% final notice before a kill; tests shorten it. */
+  graceMs?: number;
   deps?: ResearchWatcherDeps;
   onExit?: (info: ResearchExitInfo) => void;
 }
 
 const RESEARCH_WATCH_INTERVAL_MS = 2000;
 
+/** Default grace period after the 100% final notice before a hard-cap kill (ADR 0008). */
+export const DEFAULT_RESEARCH_GRACE_MS = 60_000;
+
+/** The budget-status file lives next to the research log in the run's tmp dir. */
+export function researchStatusPath(logPath: string): string {
+  return path.join(path.dirname(logPath), "budget-status.txt");
+}
+
 /**
  * Watches a background research run against its hard caps. Every tick it stats
- * the log file and checks the wall clock: at 100% of a cap it writes a
- * one-time warning into the log; at 110% it kills the child and appends the
- * termination marker to the findings file. Stops itself once the child exits.
- * The interval is unref'd so it never holds the host process alive;
- * enforcement is best-effort while the host lives (ADR 0003).
+ * the log file and checks the wall clock (ADR 0008): at 100% of a cap it
+ * writes a one-time final notice to the log and the budget-status file, then
+ * grants a grace period (default 60s) during which a natural exit is a
+ * success; at the grace deadline it kills the child and appends the
+ * termination marker to the findings file. The log 110% line remains an
+ * immediate runaway backstop. The interval is unref'd so it never holds the
+ * host process alive; enforcement is best-effort while the host lives.
  */
 export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
   const deps = opts.deps ?? {};
@@ -1125,13 +1176,26 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
   const setIntervalFn = deps.setInterval ?? ((fn: () => void, ms?: number) => setInterval(fn, ms));
   const clearIntervalFn = deps.clearInterval ?? ((id?: unknown) => clearInterval(id as ReturnType<typeof setInterval>));
   const append = fs.appendFileSync;
+  const graceMs = opts.graceMs ?? DEFAULT_RESEARCH_GRACE_MS;
+  const statusPath = researchStatusPath(opts.logPath);
   let intervalId: unknown;
   let stopped = false;
-  let logWarned = false;
+  let graceDeadline: number | undefined;
 
   const stop = () => {
     stopped = true;
     if (intervalId !== undefined) clearIntervalFn(intervalId);
+  };
+
+  const writeStatus = (t: number, elapsed: number, logSize: number) => {
+    const state =
+      graceDeadline !== undefined
+        ? `STATUS: FINAL — wind down now · deadline in ${formatDuration(graceDeadline - t)}`
+        : `STATUS: running`;
+    const line = `${state} · elapsed ${formatDuration(elapsed)}/${formatDuration(
+      opts.budget.maxWallClockMs,
+    )} · log ${formatBytes(logSize)}/${formatBytes(opts.budget.maxLogBytes)}`;
+    fs.writeFileSync(statusPath, `${line}\n`, "utf-8");
   };
 
   const check = () => {
@@ -1144,7 +1208,7 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
     const t = now();
     const elapsed = t - opts.startedAt;
     const logSize = stat(opts.logPath)?.size ?? 0;
-    const result = evaluateResearchRun(t, opts.startedAt, logSize, opts.budget);
+    const result = evaluateResearchRun(t, opts.startedAt, logSize, opts.budget, graceDeadline);
 
     if (result.action === "kill") {
       opts.child.kill("SIGKILL");
@@ -1156,12 +1220,14 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
         })),
         at: new Date(t).toISOString(),
       });
-      // human-readable kill reason at the log tail (ADR 0003)
+      // human-readable kill reason at the log tail (ADR 0003 / 0008): the log
+      // 110% line is a runaway backstop, anything else is a grace-deadline kill
+      const backstop = logSize / opts.budget.maxLogBytes >= 1.1;
       const reasons = result.caps
         .map((cap) =>
           cap === "log_bytes"
-            ? `log exceeded ${formatBytes(logSize)} (cap ${formatBytes(opts.budget.maxLogBytes)}) at 110%`
-            : `wall clock exceeded ${formatDuration(elapsed)} (cap ${formatDuration(opts.budget.maxWallClockMs)}) at 110%`,
+            ? `log exceeded ${capUsage(cap, logSize, elapsed, opts.budget)}${backstop ? " at 110%" : " at grace deadline"}`
+            : `wall clock exceeded ${capUsage(cap, logSize, elapsed, opts.budget)} at grace deadline`,
         )
         .join("; ");
       append(opts.logPath, `\n[research-budget] killed: ${reasons}\n`);
@@ -1172,17 +1238,22 @@ export function startResearchWatcher(opts: StartResearchWatcherOptions): void {
       return;
     }
 
-    if (result.action === "warn" && !logWarned && result.caps.includes("log_bytes")) {
-      // Only the log dimension is surfaced by the runner; the wall-clock
-      // dimension is self-managed by the model from its prompt (ADR 0003).
-      logWarned = true;
+    // A final notice can fire at most once: setting graceDeadline makes
+    // evaluateResearchRun return only continue/kill on later ticks.
+    if (result.action === "final_notice") {
+      graceDeadline = t + graceMs;
+      const dims = result.caps
+        .map((cap) => `${cap === "log_bytes" ? "log" : "wall clock"} ${capUsage(cap, logSize, elapsed, opts.budget)}`)
+        .join(", ");
       append(
         opts.logPath,
-        `\n[research-budget] warning: log ${formatBytes(logSize)} approaching cap ${formatBytes(
-          opts.budget.maxLogBytes,
-        )} (100%); killed at 110%\n`,
+        `\n[research-budget] final notice: ${dims} at 100%; wind down; killed in ${formatDuration(
+          graceDeadline - t,
+        )}\n`,
       );
     }
+
+    writeStatus(t, elapsed, logSize);
   };
 
   check();

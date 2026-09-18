@@ -496,22 +496,23 @@ test("a user agent frontmatter with an invalid thinkingLevel is ignored", () => 
 });
 
 // S9 — research budget (D4). Literals, not derived from RESEARCH_BUDGETS: the
-// tier table was frozen in the design session (ADR 0003) and a regression to
-// different numbers is caught here.
+// tier table was frozen in the design session (ADR 0003, revised by ADR 0008:
+// tight 10/6/400, standard log 10 MiB) and a regression to different numbers
+// is caught here.
 test("RESEARCH_BUDGETS freezes the tier table at the agreed values", () => {
   assert.deepEqual(RESEARCH_BUDGETS.standard, {
     maxSearchRounds: 10,
     maxFetchPages: 20,
     maxFindingLines: 500,
-    maxLogBytes: 8 * 1024 * 1024,
+    maxLogBytes: 10 * 1024 * 1024,
     maxWallClockMs: 15 * 60 * 1000,
   });
   assert.deepEqual(RESEARCH_BUDGETS.tight, {
     maxSearchRounds: 5,
     maxFetchPages: 8,
-    maxFindingLines: 200,
-    maxLogBytes: 2 * 1024 * 1024,
-    maxWallClockMs: 5 * 60 * 1000,
+    maxFindingLines: 400,
+    maxLogBytes: 6 * 1024 * 1024,
+    maxWallClockMs: 10 * 60 * 1000,
   });
 });
 
@@ -573,29 +574,30 @@ test("resolveEffectiveResearchBudget always yields a budget: call tier > role ti
   assert.equal(b.maxFetchPages, RESEARCH_BUDGETS.tight.maxFetchPages);
 });
 
-// S10 — evaluateResearchRun (hard-cap decision). 100% line = warn, 110% line
-// = kill; a kill records only the caps that caused it, a warn only the caps
-// that crossed 100% but not 110%.
+// S10 — evaluateResearchRun (hard-cap decision, ADR 0008). 100% line =
+// final notice (starts the grace window), grace-deadline line = kill; the log
+// 110% line remains an immediate runaway backstop that beats the grace
+// window. A kill records only the caps that caused it.
 test("evaluateResearchRun continues below both 100% lines", () => {
   const b = RESEARCH_BUDGETS.standard;
   assert.deepEqual(evaluateResearchRun(0, 0, 0, b), { action: "continue", caps: [] });
   assert.deepEqual(evaluateResearchRun(1_000, 0, b.maxLogBytes - 1, b), { action: "continue", caps: [] });
 });
 
-test("evaluateResearchRun warns at exactly 100% of the log cap", () => {
+test("evaluateResearchRun issues a final notice at 100% of the log cap", () => {
   const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(0, 0, b.maxLogBytes, b), { action: "warn", caps: ["log_bytes"] });
+  assert.deepEqual(evaluateResearchRun(0, 0, b.maxLogBytes, b), { action: "final_notice", caps: ["log_bytes"] });
 });
 
-test("evaluateResearchRun warns between 100% and 110% of the log cap", () => {
+test("evaluateResearchRun issues a final notice between 100% and 110% of the log cap", () => {
   const b = RESEARCH_BUDGETS.standard;
   assert.deepEqual(evaluateResearchRun(0, 0, Math.floor(b.maxLogBytes * 1.05), b), {
-    action: "warn",
+    action: "final_notice",
     caps: ["log_bytes"],
   });
 });
 
-test("evaluateResearchRun kills at 110% of the log cap", () => {
+test("evaluateResearchRun kills at 110% of the log cap (runaway backstop)", () => {
   const b = RESEARCH_BUDGETS.standard;
   assert.deepEqual(evaluateResearchRun(0, 0, Math.ceil(b.maxLogBytes * 1.1), b), {
     action: "kill",
@@ -603,30 +605,56 @@ test("evaluateResearchRun kills at 110% of the log cap", () => {
   });
 });
 
-test("evaluateResearchRun warns at 100% of the wall clock cap", () => {
+test("evaluateResearchRun issues a final notice at 100% of the wall clock cap", () => {
   const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, 0, b), { action: "warn", caps: ["wall_clock"] });
+  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, 0, b), {
+    action: "final_notice",
+    caps: ["wall_clock"],
+  });
 });
 
-test("evaluateResearchRun kills at 110% of the wall clock cap", () => {
+test("evaluateResearchRun continues inside the grace period even past 100%", () => {
   const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.1), 0, 0, b), {
+  // wall at 100% + 5s, grace deadline at 100% + 60s: not yet due
+  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs + 5_000, 0, 0, b, b.maxWallClockMs + 60_000), {
+    action: "continue",
+    caps: [],
+  });
+});
+
+test("evaluateResearchRun kills at the grace deadline", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs + 60_000, 0, 0, b, b.maxWallClockMs + 60_000), {
     action: "kill",
     caps: ["wall_clock"],
   });
 });
 
-test("evaluateResearchRun records both caps when both exceed 110%", () => {
+test("a grace-deadline kill records the dims currently over 100%", () => {
   const b = RESEARCH_BUDGETS.standard;
   assert.deepEqual(
-    evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.2), 0, Math.ceil(b.maxLogBytes * 1.2), b),
+    evaluateResearchRun(
+      Math.floor(b.maxWallClockMs * 1.05),
+      0,
+      Math.floor(b.maxLogBytes * 1.05),
+      b,
+      Math.floor(b.maxWallClockMs * 1.05),
+    ),
     { action: "kill", caps: ["log_bytes", "wall_clock"] },
   );
 });
 
-test("evaluateResearchRun prefers kill over warn and keeps only the kill reasons", () => {
+test("the log 110% runaway backstop beats the grace deadline", () => {
   const b = RESEARCH_BUDGETS.standard;
-  // log at 120% (kill), wall clock at exactly 100% (would warn) -> kill with only log_bytes
+  assert.deepEqual(
+    evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.2), 0, Math.ceil(b.maxLogBytes * 1.2), b, 0),
+    { action: "kill", caps: ["log_bytes"] },
+  );
+});
+
+test("evaluateResearchRun prefers the log backstop over a would-be final", () => {
+  const b = RESEARCH_BUDGETS.standard;
+  // log at 120% (backstop kill), wall clock at exactly 100% (would-be final notice) -> kill with only log_bytes
   assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, Math.ceil(b.maxLogBytes * 1.2), b), {
     action: "kill",
     caps: ["log_bytes"],
@@ -737,14 +765,29 @@ test("buildResearchPrompt budget block reflects the tight tier numbers", () => {
   const p = buildResearchPrompt(agent, "T", "/tmp/out.md", RESEARCH_BUDGETS.tight);
   assert.ok(p.includes("search rounds: at most 5"));
   assert.ok(p.includes("fetch pages (total): at most 8"));
-  assert.ok(p.includes("findings: at most 200 lines"));
-  assert.ok(p.includes("wall clock: at most 5 min"));
+  assert.ok(p.includes("findings: at most 400 lines"));
+  assert.ok(p.includes("wall clock: at most 10 min"));
 });
 
 test("buildResearchPrompt without a budget stays unchanged", () => {
   const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
   const p = buildResearchPrompt(agent, "T", "/tmp/out.md");
   assert.ok(!p.includes("Research budget"));
+});
+
+test("buildResearchPrompt threads the budget-status path and the ADR 0008 wind-down instructions", () => {
+  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
+  const p = buildResearchPrompt(
+    agent,
+    "do the thing",
+    "/tmp/out.md",
+    RESEARCH_BUDGETS.standard,
+    "/tmp/budget-status.txt",
+  );
+  assert.ok(p.includes("/tmp/budget-status.txt"), "the budget-status file path must reach the prompt");
+  assert.ok(p.includes("checkpoint"), "checkpoint-write behaviour must be in the prompt");
+  assert.ok(p.includes("wind-down-complete"), "the wind-down sentinel must be in the prompt");
+  assert.ok(p.includes("STATUS: FINAL"), "the final-notice read instruction must be in the prompt");
 });
 
 // S13 — budget tier on roles (frontmatter, same pattern as thinkingLevel).
@@ -825,6 +868,11 @@ test("runBackgroundResearch with a budget embeds the budget block and starts a w
   const promptText = fs.readFileSync(path.join(path.dirname(handle.logPath), "prompt.md"), "utf8");
   assert.ok(promptText.includes("Research budget"), "budget block must reach the prompt file");
   assert.ok(promptText.includes("search rounds: at most 5"), "tight numbers must reach the prompt file");
+  assert.ok(
+    promptText.includes(path.join(path.dirname(handle.logPath), "budget-status.txt")),
+    "the budget-status file path must reach the prompt file",
+  );
+  assert.ok(promptText.includes("checkpoint"), "the checkpoint instruction must reach the prompt file");
   assert.ok(typeof tick === "function", "a watcher interval must be scheduled when a budget is present");
 });
 
@@ -869,7 +917,7 @@ test("startResearchWatcher kills the child and appends the termination marker wh
   }
 });
 
-test("startResearchWatcher warns once on the log dimension at 100% and does not kill", () => {
+test("startResearchWatcher issues a final notice at 100% of the log cap and does not kill", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   const logPath = path.join(dir, "research.log");
   const findingsPath = path.join(dir, "findings.md");
@@ -905,8 +953,11 @@ test("startResearchWatcher warns once on the log dimension at 100% and does not 
     tick?.();
     tick?.();
     const logText = fs.readFileSync(logPath, "utf8");
-    assert.equal((logText.match(/approaching cap/g) ?? []).length, 1, "the 100% warning must be written exactly once");
-    assert.deepEqual(killed, [], "warn must not kill");
+    assert.equal((logText.match(/final notice/g) ?? []).length, 1, "the final notice must be written exactly once");
+    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
+    assert.ok(statusText.includes("STATUS: FINAL"), "status file must carry the final notice");
+    assert.ok(statusText.includes("elapsed") && statusText.includes("log"), "status file shows elapsed/log vs caps");
+    assert.deepEqual(killed, [], "a final notice must not kill");
     assert.ok(!fs.existsSync(findingsPath), "no termination marker without a kill");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -952,7 +1003,7 @@ test("startResearchWatcher writes the human-readable kill reason to the log tail
   }
 });
 
-test("startResearchWatcher does not surface the wall-clock 100% line (model self-manages it)", () => {
+test("startResearchWatcher issues a final notice at 100% of the wall clock cap and starts the grace period", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   const logPath = path.join(dir, "research.log");
   const findingsPath = path.join(dir, "findings.md");
@@ -981,9 +1032,12 @@ test("startResearchWatcher does not surface the wall-clock 100% line (model self
         clearInterval: () => {},
       },
     });
-    assert.deepEqual(killed, [], "wall-clock warn must not kill");
+    assert.deepEqual(killed, [], "a final notice must not kill");
     const logText = fs.readFileSync(logPath, "utf8");
-    assert.ok(!logText.includes("[research-budget]"), "no runner warning for the wall-clock dimension (ADR 0003)");
+    assert.ok(logText.includes("[research-budget] final notice"), "the wall-clock 100% line now surfaces (ADR 0008)");
+    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
+    assert.ok(statusText.includes("STATUS: FINAL"), "status file must carry the final notice");
+    assert.ok(!fs.existsSync(findingsPath), "no termination marker without a kill");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1108,6 +1162,132 @@ test("startResearchWatcher calls onExit with killed:true after a hard-cap kill, 
   }
 });
 
+// S14b — ADR 0008 grace period: at 100% the watcher grants graceMs before
+// killing; a natural exit inside the period is a success, a deadline crossing
+// is a kill with the termination marker.
+test("startResearchWatcher kills at the grace deadline and appends the marker", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    let nowVal = 0;
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    let tick: (() => void) | undefined;
+    const budget = { ...RESEARCH_BUDGETS.standard, maxWallClockMs: 1000, maxLogBytes: 64 * 1024 * 1024 };
+    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      graceMs: 2000,
+      deps: {
+        now: () => nowVal,
+        stat: () => ({ size: 0 }),
+        setInterval: (fn: () => void) => {
+          tick = fn;
+          return { unref() {} } as never;
+        },
+        clearInterval: () => {},
+      },
+      onExit: (info) => exits.push(info),
+    });
+    // immediate check at t=0: below 100% -> running status
+    const running = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
+    assert.ok(running.includes("STATUS: running"), "status file starts in running state");
+    // t=1000: wall at 100% -> final notice + grace until t=3000
+    nowVal = 1000;
+    tick?.();
+    assert.deepEqual(killed, [], "final notice must not kill");
+    // t=2500: inside the grace period -> still alive
+    nowVal = 2500;
+    tick?.();
+    assert.deepEqual(killed, [], "still inside the grace period");
+    // t=3000: deadline -> kill + marker
+    nowVal = 3000;
+    tick?.();
+    assert.deepEqual(killed, ["SIGKILL"], "kill lands at the grace deadline");
+    assert.deepEqual(exits, [{ exitCode: null, killed: true }]);
+    const text = fs.readFileSync(findingsPath, "utf8");
+    assert.ok(text.includes("research-terminated"));
+    assert.ok(text.includes("reason: wall_clock_exceeded"));
+    assert.ok(text.includes("limit: 1 s"));
+    assert.match(text, /observed: 3 s/);
+    const logText = fs.readFileSync(logPath, "utf8");
+    assert.ok(
+      logText.includes("wall clock exceeded 3 s (cap 1 s) at grace deadline"),
+      "kill reason must label the grace-deadline trigger",
+    );
+    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
+    assert.ok(statusText.includes("STATUS: FINAL"), "status file ends in the final state");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startResearchWatcher reports a natural exit inside the grace period as succeeded", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const logPath = path.join(dir, "research.log");
+  const findingsPath = path.join(dir, "findings.md");
+  try {
+    fs.writeFileSync(logPath, "");
+    let nowVal = 0;
+    const killed: string[] = [];
+    const child: ResearchChild = {
+      unref() {},
+      kill: (s) => {
+        killed.push(s ?? "");
+        return true;
+      },
+      exitCode: null,
+    };
+    let tick: (() => void) | undefined;
+    const budget = { ...RESEARCH_BUDGETS.standard, maxWallClockMs: 1000, maxLogBytes: 64 * 1024 * 1024 };
+    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
+    startResearchWatcher({
+      child,
+      logPath,
+      findingsPath,
+      budget,
+      startedAt: 0,
+      graceMs: 2000,
+      deps: {
+        now: () => nowVal,
+        stat: () => ({ size: 0 }),
+        setInterval: (fn: () => void) => {
+          tick = fn;
+          return { unref() {} } as never;
+        },
+        clearInterval: () => {},
+      },
+      onExit: (info) => exits.push(info),
+    });
+    // t=1500: wall past 100% -> final notice, grace until t=3500
+    nowVal = 1500;
+    tick?.();
+    assert.deepEqual(killed, [], "final notice must not kill");
+    // the child winds down and exits naturally inside the grace period
+    child.exitCode = 0;
+    nowVal = 2000;
+    tick?.();
+    assert.deepEqual(killed, [], "a natural exit inside the grace period must not be killed");
+    assert.deepEqual(exits, [{ exitCode: 0, killed: false }], "natural exit is reported as succeeded");
+    assert.ok(!fs.existsSync(findingsPath), "no termination marker for a natural exit");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // S16 — run registry (D3, Seam A). The status enum is frozen as a literal;
 // terminal states are frozen (no further updates); transitions are guarded.
 test("RUN_STATUSES freezes the D3 status enum", () => {
@@ -1156,6 +1336,22 @@ test("update throws on a terminal run (frozen)", () => {
   reg.update(id, { status: "succeeded" });
   assert.throws(() => reg.update(id, { status: "failed" }), /terminal/);
   assert.throws(() => reg.update(id, { lastOutput: "late" }), /terminal/);
+});
+
+test("update records endedAt when transitioning to a terminal status", () => {
+  const reg = createRunRegistry(() => 5000);
+  const id = reg.register({
+    role: "r",
+    source: "embedded",
+    channel: "background",
+    startedAt: 1000,
+    status: "running",
+  });
+  reg.update(id, { status: "succeeded" });
+  assert.equal(reg.get(id)?.endedAt, 5000, "terminal transition stamps endedAt from the registry clock");
+  const id2 = reg.register({ role: "r2", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(id2, { lastOutput: "working" });
+  assert.equal(reg.get(id2)?.endedAt, undefined, "non-terminal updates do not stamp endedAt");
 });
 
 test("update rejects an illegal status transition", () => {
@@ -1252,6 +1448,23 @@ test("formatRunSnapshot renders role, source, status, elapsed, and start time pe
   assert.ok(text.includes("[running]"), "status label");
   assert.ok(text.includes("1 s"), "elapsed 1000ms");
   assert.ok(text.includes("started"), "start time marker");
+});
+
+test("formatRunSnapshot shows actual duration for a terminal run, not elapsed since the snapshot", () => {
+  const runs: RunEntry[] = [
+    {
+      id: "a",
+      role: "researcher",
+      source: "embedded",
+      channel: "background",
+      status: "terminated",
+      startedAt: 0,
+      endedAt: 5_500,
+    },
+  ];
+  const text = formatRunSnapshot(runs, 7_800);
+  assert.ok(text.includes("5.5 s"), "terminal duration comes from endedAt, not the snapshot time");
+  assert.ok(!text.includes("7.8 s"), "elapsed must not keep counting after the run ended");
 });
 
 test("formatRunSnapshot renders last output, usage, and paths when present", () => {

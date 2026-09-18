@@ -103,7 +103,7 @@ test("a sleeping researcher is killed by the wall-clock cap and marked (real det
   const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 64 * 1024 * 1024, maxWallClockMs: 2000 };
 
   const handle = runBackgroundResearch(
-    { cwd: dir, task: "T", findingsPath, agents, budget },
+    { cwd: dir, task: "T", findingsPath, agents, budget, graceMs: 1000 },
     (_cmd, _args, opts) => spawn(process.execPath, ["-e", script], opts),
   );
   t.after(() => {
@@ -111,7 +111,8 @@ test("a sleeping researcher is killed by the wall-clock cap and marked (real det
     fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
   });
 
-  // the watcher ticks every 2s: at ~2s it warns (100%), at ~4s it kills (110%)
+  // the watcher ticks every 2s: at ~2s it issues the final notice (100%), and
+  // kills at the grace deadline (~4s with graceMs 1000)
   const deadline = Date.now() + 15_000;
   let text = "";
   while (Date.now() < deadline) {

@@ -927,7 +927,7 @@ export default function (pi: ExtensionAPI) {
       "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, then read the returned findingsPath later to collect the results.",
       "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
       'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
-      "Budget (optional): `budget` picks the effort tier (standard | tight) and `budgetOverrides` adjusts individual caps — 3 soft (maxSearchRounds, maxFetchPages, maxFindingLines) written into the prompt, 2 hard (maxLogBytes, maxWallClockMs) enforced by the runner (killed at 110%). Hard overrides may only tighten.",
+      "Budget (optional): `budget` picks the effort tier (standard | tight — match it to task scale: use `tight` only for narrow fact-checks; a doc-reading task on `tight` gets cut by the wall-clock cap) and `budgetOverrides` adjusts individual caps — 3 soft (maxSearchRounds, maxFetchPages, maxFindingLines) written into the prompt, 2 hard (maxLogBytes, maxWallClockMs) enforced by the runner (final notice + grace window at 100%, kill at the deadline; the log 110% line stays a runaway backstop). Hard overrides may only tighten.",
     ].join(" "),
     parameters: ResearchParams,
 

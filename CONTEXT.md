@@ -41,15 +41,31 @@ _Avoid_: tool fallback, alias mapping, tool renaming
 _Avoid_: maxDepth, effort, 力度
 
 **hard cap / soft cap（硬上限 / 软约束）**:
-预算的两层执行语义。soft cap 超限不 kill：researcher 进入收尾模式（wind-down），冻结对应维度、继续完成总结、写 `soft_limit_exceeded` 标记。hard cap 100% 线触达同样先收尾；110% 线强 kill 子进程，runner 在 findings 追加 `research-terminated` 标记。
+预算的两层执行语义。soft cap 超限不 kill：researcher 进入收尾模式（wind-down），冻结对应维度、继续完成总结、写 `soft_limit_exceeded` 标记。hard cap 100% 线触达时 runner 发出最后通牒（final notice）并进入收尾宽限（grace period），researcher 收尾后自然退出即成功，宽限到期仍未退出才强 kill 并追加 `research-terminated` 标记；log 维度另保留 110% 即时兜底，只咬失控深挖（runaway）。
 _Avoid_: limit, 限制
 
 **wind-down（收尾模式）**:
-soft cap 超限或 hard cap 100% 线触达后 researcher 进入的状态：冻结已超维度（不再 fetch、不再新搜、不再追加 findings），继续完成总结并写 `soft_limit_exceeded` 标记。
+预算触限后 researcher 进入的收尾状态：冻结已超维度（不再 fetch、不再新搜、不再追加 findings）、落盘检查点（checkpoint）、完成总结。两个触发通道：soft 维度由模型自感知（数行数/轮数）；hard 维度模型无法自观测，靠 runner 的最后通牒（final notice）经预算状态文件（budget-status file）通知。收尾后自然退出记 succeeded，宽限到期未退则 terminated。
 _Avoid_: graceful degradation, 降级
 
+**checkpoint（检查点写入）**:
+researcher 周期性把 findings 重写为截至目前的全部内容（每轮搜索前一次），使任何 kill/crash 最多损失最后一次落盘之后的新增。交付物保全的第一道保障。
+_Avoid_: 定期保存, 快照, snapshot
+
+**grace period（收尾宽限）**:
+hard cap 100% 线触达后、强 kill 之前的固定缓冲期，给 researcher 完成检查点与总结并自然退出的机会。宽限内自然退出记 succeeded，到点未退则 terminated。
+_Avoid_: 缓冲, cooldown
+
+**final notice（最后通牒）**:
+runner 在 hard cap 100% 线触达时发出的收尾信号：researcher 收到后立即停止扩张（fetch/搜索）、落盘检查点、完成总结并结束。它是 hard 维度（模型无法自观测的时间、日志体积）的 wind-down 触发通道。
+_Avoid_: warning, 警告
+
+**budget-status file（预算状态文件）**:
+runner 周期性重写、researcher 可读的预算消耗视图（各维度当前值 vs 上限、当前阶段）。弥补模型无法自观测 hard 维度的缺口——模型靠读它感知时间与日志消耗，而不是猜测。
+_Avoid_: status file, 状态文件
+
 **research-terminated marker（终止标记）**:
-hard cap 110% 线强 kill 后 runner 追加到 findings 的固定注释标记，记录 reason（`wall_clock_exceeded` / `log_bytes_exceeded`）、partial、limit、observed、at。主会话读 findings 时靠它分辨「被硬上限截断」与「正常结果」。
+收尾宽限（grace period）到期仍未自然退出、被强 kill 后 runner 追加到 findings 的固定注释标记，记录 reason（`wall_clock_exceeded` / `log_bytes_exceeded`）、partial、limit、observed、at。主会话读 findings 时靠它分辨「被硬上限截断」与「正常结果」。partial 描述的是运行被切断，交付物是否完整由 findings 内容自证（收尾检查点带 wind-down-complete 哨兵则完整）。
 _Avoid_: kill marker, 截断标记
 
 **runaway（失控深挖）**:
@@ -65,7 +81,7 @@ _Avoid_: saturation, 信息饱和
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
-一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`terminated` 是 background research 被 hard cap 击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`terminated` 是 background research 被硬上限击杀的终态——收尾宽限到期仍未自然退出，或 log 维度 110% 兜底触发（靠 findings 里的 `research-terminated` marker 判定）；宽限内自然退出则记 succeeded。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
 _Avoid_: pending, blocked, 状态机
 
 **subagent overview（运行总览）**:
