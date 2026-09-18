@@ -32,11 +32,14 @@ Two tools, matching the two semantics the upstream skills need:
 
 Six bundled roles: `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder`. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name; project agents sit behind a trust confirmation.
 
-Three slash commands, each a direct entry into one upstream pattern:
+Every run shows in a footer counter (`⧗ N subagents running`), including blocking runs. `/subagents` lists the full snapshot and manages runs: with no args it opens a menu (view runs / stop run / clear finished / show log); with args it runs `kill <id>`, `tail <id>`, `prune`, or `snapshot` directly. Stopping a run kills the whole research process tree (platform-split) and records the run as `aborted`, never `failed` or `terminated`. Each `research` run carries a budget (`standard` / `tight`, per-call overrides allowed). At 100% of a hard cap the researcher gets a final notice and 60 seconds to checkpoint its findings and wind down; a run that ignores the notice is killed and recorded `terminated`. Blocking runs can only be interrupted with Esc, which aborts the whole call; commands queue until it finishes.
+
+Four slash commands — the first three are direct entries into one upstream pattern each:
 
 - **`/code-review <ref>`** — two-axis review (Standards + Spec) of the diff since `<ref>`, run as two parallel blocking sub-agents. Use it to review a commit, branch, or merge-base. Maps to the `code-review` skill.
 - **`/design-it-twice <candidate>`** — generate 3-4 radically different interface designs for one deepening candidate as parallel blocking sub-agents, then compare by depth, locality, and seam placement. Maps to `codebase-design`'s DESIGN-IT-TWICE pattern (the final step of `improve-codebase-architecture`).
 - **`/research <question>`** — start a background researcher against primary sources and keep working; the findings file is read later. Maps to the `research` skill (and `wayfinder`'s research tickets).
+- **`/subagents`** — overview and management of every run: follow progress, stop a runaway researcher, clear finished records, read a background run's log.
 
 ## Install
 
@@ -60,9 +63,9 @@ Both install the extension (the two tools) and the prompts (the three slash comm
 extensions/subagent.ts   pi extension: registers the subagent + research tools
 src/lib.ts               pure logic — role definitions, tool-name resolution, dispatch args,
                          background spawn; zero pi-runtime imports, tested with node --test
-src/lib.test.ts          unit tests (39 passing)
-prompts/                 the three slash-command templates
-docs/adr/                decisions: blocking+background dual channel, tool-name resolution
+src/lib.test.ts          unit tests (122 passing)
+prompts/                 the four slash-command templates
+docs/adr/                decisions: dual channel, tool-name resolution, research budgets, run registry + management
 CONTEXT.md               domain glossary (subagent, role, blocking, background, ...)
 ```
 
@@ -74,7 +77,7 @@ Two decisions worth knowing about:
 ## Development
 
 ```sh
-npm test   # 39 tests, no pi runtime needed — src/lib.ts stays runtime-free
+npm test   # 122 tests, no pi runtime needed — src/lib.ts stays runtime-free
 ```
 
 The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, background spawn with injectable seams) are what the tests cover.

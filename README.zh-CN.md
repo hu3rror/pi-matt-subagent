@@ -32,11 +32,14 @@ Matt Pocock 的 skills 到处都在要求子代理，却没说明 pi 里具体�
 
 六个内置角色：`standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`。`~/.pi/agent/agents/` 下的用户代理和 `.pi/agents/` 下的项目代理按名字覆盖内置角色；项目代理需要信任确认。
 
-三个 slash command，每个直通一个上游模式：
+每条运行都会反映在 footer 计数器（`⧗ N subagents running`）上，blocking 运行期间也能看到。`/subagents` 列出完整快照并管理运行：无参弹菜单（查看运行 / 终止 run / 清理已结束 / 查看日志末尾），带参直接操作（`kill <id>` / `tail <id>` / `prune` / `snapshot`）。终止一条 run 会按平台差异硬杀整个 research 进程树，运行记作 `aborted`，而不是 `failed` 或 `terminated`。每条 `research` 运行都带研究预算（`standard` / `tight`，可按次覆盖）：hard cap 100% 线到达时 researcher 收到最后通牒，有 60s 收尾宽限落盘检查点并收尾；无视通牒的 run 才会被杀并记作 `terminated`。blocking 运行期间命令排队，中途只能用 Esc 整体中止。
+
+四个 slash command——前三个各直通一个上游模式：
 
 - **`/code-review <ref>`** —— 对 `<ref>` 以来的 diff 做两轴审查（Standards + Spec），两个并行 blocking 子代理。适合审一个 commit、分支或 merge-base。对应 `code-review` skill。
 - **`/design-it-twice <candidate>`** —— 为一个深化候选并行生成 3-4 个差异显著的接口设计，再从深度、局部性、接缝位置比较。对应 `codebase-design` 的 DESIGN-IT-TWICE 模式（也是 `improve-codebase-architecture` 的最后一步）。
 - **`/research <question>`** —— 起一个后台研究者查一手资料，主会话继续干活，稍后读 findings 文件。对应 `research` skill（以及 `wayfinder` 的 research 工单）。
+- **`/subagents`** —— 运行总览与管理：跟踪进度、终止 runaway 的 researcher、清理已结束记录、读 background run 日志。
 
 ## 安装
 
@@ -60,9 +63,9 @@ pi install <本仓库路径>
 extensions/subagent.ts   pi 扩展：注册 subagent + research 两个工具
 src/lib.ts               纯逻辑——角色定义、工具名解析、派发参数、后台 spawn；
                          零 pi 运行时依赖，用 node --test 测
-src/lib.test.ts          单元测试（39 个，全绿）
-prompts/                 三个 slash command 模板
-docs/adr/                决策记录：blocking+background 双通道、工具名归一化
+src/lib.test.ts          单元测试（122 个，全绿）
+prompts/                 四个 slash command 模板
+docs/adr/                决策记录：双通道、工具名归一化、研究预算、运行注册表 + 运行管理
 CONTEXT.md               领域词汇表（subagent、role、blocking、background……）
 ```
 
@@ -74,7 +77,7 @@ CONTEXT.md               领域词汇表（subagent、role、blocking、backgrou
 ## 开发
 
 ```sh
-npm test   # 39 个测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
+npm test   # 122 个测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
 ```
 
 扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入 seam 的后台 spawn）就是测试覆盖的对象。
