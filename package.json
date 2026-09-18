@@ -1,6 +1,6 @@
 {
   "name": "pi-matt-subagent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
   "keywords": [
