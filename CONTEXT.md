@@ -77,7 +77,7 @@ researcher 的停止规则：信息足够回答问题时立即收尾写 findings
 _Avoid_: saturation, 信息饱和
 
 **run registry（运行注册表）**:
-进程内统一追踪每个 subagent 运行（blocking 的 single/parallel/chain 每任务一条 + background research 一条）的状态表：role、source、channel、status、startedAt、最后输出行、token 用量（blocking 侧）、findings/log 路径（background 侧）。会话内概念，`session_shutdown` 时清空。驱动 footer 计数与 `/subagents` 命令两条可见性入口。
+进程内统一追踪每个 subagent 运行（blocking 的 single/parallel/chain 每任务一条 + background research 一条）的状态表：role、source、channel、status、startedAt、最后输出行、token 用量（blocking 侧）、findings/log 路径与进程 pid（background 侧，manual kill 的定位依据）。会话内概念，`session_shutdown` 时清空。驱动 footer 计数与 `/subagents` 命令两条可见性入口。
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
@@ -85,9 +85,8 @@ _Avoid_: session store, 状态表
 _Avoid_: pending, blocked, 状态机
 
 **run management（运行管理）**:
-用户对 run registry 的可操作面，v1 三个动作：kill（手动终止 running 的 background research，终态 aborted）、prune（移除全部已结束 run 的注册记录，文件保留在 tmp）、tail（读取 research.log 末尾，沿用 readLogTail 的字节上限）。入口是 `/subagents` 命令本身：无参弹 interactive menu，带参直接操作。硬约束：blocking 期间命令不可达，可管理的活动 run 只有 background research——blocking 任务的中止仍是 Esc 整体终止，不经本语义。
+用户对 run registry 的可操作面，v1 三个动作：kill（手动终止 running 的 background research，终态 aborted）、prune（移除全部已结束 run 的注册记录，文件保留在 tmp）、tail（读取 research.log 末尾，沿用 readLogTail 的字节上限）。入口是 `/subagents` 命令本身：无参弹 interactive menu，带参直接操作。硬约束：blocking 期间命令不可达，可管理的活动 run 只有 background research——blocking 任务的中止仍是 Esc 整体终止，不经本语义。UI 呈现词（菜单 Stop run / Clear finished / Show log…）与术语/命令动词（kill / tail / prune）分离——后者是规范用词。
 _Avoid_: 管理面板, panel
-_Avoid_: pending, blocked, 状态机
 
 **subagent overview（运行总览）**:
 用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为；`/subagents` 同时是 run management 的入口（无参菜单 / 带参直操作）。
