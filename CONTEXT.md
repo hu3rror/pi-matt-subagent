@@ -91,3 +91,7 @@ _Avoid_: 管理面板, panel
 **subagent overview（运行总览）**:
 用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为；`/subagents` 同时是 run management 的入口（无参菜单 / 带参直操作）。
 _Avoid_: status panel, 面板
+
+**tool error（工具错误信号）**:
+失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled / budget-error 文本）不在此语义内。
+_Avoid_: isError 字段, 错误返回

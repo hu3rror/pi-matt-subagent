@@ -541,7 +541,7 @@ export interface ResearchHandle {
  */
 export interface ResearchChild {
   unref(): void;
-  kill(signal?: string): boolean;
+  kill(signal?: NodeJS.Signals | number): boolean;
   /** null while the child is still running; set once it has exited. */
   exitCode: number | null;
   /** The spawned child's pid (D6: kill target); fakes may omit it. */
@@ -893,7 +893,7 @@ export interface RunEntry {
 export type RunPatch = Partial<Omit<RunEntry, "id" | "status">> & { status?: RunStatus };
 
 export interface RunRegistry {
-  register(entry: Omit<RunEntry, "id">): string;
+  register(entry: Omit<RunEntry, "id" | "status"> & { status?: RunStatus }): string;
   update(id: string, patch: RunPatch): void;
   get(id: string): RunEntry | undefined;
   /** Drops an entry entirely (prune); no frozen guards — the caller picks which runs are removable. */
@@ -913,7 +913,7 @@ export function createRunRegistry(now: () => number = Date.now): RunRegistry {
   const runs = new Map<string, RunEntry>();
   let nextId = 1;
 
-  const register = (entry: Omit<RunEntry, "id">): string => {
+  const register = (entry: Omit<RunEntry, "id" | "status"> & { status?: RunStatus }): string => {
     const id = `run-${nextId++}`;
     runs.set(id, { ...entry, id, status: entry.status ?? "queued" });
     return id;
@@ -1110,6 +1110,20 @@ export function blockingRunStatus(result: {
   if (result.stopReason === "aborted") return "aborted";
   if (result.exitCode !== 0 || result.stopReason === "error") return "failed";
   return "succeeded";
+}
+
+/**
+ * The tool-error message for a failed blocking run (single or chain step),
+ * thrown so the harness marks the result as an error (it derives isError only
+ * from throws; a returned field is dead code). The text matches what the model
+ * would otherwise receive in content.
+ */
+export function formatBlockingToolError(
+  mode: "single" | "chain",
+  opts: { agent?: string; step?: number; stopReason?: string; output: string },
+): string {
+  if (mode === "chain") return `Chain stopped at step ${opts.step} (${opts.agent}): ${opts.output}`;
+  return `Agent ${opts.stopReason || "failed"}: ${opts.output}`;
 }
 
 /**

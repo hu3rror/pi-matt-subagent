@@ -42,6 +42,7 @@ import {
   createRunRegistry,
   discoverAgents,
   emptyUsage,
+  formatBlockingToolError,
   formatRunSnapshot,
   formatTokens,
   getPiInvocation,
@@ -593,8 +594,11 @@ export default function (pi: ExtensionAPI) {
       if (!ok) return;
     }
     abortIntents.add(id);
+    // isKillable(run) above guarantees a live pid; it is never cleared for a registered run.
+    const pid = run.pid;
+    if (pid == null) return;
     try {
-      killProcessGroup(run.pid);
+      killProcessGroup(pid);
     } catch (err) {
       abortIntents.delete(id);
       ctx.ui.notify(`Failed to stop ${runRef(run)}: ${(err as Error).message}`, "error");
@@ -700,7 +704,7 @@ export default function (pi: ExtensionAPI) {
     parameters: SubagentParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
+      const agentScope: AgentScope = params.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
       const dispatchDefaults: DispatchDefaults = {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
@@ -804,13 +808,9 @@ export default function (pi: ExtensionAPI) {
           updateSubagentFooter(ctx, subagentRuns);
 
           if (isFailedResult(result)) {
-            return {
-              content: [
-                { type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}` },
-              ],
-              details: makeDetails(results),
-              isError: true,
-            };
+            throw new Error(
+              formatBlockingToolError("chain", { agent: step.agent, step: i + 1, output: getResultOutput(result) }),
+            );
           }
           previousOutput = getFinalOutput(result.messages);
         }
@@ -989,13 +989,9 @@ export default function (pi: ExtensionAPI) {
         });
         updateSubagentFooter(ctx, subagentRuns);
         if (isFailedResult(result)) {
-          return {
-            content: [
-              { type: "text", text: `Agent ${result.stopReason || "failed"}: ${getResultOutput(result)}` },
-            ],
-            details: makeDetails([result]),
-            isError: true,
-          };
+          throw new Error(
+            formatBlockingToolError("single", { stopReason: result.stopReason, output: getResultOutput(result) }),
+          );
         }
         return {
           content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
@@ -1064,7 +1060,7 @@ export default function (pi: ExtensionAPI) {
     parameters: ResearchParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const agentScope: AgentScope = (params.agentScope as AgentScope) ?? "user";
+      const agentScope: AgentScope = params.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
       const findingsPath = path.isAbsolute(params.findingsPath)
         ? params.findingsPath
@@ -1082,7 +1078,7 @@ export default function (pi: ExtensionAPI) {
         "Run project-local researcher?",
       );
       if (!approved) {
-        return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }] };
+        return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }], details: undefined };
       }
 
       const researcher = agents.find((a) => a.name === "researcher");
@@ -1100,7 +1096,7 @@ export default function (pi: ExtensionAPI) {
           overrides: params.budgetOverrides as ResearchBudgetOverrides | undefined,
         });
       } catch (err) {
-        return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }] };
+        return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }], details: undefined };
       }
 
       const runId = subagentRuns.register({

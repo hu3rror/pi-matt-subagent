@@ -13,6 +13,7 @@ import {
   discoverAgents,
   emptyUsage,
   evaluateResearchRun,
+  formatBlockingToolError,
   formatRunSnapshot,
   killProcessGroup,
   parseSubagentsArgs,
@@ -371,9 +372,9 @@ test("runBackgroundResearch backgrounds the researcher, wiring the log fd, and r
   assert.equal(c.opts.detached, true);
   assert.equal(c.opts.shell, false);
   assert.equal(c.opts.cwd, "/w");
-  assert.equal(c.opts.stdio[0], "ignore");
-  assert.equal(typeof c.opts.stdio[1], "number");
-  assert.equal(c.opts.stdio[1], c.opts.stdio[2]); // stdout+stderr share the log fd
+  assert.equal(c.opts.stdio![0], "ignore");
+  assert.equal(typeof c.opts.stdio![1], "number");
+  assert.equal(c.opts.stdio![1], c.opts.stdio![2]); // stdout+stderr share the log fd
   assert.equal(unrefCalls.length, 1);
 
   // args routed through buildResearchArgs (token presence; exact structure is Seam A's job, and
@@ -889,7 +890,7 @@ test("startResearchWatcher kills the child and appends the termination marker wh
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -930,7 +931,7 @@ test("startResearchWatcher issues a final notice at 100% of the log cap and does
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -977,7 +978,7 @@ test("startResearchWatcher writes the human-readable kill reason to the log tail
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -1016,7 +1017,7 @@ test("startResearchWatcher issues a final notice at 100% of the wall clock cap a
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -1057,7 +1058,7 @@ test("startResearchWatcher stops itself when the child has already exited", () =
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: 0,
@@ -1133,7 +1134,7 @@ test("startResearchWatcher calls onExit with killed:true after a hard-cap kill, 
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -1179,7 +1180,7 @@ test("startResearchWatcher kills at the grace deadline and appends the marker", 
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -1249,7 +1250,7 @@ test("startResearchWatcher reports a natural exit inside the grace period as suc
     const child: ResearchChild = {
       unref() {},
       kill: (s) => {
-        killed.push(s ?? "");
+        killed.push(String(s ?? ""));
         return true;
       },
       exitCode: null,
@@ -1582,11 +1583,27 @@ test("blockingRunStatus maps a single result to a run status", () => {
   assert.equal(blockingRunStatus({ exitCode: 1, aborted: true }), "aborted", "abort wins over exit code");
 });
 
+test("formatBlockingToolError formats a failed single run as the tool error", () => {
+  assert.equal(formatBlockingToolError("single", { stopReason: "error", output: "boom" }), "Agent error: boom");
+  assert.equal(formatBlockingToolError("single", { output: "boom" }), "Agent failed: boom");
+  assert.equal(
+    formatBlockingToolError("single", { stopReason: "aborted", output: "(no output)" }),
+    "Agent aborted: (no output)",
+  );
+});
+
+test("formatBlockingToolError formats a failed chain step as the tool error", () => {
+  assert.equal(
+    formatBlockingToolError("chain", { agent: "researcher", step: 2, output: "boom" }),
+    "Chain stopped at step 2 (researcher): boom",
+  );
+});
+
 test("resolveResearchRunStatus maps watcher exit info to a run status", () => {
   assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0 }), "succeeded");
   assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1 }), "failed");
-  assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "<!-- research-terminated" }), "terminated");
-  assert.equal(resolveResearchRunStatus({ killed: true, findingsText: "# no marker" }), "failed", "kill without marker is a failure");
+  assert.equal(resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "<!-- research-terminated" }), "terminated");
+  assert.equal(resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "# no marker" }), "failed", "kill without marker is a failure");
 });
 
 // S20 — run management (D6, ADR 0009): pid/remove, killProcessGroup, args, aborted, intents.
