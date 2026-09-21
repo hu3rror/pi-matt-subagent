@@ -30,12 +30,8 @@ import {
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
 
 import {
-  AGENT_SCOPES,
-  RESEARCH_BUDGET_TIERS,
-  THINKING_LEVELS,
   blockingRunStatus,
   buildDispatchArgs,
   cleanupAbortIntents,
@@ -49,14 +45,21 @@ import {
   isActiveRunStatus,
   isTerminalRunStatus,
   killProcessGroup,
+  mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
+  RESEARCH_FULL_PARAMS,
+  RESEARCH_TOOL_DESCRIPTION,
+  RESEARCH_TOOL_PARAMS,
   resolveEffectiveResearchBudget,
   resolveResearchRunStatus,
   resolveThinkingLevel,
   runBackgroundResearch,
   RUN_STATUS_ICONS,
   scopeAllowsProject,
+  SUBAGENT_FULL_PARAMS,
+  SUBAGENT_TOOL_DESCRIPTION,
+  SUBAGENT_TOOL_PARAMS,
   type AgentConfig,
   type AgentScope,
   type AgentSource,
@@ -68,6 +71,7 @@ import {
   type ResearchBudgetOverrides,
   type RunEntry,
   type RunRegistry,
+  type ThinkingLevel,
   type UsageStats,
 } from "../src/lib.ts";
 
@@ -476,59 +480,6 @@ async function runSingleAgent(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Tool schemas
-// ---------------------------------------------------------------------------
-
-const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
-const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
-const BudgetTierSchema = Type.Union(RESEARCH_BUDGET_TIERS.map((b) => Type.Literal(b)));
-const BudgetOverridesSchema = Type.Object(
-  {
-    maxSearchRounds: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max search rounds." })),
-    maxFetchPages: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max total fetch pages." })),
-    maxFindingLines: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max findings lines." })),
-    maxLogBytes: Type.Optional(Type.Integer({ minimum: 1, description: "Hard: max log bytes (runner-enforced; may only tighten)." })),
-    maxWallClockMs: Type.Optional(Type.Integer({ minimum: 1, description: "Hard: max wall clock ms (runner-enforced; may only tighten)." })),
-  },
-  { additionalProperties: false },
-);
-
-const TaskItem = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
-  task: Type.String({ description: "Task to delegate to the agent" }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-});
-
-const ChainItem = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
-  task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-});
-
-const SubagentParams = Type.Object({
-  agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
-  task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
-  tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-  chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
-  agentScope: Type.Optional(AgentScopeSchema),
-  thinkingLevel: Type.Optional(ThinkingLevelSchema),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-});
-
-const ResearchParams = Type.Object({
-  task: Type.String({ description: "The research question to investigate" }),
-  findingsPath: Type.String({
-    description: "Absolute or repo-relative path where the researcher must write findings (Markdown).",
-  }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the researcher process" })),
-  tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
-  agentScope: Type.Optional(AgentScopeSchema),
-  thinkingLevel: Type.Optional(ThinkingLevelSchema),
-  budget: Type.Optional(BudgetTierSchema),
-  budgetOverrides: Type.Optional(BudgetOverridesSchema),
-});
-
-// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -694,29 +645,31 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: [
-      "Delegate tasks to specialized subagents with isolated context windows (each runs in a separate pi process).",
-      "This is the BLOCKING subagent primitive: the call does not return until every subagent finishes, and the full results are returned in one result. Do NOT spawn subagents via bash and poll files.",
-      "When a skill says 'spawn sub-agents in parallel', use the `tasks` array (parallel mode); for a sequential handoff use `chain` (with the {previous} placeholder); for one task use `agent` + `task`.",
-      "Bundled roles: standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder.",
-      'Agent scope is "user" by default (user agents from ~/.pi/agent/agents plus the bundled roles); use "both" or "project" to add project agents from .pi/agents.',
-    ].join(" "),
-    parameters: SubagentParams,
+    description: SUBAGENT_TOOL_DESCRIPTION,
+    parameters: SUBAGENT_TOOL_PARAMS,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const agentScope: AgentScope = params.agentScope ?? "user";
+      const { input, ...directParams } = params;
+      const merged = mergeToolParams<typeof directParams, { model?: string; thinkingOverride?: ThinkingLevel }>({
+        direct: directParams,
+        input,
+        fullSchema: SUBAGENT_FULL_PARAMS,
+      });
+      const agentScope: AgentScope = merged.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
       const dispatchDefaults: DispatchDefaults = {
-        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        model: merged.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
         thinkingLevel: ctx.thinkingLevel,
-        thinkingOverride: params.thinkingLevel,
+        // input.thinkingOverride is the canonical per-run override field; the
+        // public `thinkingLevel` param maps to the same slot (ADR 0011).
+        thinkingOverride: merged.thinkingOverride ?? merged.thinkingLevel,
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
       const agents = discovery.agents;
 
-      const hasChain = (params.chain?.length ?? 0) > 0;
-      const hasTasks = (params.tasks?.length ?? 0) > 0;
-      const hasSingle = Boolean(params.agent && params.task);
+      const hasChain = (merged.chain?.length ?? 0) > 0;
+      const hasTasks = (merged.tasks?.length ?? 0) > 0;
+      const hasSingle = Boolean(merged.agent && merged.task);
       const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
       const mode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 
@@ -733,9 +686,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       const requestedNames = new Set<string>();
-      if (params.chain) for (const s of params.chain) requestedNames.add(s.agent);
-      if (params.tasks) for (const t of params.tasks) requestedNames.add(t.agent);
-      if (params.agent) requestedNames.add(params.agent);
+      if (merged.chain) for (const s of merged.chain) requestedNames.add(s.agent);
+      if (merged.tasks) for (const t of merged.tasks) requestedNames.add(t.agent);
+      if (merged.agent) requestedNames.add(merged.agent);
 
       const approved = await confirmProjectAgents(
         ctx,
@@ -752,12 +705,12 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      if (hasChain && params.chain) {
+      if (hasChain && merged.chain) {
         const results: SingleResult[] = [];
         let previousOutput = "";
 
-        for (let i = 0; i < params.chain.length; i++) {
-          const step = params.chain[i];
+        for (let i = 0; i < merged.chain.length; i++) {
+          const step = merged.chain[i];
           const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
           const runId = subagentRuns.register({
             role: step.agent,
@@ -823,23 +776,23 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      if (hasTasks && params.tasks) {
-        if (params.tasks.length > MAX_TASKS_PER_CALL) {
+      if (hasTasks && merged.tasks) {
+        if (merged.tasks.length > MAX_TASKS_PER_CALL) {
           return {
             content: [
               {
                 type: "text",
-                text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_TASKS_PER_CALL}.`,
+                text: `Too many parallel tasks (${merged.tasks.length}). Max is ${MAX_TASKS_PER_CALL}.`,
               },
             ],
             details: makeDetails([]),
           };
         }
 
-        const allResults: SingleResult[] = new Array(params.tasks.length);
+        const allResults: SingleResult[] = new Array(merged.tasks.length);
         // D3: pre-register every task as queued; each flips to running when
         // its concurrency slot actually opens (inside the map worker).
-        const runIds: string[] = params.tasks.map((t) =>
+        const runIds: string[] = merged.tasks.map((t) =>
           subagentRuns.register({
             role: t.agent,
             source: agents.find((a) => a.name === t.agent)?.source ?? "unknown",
@@ -849,11 +802,11 @@ export default function (pi: ExtensionAPI) {
           }),
         );
         updateSubagentFooter(ctx, subagentRuns);
-        for (let i = 0; i < params.tasks.length; i++) {
+        for (let i = 0; i < merged.tasks.length; i++) {
           allResults[i] = {
-            agent: params.tasks[i].agent,
+            agent: merged.tasks[i].agent,
             agentSource: "unknown",
-            task: params.tasks[i].task,
+            task: merged.tasks[i].task,
             exitCode: 0,
             running: true,
             messages: [],
@@ -875,7 +828,7 @@ export default function (pi: ExtensionAPI) {
 
         let results: SingleResult[];
         try {
-          results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
+          results = await mapWithConcurrencyLimit(merged.tasks, MAX_CONCURRENCY, async (t, index) => {
             subagentRuns.update(runIds[index], { status: "running" });
             updateSubagentFooter(ctx, subagentRuns);
             let result: SingleResult;
@@ -948,10 +901,10 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      if (hasSingle && params.agent && params.task) {
+      if (hasSingle && merged.agent && merged.task) {
         const runId = subagentRuns.register({
-          role: params.agent,
-          source: agents.find((a) => a.name === params.agent)?.source ?? "unknown",
+          role: merged.agent,
+          source: agents.find((a) => a.name === merged.agent)?.source ?? "unknown",
           channel: "blocking",
           status: "running",
           startedAt: Date.now(),
@@ -963,7 +916,7 @@ export default function (pi: ExtensionAPI) {
             ctx.cwd,
             dispatchDefaults,
             agents,
-            { agentName: params.agent, task: params.task, cwd: params.cwd },
+            { agentName: merged.agent, task: merged.task, cwd: merged.cwd },
             signal,
             (partial) => {
               // live progress: keep the registry's last output current
@@ -1050,21 +1003,21 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "research",
     label: "Research",
-    description: [
-      "Run a background research subagent (isolated pi process) that writes cited findings to a file, then return immediately.",
-      "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, then read the returned findingsPath later to collect the results.",
-      "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
-      'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
-      "Budget (optional): `budget` picks the effort tier (standard | tight — match it to task scale: use `tight` only for narrow fact-checks; a doc-reading task on `tight` gets cut by the wall-clock cap) and `budgetOverrides` adjusts individual caps — 3 soft (maxSearchRounds, maxFetchPages, maxFindingLines) written into the prompt, 2 hard (maxLogBytes, maxWallClockMs) enforced by the runner (final notice + grace window at 100%, kill at the deadline; the log 110% line stays a runaway backstop). Hard overrides may only tighten.",
-    ].join(" "),
-    parameters: ResearchParams,
+    description: RESEARCH_TOOL_DESCRIPTION,
+    parameters: RESEARCH_TOOL_PARAMS,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const agentScope: AgentScope = params.agentScope ?? "user";
+      const { input, ...directParams } = params;
+      const merged = mergeToolParams<typeof directParams, { model?: string }>({
+        direct: directParams,
+        input,
+        fullSchema: RESEARCH_FULL_PARAMS,
+      });
+      const agentScope: AgentScope = merged.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
-      const findingsPath = path.isAbsolute(params.findingsPath)
-        ? params.findingsPath
-        : path.join(ctx.cwd, params.findingsPath);
+      const findingsPath = path.isAbsolute(merged.findingsPath)
+        ? merged.findingsPath
+        : path.join(ctx.cwd, merged.findingsPath);
 
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
       const agents = discovery.agents;
@@ -1084,16 +1037,16 @@ export default function (pi: ExtensionAPI) {
       const researcher = agents.find((a) => a.name === "researcher");
       const thinking = resolveDispatchThinking(researcher, {
         thinkingLevel: ctx.thinkingLevel,
-        thinkingOverride: params.thinkingLevel,
+        thinkingOverride: merged.thinkingLevel,
       });
 
       let effectiveBudget: ResearchBudget;
       try {
         // every run carries a budget: call tier > role frontmatter tier > standard (ADR 0003)
         effectiveBudget = resolveEffectiveResearchBudget({
-          tier: params.budget as ResearchBudgetTier | undefined,
+          tier: merged.budget as ResearchBudgetTier | undefined,
           roleTier: researcher?.budget,
-          overrides: params.budgetOverrides as ResearchBudgetOverrides | undefined,
+          overrides: merged.budgetOverrides as ResearchBudgetOverrides | undefined,
         });
       } catch (err) {
         return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }], details: undefined };
@@ -1110,11 +1063,11 @@ export default function (pi: ExtensionAPI) {
       updateSubagentFooter(ctx, subagentRuns);
 
       const handle = runBackgroundResearch({
-        cwd: params.cwd ?? ctx.cwd,
-        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        cwd: merged.cwd ?? ctx.cwd,
+        model: merged.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
         thinkingLevel: thinking,
-        tools: params.tools,
-        task: params.task,
+        tools: merged.tools,
+        task: merged.task,
         findingsPath,
         budget: effectiveBudget,
         availableToolNames,

@@ -11,6 +11,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
+import { Type, type TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,6 +149,281 @@ export function resolveEffectiveResearchBudget(opts: {
 }): ResearchBudget {
   const tier: ResearchBudgetTier = opts.tier ?? opts.roleTier ?? "standard";
   return resolveResearchBudget(tier, opts.overrides);
+}
+
+// ---------------------------------------------------------------------------
+// Tool parameter schemas and the `input` escape hatch (ADR 0011)
+//   Single source of truth for both tools' model-facing parameter schemas,
+//   shared by the extension (registration + dispatch validation) and the
+//   contract tests (Seam D). The public schemas are the frozen surface plus
+//   one optional `input` field; the full schemas add the hidden parameters
+//   (`model` / `thinkingOverride`) the runtime dispatch layer already
+//   supports but the public schema hides. Merge semantics follow the
+//   lightweight-subagents-facade pattern: direct fields override same-name
+//   JSON keys (`{ ...parsed, ...direct }`), absent/empty `input` is a
+//   passthrough, and a non-object or unparseable value raises a
+//   model-visible tool error. After merging, the object is validated against
+//   the full contract; failures are summarized with field paths.
+// ---------------------------------------------------------------------------
+
+const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
+const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
+const BudgetTierSchema = Type.Union(RESEARCH_BUDGET_TIERS.map((b) => Type.Literal(b)));
+
+const BudgetOverridesSchema = Type.Object(
+  {
+    maxSearchRounds: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max search rounds." })),
+    maxFetchPages: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max total fetch pages." })),
+    maxFindingLines: Type.Optional(Type.Integer({ minimum: 1, description: "Soft: max findings lines." })),
+    maxLogBytes: Type.Optional(
+      Type.Integer({ minimum: 1, description: "Hard: max log bytes (runner-enforced; may only tighten)." }),
+    ),
+    maxWallClockMs: Type.Optional(
+      Type.Integer({ minimum: 1, description: "Hard: max wall clock ms (runner-enforced; may only tighten)." }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const TaskItem = Type.Object({
+  agent: Type.String({ description: "Name of the agent to invoke" }),
+  task: Type.String({ description: "Task to delegate to the agent" }),
+  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+});
+
+const ChainItem = Type.Object({
+  agent: Type.String({ description: "Name of the agent to invoke" }),
+  task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+});
+
+const SubagentPublicFields = {
+  agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
+  task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
+  tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
+  chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+  agentScope: Type.Optional(AgentScopeSchema),
+  thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+};
+
+const ResearchPublicFields = {
+  task: Type.String({ description: "The research question to investigate" }),
+  findingsPath: Type.String({
+    description: "Absolute or repo-relative path where the researcher must write findings (Markdown).",
+  }),
+  cwd: Type.Optional(Type.String({ description: "Working directory for the researcher process" })),
+  tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
+  agentScope: Type.Optional(AgentScopeSchema),
+  thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  budget: Type.Optional(BudgetTierSchema),
+  budgetOverrides: Type.Optional(BudgetOverridesSchema),
+};
+
+const SUBAGENT_INPUT_DESCRIPTION =
+  "JSON object string carrying advanced parameters the public schema hides. " +
+  "Direct fields override same-name JSON keys. Carries: model (provider/id override for this run), " +
+  "thinkingOverride (thinking level for this run).";
+
+const RESEARCH_INPUT_DESCRIPTION =
+  "JSON object string carrying advanced parameters the public schema hides. " +
+  "Direct fields override same-name JSON keys. Carries: model (provider/id override for this run).";
+
+/** `subagent`'s registered (public) parameter schema — what the model sees. */
+export const SUBAGENT_TOOL_PARAMS = Type.Object({
+  ...SubagentPublicFields,
+  input: Type.Optional(Type.String({ description: SUBAGENT_INPUT_DESCRIPTION })),
+});
+
+/** `research`'s registered (public) parameter schema — what the model sees. */
+export const RESEARCH_TOOL_PARAMS = Type.Object({
+  ...ResearchPublicFields,
+  input: Type.Optional(Type.String({ description: RESEARCH_INPUT_DESCRIPTION })),
+});
+
+/** Hidden parameters `subagent` accepts through `input` (runtime-supported, schema-hidden). */
+export const SUBAGENT_INPUT_KEYS = ["model", "thinkingOverride"] as const;
+
+/** Hidden parameters `research` accepts through `input` (runtime-supported, schema-hidden). */
+export const RESEARCH_INPUT_KEYS = ["model"] as const;
+
+/**
+ * The full `subagent` dispatch contract: the public fields plus the hidden
+ * parameters. The merged params object is validated against this before
+ * dispatch; it is never registered as the model-facing schema. Unlike the
+ * public schema (which stays as it always was), unknown keys are rejected
+ * here so a mistyped `input` fails loudly.
+ */
+export const SUBAGENT_FULL_PARAMS = Type.Object(
+  {
+    ...SubagentPublicFields,
+    model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
+    thinkingOverride: Type.Optional(ThinkingLevelSchema),
+  },
+  { additionalProperties: false },
+);
+
+/** The full `research` dispatch contract (public fields + hidden `model`). */
+export const RESEARCH_FULL_PARAMS = Type.Object(
+  {
+    ...ResearchPublicFields,
+    model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
+  },
+  { additionalProperties: false },
+);
+
+/** `subagent`'s registered description — part of the model-facing surface. */
+export const SUBAGENT_TOOL_DESCRIPTION = [
+  "Delegate tasks to specialized subagents with isolated context windows (each runs in a separate pi process).",
+  "This is the BLOCKING subagent primitive: the call does not return until every subagent finishes, and the full results are returned in one result. Do NOT spawn subagents via bash and poll files.",
+  "When a skill says 'spawn sub-agents in parallel', use the `tasks` array (parallel mode); for a sequential handoff use `chain` (with the {previous} placeholder); for one task use `agent` + `task`.",
+  "Bundled roles: standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder.",
+  'Agent scope is "user" by default (user agents from ~/.pi/agent/agents plus the bundled roles); use "both" or "project" to add project agents from .pi/agents.',
+].join(" ");
+
+/** `research`'s registered description — part of the model-facing surface. */
+export const RESEARCH_TOOL_DESCRIPTION = [
+  "Run a background research subagent (isolated pi process) that writes cited findings to a file, then return immediately.",
+  "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, then read the returned findingsPath later to collect the results.",
+  "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
+  'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
+  "Budget (optional): `budget` picks the effort tier (standard | tight — match it to task scale: use `tight` only for narrow fact-checks; a doc-reading task on `tight` gets cut by the wall-clock cap) and `budgetOverrides` adjusts individual caps — 3 soft (maxSearchRounds, maxFetchPages, maxFindingLines) written into the prompt, 2 hard (maxLogBytes, maxWallClockMs) enforced by the runner (final notice + grace window at 100%, kill at the deadline; the log 110% line stays a runaway backstop). Hard overrides may only tighten.",
+].join(" ");
+
+/** One tool's frozen model-facing surface, shared by the extension and the contract tests. */
+export interface ToolContract {
+  name: string;
+  description: string;
+  /** The registered (public) parameter schema — what the model sees. */
+  parameters: TSchema;
+  /** The full dispatch contract (public + hidden), used to validate merged params. */
+  fullParameters: TSchema;
+  /** The hidden parameter names accepted through `input`. */
+  hiddenKeys: readonly string[];
+}
+
+export const TOOL_CONTRACTS: readonly ToolContract[] = [
+  {
+    name: "subagent",
+    description: SUBAGENT_TOOL_DESCRIPTION,
+    parameters: SUBAGENT_TOOL_PARAMS,
+    fullParameters: SUBAGENT_FULL_PARAMS,
+    hiddenKeys: SUBAGENT_INPUT_KEYS,
+  },
+  {
+    name: "research",
+    description: RESEARCH_TOOL_DESCRIPTION,
+    parameters: RESEARCH_TOOL_PARAMS,
+    fullParameters: RESEARCH_FULL_PARAMS,
+    hiddenKeys: RESEARCH_INPUT_KEYS,
+  },
+];
+
+/**
+ * Seam E / D — the char/4 token proxy for one tool's model-facing surface:
+ * `JSON.stringify({ description, parameters })`. The benchmark measures this
+ * in a real pi process (before_agent_start) and the regression guard
+ * recomputes it from the same source objects, so both stay in lockstep.
+ */
+export function estimateToolSurfaceTokens(opts: { description: string; parameters: TSchema }): number {
+  const chars = JSON.stringify({ description: opts.description, parameters: opts.parameters }).length;
+  return Math.ceil(chars / 4);
+}
+
+/** The regression-guard ceiling factor: recomputed surface ≤ baseline × this. */
+export const TOKEN_GUARD_MULTIPLIER = 1.2;
+
+/**
+ * Merges the direct tool-call params with the `input` escape hatch and
+ * validates the result against the full parameter contract (public + hidden).
+ * Returns the merged params (the direct type plus the hidden keys declared by
+ * `THidden`) with `input` consumed. Throws a model-visible tool error (ADR
+ * 0010 contract) when `input` is present but not a JSON object string, or
+ * when the merged object violates the full schema — the message names the
+ * offending field paths. Absent/empty `input` is a passthrough that returns
+ * the direct params untouched.
+ */
+export function mergeToolParams<
+  TParams extends Record<string, unknown>,
+  THidden extends Record<string, unknown> = Record<string, unknown>,
+>(opts: {
+  direct: TParams;
+  input?: string;
+  fullSchema: TSchema;
+}): TParams & THidden {
+  const { direct, input, fullSchema } = opts;
+  if (input === undefined || input.trim() === "") return direct as TParams & THidden;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch (err) {
+    throw new Error(`input must be a JSON object string: ${(err as Error).message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`input must decode to a JSON object, got ${jsonValueKind(parsed)}`);
+  }
+  const merged = { ...(parsed as Record<string, unknown>), ...direct };
+  const errors = Array.from(Value.Errors(fullSchema, merged));
+  if (errors.length > 0) {
+    throw new Error(`Invalid input parameters: ${summarizeValidationErrors(errors)}`);
+  }
+  // The full-schema validation above is the proof the cast is safe: the merged
+  // object satisfies the contract the caller declared via THidden.
+  return merged as TParams & THidden;
+}
+
+function jsonValueKind(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+interface ValidationErrorLike {
+  keyword?: string;
+  instancePath?: string;
+  message?: string;
+  params?: Record<string, unknown>;
+}
+
+/**
+ * Collapses a TypeBox error stream into one field-path-keyed summary: unknown
+ * keys become `<path>: unknown parameter`, union alternatives collapse to
+ * `must be one of: ...`, and a type mismatch keeps its own message.
+ */
+function summarizeValidationErrors(errors: Iterable<ValidationErrorLike>): string {
+  const byPath = new Map<string, { allowed: string[]; message?: string }>();
+  for (const e of errors) {
+    // TypeBox signals an unknown key as a boolean/additionalProperties pair;
+    // the boolean "schema is false" entry is noise — the additionalProperties
+    // entry names the offending keys.
+    if (e.keyword === "boolean") continue;
+    if (e.keyword === "additionalProperties") {
+      // Nested unknown keys keep their parent path: the error's instancePath
+      // is the containing object ("" at the root), the params name the keys.
+      const base = e.instancePath || "";
+      const keys = Array.isArray(e.params?.additionalProperties) ? e.params.additionalProperties : [];
+      for (const key of keys) byPath.set(`${base}/${String(key)}`, { allowed: [], message: "unknown parameter" });
+      continue;
+    }
+    const path = e.instancePath || "/";
+    const current = byPath.get(path) ?? { allowed: [], message: undefined };
+    if (e.keyword === "const" && e.params?.allowedValue !== undefined) {
+      const literal = JSON.stringify(e.params.allowedValue);
+      if (!current.allowed.includes(literal)) current.allowed.push(literal);
+    } else if (e.message && (current.message === undefined || e.keyword === "type")) {
+      current.message = e.message;
+    }
+    byPath.set(path, current);
+  }
+  const parts: string[] = [];
+  for (const [path, issue] of byPath) {
+    parts.push(
+      issue.allowed.length > 0
+        ? `${path}: must be one of: ${issue.allowed.join(", ")}`
+        : `${path}: ${issue.message ?? "invalid"}`,
+    );
+  }
+  return parts.join("; ");
 }
 
 export interface AgentConfig {

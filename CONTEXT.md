@@ -95,3 +95,19 @@ _Avoid_: status panel, 面板
 **tool error（工具错误信号）**:
 失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled / budget-error 文本）不在此语义内。
 _Avoid_: isError 字段, 错误返回
+
+**input-JSON**:
+两个工具各带的可选 `input` 字段的契约（ADR 0011）：值必须是 JSON 对象字符串，携带公开 schema 未暴露但运行时已支持的参数（`subagent`: `model`/`thinkingOverride`；`research`: `model`）。合并规则沿用轻量 subagents 门面的通用做法：直接字段覆盖 JSON 同名键（`{...parsed, ...direct}`）；缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0010 throw 契约）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
+_Avoid_: input param, JSON escape hatch
+
+**token benchmark（token 基准）**:
+Seam E 的真实 pi 测量：在独立空配置进程中加载插件扩展 + 测量扩展，于 `before_agent_start` 捕获两个工具注册的模型可见面（description + 参数 schema 序列化），token 按 `ceil(字符数 / 4)` 的固定字符代理估算（非 provider tokenizer 计费）。记录测量日期与 pi 版本，结果喂给 README 表格，并作为回归守卫的基线常量（基线 × 1.2 硬断言，见 surface contract test）。脚本：`scripts/benchmark-tools.ts`，不进 `npm test`。
+_Avoid_: footprint estimate, 上下文占用
+
+**surface contract test（契约面测试）**:
+Seam D 的测试形态（Path 1，无假 pi）：在 runtime-free 的 lib 层断言两个工具的模型可见契约面——工具名、必填参数、隐藏参数只存在于完整 schema、token 回归守卫（description + schema 序列化的 char/4 ≤ 基线 × 1.2）。schema 单一事实源在 lib 模块，扩展与测试消费同一批对象，两者不会漂移。
+_Avoid_: fake-pi harness, 契约测试（泛称）
+
+**help-on-demand（按需帮助）**:
+被明确推迟的 schema 瘦身方案（ADR 0012）：把公开 schema 的详细参数藏到 `help` 操作/文档，按需展开，以缩小模型可见 footprint（轻量 subagents 门面的做法）。本插件在 token 基准基线建立之前不做——不盲目瘦身；基线数字出来后再单独决策。
+_Avoid_: schema slimming（作为已采纳）, help 命令

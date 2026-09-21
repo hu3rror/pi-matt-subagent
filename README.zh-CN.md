@@ -32,6 +32,10 @@ Matt Pocock 的 skills 到处都在要求子代理，却没说明 pi 里具体�
 
 六个内置角色：`standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`。`~/.pi/agent/agents/` 下的用户代理和 `.pi/agents/` 下的项目代理按名字覆盖内置角色；项目代理需要信任确认。
 
+两个工具都接受一个可选的 `input` 字段：JSON 对象字符串，携带公开 schema 未暴露的高级参数——`subagent` 接受 `model`（本次运行的模型覆盖）和 `thinkingOverride`（本次运行的思考档位），`research` 接受 `model`。直接字段覆盖 JSON 同名键；非法 JSON 或非对象值会抛清晰的模型可见错误；合并后的参数在派发前按完整契约校验（ADR 0011）。
+
+> **共存声明**：本插件注册名为 `subagent` 的工具，类似的 subagents 扩展也会注册同名工具。请避免与本插件同时使用其他 subagents 扩展——同名工具会冲突，二选一安装，不要同时装（ADR 0012）。
+
 每条运行都会反映在 footer 计数器（`⧗ N subagents running`）上，blocking 运行期间也能看到。`/subagents` 列出完整快照并管理运行：无参弹菜单（查看运行 / 终止 run / 清理已结束 / 查看日志末尾），带参直接操作（`kill <id>` / `tail <id>` / `prune` / `snapshot`）。终止一条 run 会按平台差异硬杀整个 research 进程树，运行记作 `aborted`，而不是 `failed` 或 `terminated`。每条 `research` 运行都带研究预算（`standard` / `tight`，可按次覆盖）：hard cap 100% 线到达时 researcher 收到最后通牒，有 60s 收尾宽限落盘检查点并收尾；无视通牒的 run 才会被杀并记作 `terminated`。blocking 运行期间命令排队，中途只能用 Esc 整体中止。
 
 四个 slash command——前三个各直通一个上游模式：
@@ -61,23 +65,37 @@ pi install <本仓库路径>
 
 ```
 extensions/subagent.ts   pi 扩展：注册 subagent + research 两个工具
-src/lib.ts               纯逻辑——角色定义、工具名解析、派发参数、后台 spawn；
-                         零 pi 运行时依赖，用 node --test 测
-src/lib.test.ts          单元测试（122 个，全绿）
+src/lib.ts               纯逻辑——角色定义、工具 schema（单一事实源）、input 合并/校验、
+                         工具名解析、派发参数、后台 spawn；零 pi 运行时依赖，用 node --test 测
+src/lib.test.ts          单元测试（141 个，全绿）
+scripts/                 token 基准（Seam E）+ 测量扩展（仅开发用）
 prompts/                 四个 slash command 模板
-docs/adr/                决策记录：双通道、工具名归一化、研究预算、运行注册表 + 运行管理
-CONTEXT.md               领域词汇表（subagent、role、blocking、background……）
+docs/adr/                决策记录：双通道、工具名归一化、研究预算、运行注册表 + 运行管理、
+                         input 逃生舱、共存立场
+CONTEXT.md               领域词汇表（subagent、role、blocking、background、input-JSON……）
 ```
 
 两个值得知道的决策：
 
 - **工具名归一化**（`docs/adr/0002`）：角色声明的工具在派发前会对照当前环境的注册表解析。环境里没有的名字回退到内置名（`ffgrep` → `grep`），解析不了的名字直接剔除，而不是让子进程静默缺工具。能适应 fff 模式切换，又不耦合 fff 本身。
 - **双通道**（`docs/adr/0001`）：blocking 是默认心智模型；只有 `research`/`wayfinder` 走后台通道。
+- **`input` 逃生舱**（`docs/adr/0011`）：按次的高级参数（`model`、`thinkingOverride`）走 `input` JSON 字段——直接字段覆盖 JSON 键、非法输入大声失败、合并后按完整契约校验再派发。参数 schema 以 `src/lib.ts` 为单一事实源。
+
+## Token benchmark（token 基准）
+
+单独启用本扩展时，模型可见的常驻初始化贡献如下：
+
+| 工具 | 构成 | Tokens |
+| --- | --- | ---: |
+| `subagent` | description + 参数 schema | **630** |
+| `research` | description + 参数 schema | **735** |
+
+测量环境：pi 0.86.1，2026-09-21，独立临时进程、空白工作目录与空白配置（排除其他扩展、Skills、上下文文件与 slash commands；计入 `before_agent_start` 表面）。Token 按 `ceil(字符数 / 4)` 的固定字符代理估算，并非 provider tokenizer 实际计费值。用 `node scripts/benchmark-tools.ts` 复测；`npm test` 断言序列化表面不超过基线 × 1.2（token 回归守卫），footprint 膨胀会被测试套件拦下。
 
 ## 开发
 
 ```sh
-npm test   # 122 个测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
+npm test   # 141 个测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
 ```
 
-扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入 seam 的后台 spawn）就是测试覆盖的对象。
+扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入 seam 的后台 spawn、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。

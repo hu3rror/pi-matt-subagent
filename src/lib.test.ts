@@ -19,6 +19,12 @@ import {
   parseSubagentsArgs,
   readLogTail,
   RESEARCH_BUDGETS,
+  estimateToolSurfaceTokens,
+  mergeToolParams,
+  RESEARCH_FULL_PARAMS,
+  RESEARCH_INPUT_KEYS,
+  RESEARCH_TOOL_DESCRIPTION,
+  RESEARCH_TOOL_PARAMS,
   resolveEffectiveResearchBudget,
   resolveResearchBudget,
   resolveResearchRunStatus,
@@ -30,7 +36,13 @@ import {
   RUN_STATUSES,
   scopeAllowsProject,
   startResearchWatcher,
+  SUBAGENT_FULL_PARAMS,
+  SUBAGENT_INPUT_KEYS,
+  SUBAGENT_TOOL_DESCRIPTION,
+  SUBAGENT_TOOL_PARAMS,
+  TOKEN_GUARD_MULTIPLIER,
   TOOL_ALIASES,
+  TOOL_CONTRACTS,
   type AgentConfig,
   type FrontmatterParser,
   type LogTailFs,
@@ -1756,4 +1768,185 @@ test("runBackgroundResearch exposes the spawned child pid on the handle", (t) =>
     fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
   });
   assert.equal(handle.pid, 7777);
+});
+
+// ---------------------------------------------------------------------------
+// S21 — Seam A: `input` merge semantics (ADR 0011). Direct fields override
+// same-name JSON keys; absent/empty input is a passthrough; unparseable or
+// non-object input raises the documented model-visible error; the merged
+// object is validated against the full contract and failures name field
+// paths. Pure, runtime-free: unit-tested with node --test.
+// ---------------------------------------------------------------------------
+
+test("mergeToolParams merges input JSON under the direct params (direct fields win)", () => {
+  const direct: Record<string, unknown> = { agent: "researcher", task: "direct task" };
+  const merged = mergeToolParams({
+    direct,
+    input: JSON.stringify({ task: "input task", model: "anthropic/claude-x", thinkingOverride: "low" }),
+    fullSchema: SUBAGENT_FULL_PARAMS,
+  });
+  assert.equal(merged.task, "direct task", "direct field wins over the same-name JSON key");
+  assert.equal(merged.agent, "researcher");
+  assert.equal(merged.model, "anthropic/claude-x", "hidden params are routed into the merged object");
+  assert.equal(merged.thinkingOverride, "low");
+});
+
+test("mergeToolParams passes through when input is absent or empty", () => {
+  const direct: Record<string, unknown> = { agent: "researcher", task: "T" };
+  assert.equal(mergeToolParams({ direct, fullSchema: SUBAGENT_FULL_PARAMS }), direct, "no input returns direct untouched");
+  assert.deepEqual(mergeToolParams({ direct, input: "", fullSchema: SUBAGENT_FULL_PARAMS }), direct);
+  assert.deepEqual(mergeToolParams({ direct, input: "   ", fullSchema: SUBAGENT_FULL_PARAMS }), direct);
+});
+
+test("mergeToolParams throws a model-visible error on unparseable input", () => {
+  assert.throws(
+    () => mergeToolParams({ direct: { task: "T" }, input: "{not json", fullSchema: SUBAGENT_FULL_PARAMS }),
+    /input must be a JSON object string: /,
+  );
+});
+
+test("mergeToolParams rejects non-object JSON input values", () => {
+  const base = { direct: { task: "T" } as Record<string, unknown>, fullSchema: SUBAGENT_FULL_PARAMS };
+  assert.throws(() => mergeToolParams({ ...base, input: "[1, 2]" }), /input must decode to a JSON object, got array/);
+  assert.throws(() => mergeToolParams({ ...base, input: "42" }), /input must decode to a JSON object, got number/);
+  assert.throws(() => mergeToolParams({ ...base, input: '"str"' }), /input must decode to a JSON object, got string/);
+  assert.throws(() => mergeToolParams({ ...base, input: "null" }), /input must decode to a JSON object, got null/);
+  assert.throws(() => mergeToolParams({ ...base, input: "true" }), /input must decode to a JSON object, got boolean/);
+});
+
+test("mergeToolParams names the offending field path on a type violation", () => {
+  assert.throws(
+    () => mergeToolParams({ direct: { task: "T" }, input: '{"model": 42}', fullSchema: SUBAGENT_FULL_PARAMS }),
+    /Invalid input parameters: \/model: must be string/,
+  );
+});
+
+test("mergeToolParams collapses a union violation to the allowed values with the field path", () => {
+  assert.throws(
+    () =>
+      mergeToolParams({ direct: { task: "T" }, input: '{"thinkingOverride": "bogus"}', fullSchema: SUBAGENT_FULL_PARAMS }),
+    /\/thinkingOverride: must be one of: "off", "minimal", "low", "medium", "high", "xhigh", "max"/,
+  );
+});
+
+test("mergeToolParams rejects unknown keys in input by path", () => {
+  assert.throws(
+    () => mergeToolParams({ direct: { task: "T" }, input: '{"bogus": 1}', fullSchema: SUBAGENT_FULL_PARAMS }),
+    /\/bogus: unknown parameter/,
+  );
+});
+
+test("mergeToolParams keeps the parent path on nested unknown keys", () => {
+  assert.throws(
+    () =>
+      mergeToolParams({
+        direct: { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>,
+        input: '{"budgetOverrides": {"bogus": 1}}',
+        fullSchema: RESEARCH_FULL_PARAMS,
+      }),
+    /\/budgetOverrides\/bogus: unknown parameter/,
+  );
+});
+
+test("mergeToolParams validates nested input paths", () => {
+  assert.throws(
+    () => mergeToolParams({ direct: { task: "T" }, input: '{"tasks": [{"agent": 5}]}', fullSchema: SUBAGENT_FULL_PARAMS }),
+    /\/tasks\/0\/agent: must be string/,
+  );
+});
+
+test("mergeToolParams validates the research full contract (model routed, unknown keys rejected)", () => {
+  const merged = mergeToolParams({
+    direct: { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>,
+    input: '{"model": "openai/gpt-x", "budget": "tight"}',
+    fullSchema: RESEARCH_FULL_PARAMS,
+  });
+  assert.equal(merged.model, "openai/gpt-x");
+  assert.equal(merged.budget, "tight");
+  assert.throws(
+    () =>
+      mergeToolParams({
+        direct: { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>,
+        input: '{"steer": true}',
+        fullSchema: RESEARCH_FULL_PARAMS,
+      }),
+    /\/steer: unknown parameter/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// S22 — Seam D: surface contract tests (ADR 0011). The model-facing contract
+// (tool names, required parameters, hidden parameters present only in the
+// full schema) is asserted against the shared lib module — no fake pi is
+// constructed (Path 1). The token-budget guard keeps the serialized surface
+// (description + parameter schema, ceil(chars/4)) within baseline × 1.2 of
+// the Seam E measurement recorded below.
+// ---------------------------------------------------------------------------
+
+// Seam E baseline — measured with `node scripts/benchmark-tools.ts`
+// (separate pi process, empty config, before_agent_start, ceil(chars/4)).
+// Per-tool tokens of description + serialized parameter schema, measured
+// with pi 0.86.1 on 2026-09-21.
+const TOKEN_BASELINE: Record<string, number> = { subagent: 630, research: 735 };
+
+test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
+  assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
+});
+
+test("subagent schema keeps its public fields and gains the input field", () => {
+  const props = Object.keys(SUBAGENT_TOOL_PARAMS.properties ?? {});
+  assert.deepEqual(
+    new Set(props),
+    new Set(["agent", "task", "tasks", "chain", "agentScope", "thinkingLevel", "cwd", "input"]),
+  );
+  assert.deepEqual(SUBAGENT_TOOL_PARAMS.required ?? [], [], "subagent has no required parameters");
+});
+
+test("research schema keeps its public fields and gains the input field", () => {
+  const props = Object.keys(RESEARCH_TOOL_PARAMS.properties ?? {});
+  assert.deepEqual(
+    new Set(props),
+    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "budget", "budgetOverrides", "input"]),
+  );
+  assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
+});
+
+test("hidden parameters live only in the full schemas, never in the public ones", () => {
+  for (const contract of TOOL_CONTRACTS) {
+    const publicProps = Object.keys(contract.parameters.properties ?? {});
+    const fullProps = Object.keys(contract.fullParameters.properties ?? {});
+    for (const key of contract.hiddenKeys) {
+      assert.ok(fullProps.includes(key), `${contract.name} full schema carries hidden ${key}`);
+      assert.ok(!publicProps.includes(key), `${contract.name} public schema hides ${key}`);
+    }
+    assert.ok(!fullProps.includes("input"), `${contract.name} full schema consumes the transport field`);
+  }
+  assert.deepEqual(SUBAGENT_INPUT_KEYS, ["model", "thinkingOverride"]);
+  assert.deepEqual(RESEARCH_INPUT_KEYS, ["model"]);
+});
+
+test("the registered descriptions match the frozen surface", () => {
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.startsWith("Delegate tasks to specialized subagents"));
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.startsWith("Run a background research subagent"));
+  assert.equal(TOOL_CONTRACTS.find((t) => t.name === "subagent")?.description, SUBAGENT_TOOL_DESCRIPTION);
+  assert.equal(TOOL_CONTRACTS.find((t) => t.name === "research")?.description, RESEARCH_TOOL_DESCRIPTION);
+});
+
+test("estimateToolSurfaceTokens uses ceil(chars / 4) on description + serialized schema", () => {
+  const contract = TOOL_CONTRACTS[0];
+  const tokens = estimateToolSurfaceTokens({ description: contract.description, parameters: contract.parameters });
+  const chars = JSON.stringify({ description: contract.description, parameters: contract.parameters }).length;
+  assert.equal(tokens, Math.ceil(chars / 4));
+});
+
+test("model-facing tool surface stays within baseline × 1.2 (token regression guard)", () => {
+  for (const contract of TOOL_CONTRACTS) {
+    const tokens = estimateToolSurfaceTokens({ description: contract.description, parameters: contract.parameters });
+    const ceiling = TOKEN_BASELINE[contract.name] * TOKEN_GUARD_MULTIPLIER;
+    assert.ok(
+      tokens <= ceiling,
+      `${contract.name} model-facing surface is ${tokens} tokens, over the ${ceiling} guard ceiling ` +
+        `(baseline ${TOKEN_BASELINE[contract.name]} × ${TOKEN_GUARD_MULTIPLIER})`,
+    );
+  }
 });
