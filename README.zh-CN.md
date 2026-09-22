@@ -6,7 +6,7 @@
   <img src="docs/banner.png" alt="pi-matt-subagent：从 Matt Pocock skills 到 blocking/background 子代理" width="800">
 </p>
 
-一个 pi 插件，负责把 [Matt Pocock 的 skills](https://github.com/mattpocock) 里「spawn sub-agents」这类指令变成真实可跑的动作。当某个 skill 写着 *"spawn sub-agents in parallel"* 或 *"fire the research subagents"* 时，这个插件就是执行层：它启动真正的 pi 子进程，阻塞等待（后台场景则不等待），然后把结果交回给你。
+一个 pi 插件，负责把 [Matt Pocock 的 skills](https://github.com/mattpocock) 里「spawn sub-agents」这类指令变成真实可跑的动作。当某个 skill 写着 *"spawn sub-agents in parallel"* 或 *"fire the research subagents"* 时，这个插件就是执行层：它启动真正的 pi 子代理——blocking 用分离子进程，后台 research 用进程内第二会话（ADR 0013）——阻塞等待（后台场景则不等待），然后把结果交回给你。
 
 这个插件本身就是 dogfooding 的产物：上游 skills 有子代理需求，插件才存在。它的两个工具与这些 skill 描述的子代理模式一一对应。
 
@@ -88,14 +88,14 @@ CONTEXT.md               领域词汇表（subagent、role、blocking、backgrou
 | 工具 | 构成 | Tokens |
 | --- | --- | ---: |
 | `subagent` | description + 参数 schema | **630** |
-| `research` | description + 参数 schema | **735** |
+| `research` | description + 参数 schema | **517** |
 
-测量环境：pi 0.86.1，2026-09-21，独立临时进程、空白工作目录与空白配置（排除其他扩展、Skills、上下文文件与 slash commands；计入 `before_agent_start` 表面）。Token 按 `ceil(字符数 / 4)` 的固定字符代理估算，并非 provider tokenizer 实际计费值。用 `node scripts/benchmark-tools.ts` 复测；`npm test` 断言序列化表面不超过基线 × 1.2（token 回归守卫），footprint 膨胀会被测试套件拦下。
+测量环境：pi 0.87.0，2026-09-22（ADR 0013 表面变更后重测），独立临时进程、空白工作目录与空白配置（排除其他扩展、Skills、上下文文件与 slash commands；计入 `before_agent_start` 表面）。Token 按 `ceil(字符数 / 4)` 的固定字符代理估算，并非 provider tokenizer 实际计费值。用 `node scripts/benchmark-tools.ts` 复测；`npm test` 断言序列化表面不超过基线 × 1.2（token 回归守卫），footprint 膨胀会被测试套件拦下。
 
 ## 开发
 
 ```sh
-npm test   # 141 个测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
+npm test   # 单元测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
 ```
 
-扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入 seam 的后台 spawn、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。
+扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入子会话工厂 seam 的后台 runner、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。

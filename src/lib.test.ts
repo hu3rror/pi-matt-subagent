@@ -4,30 +4,23 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  appendResearchTerminationMarker,
+  appendResearchTerminatedMarker,
   blockingRunStatus,
-  buildResearchArgs,
   buildResearchPrompt,
-  cleanupAbortIntents,
   createRunRegistry,
+  DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
   emptyUsage,
-  evaluateResearchRun,
+  estimateToolSurfaceTokens,
   formatBlockingToolError,
   formatRunSnapshot,
-  killProcessGroup,
+  mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
-  RESEARCH_BUDGETS,
-  estimateToolSurfaceTokens,
-  mergeToolParams,
   RESEARCH_FULL_PARAMS,
   RESEARCH_INPUT_KEYS,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
-  resolveEffectiveResearchBudget,
-  resolveResearchBudget,
-  resolveResearchRunStatus,
   resolveRole,
   resolveThinkingLevel,
   resolveTools,
@@ -35,7 +28,6 @@ import {
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
-  startResearchWatcher,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_TOOL_DESCRIPTION,
@@ -46,9 +38,8 @@ import {
   type AgentConfig,
   type FrontmatterParser,
   type LogTailFs,
-  type ResearchBudgetOverrides,
-  type ResearchBudgetTier,
-  type ResearchChild,
+  type ResearchChildSession,
+  type ResearchExitInfo,
   type RunEntry,
 } from "./lib.ts";
 
@@ -230,7 +221,8 @@ test("resolveRole returns undefined for an unknown name", () => {
   assert.equal(resolveRole([], "nope"), undefined);
 });
 
-// S5 — buildResearchPrompt
+// S5 — buildResearchPrompt (ADR 0013): role prompt + findings path + a single
+// wall-clock cap line + the checkpoint rule. No budget block, no tiers.
 test("buildResearchPrompt embeds the agent system prompt, findings path, and task", () => {
   const agent: AgentConfig = {
     name: "researcher",
@@ -244,178 +236,35 @@ test("buildResearchPrompt embeds the agent system prompt, findings path, and tas
   assert.ok(p.includes("do the thing"));
 });
 
-// S6 — buildResearchArgs
 function embeddedResearcher(): AgentConfig {
   return { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
 }
 
-// Expected tool list for the default research set after platform mapping.
-// Deliberately a literal, not derived from DEFAULT_RESEARCH_TOOLS, so the
-// mapping is verified independently of the implementation.
-const TOOLS_EXPECTED = process.platform === "win32" ? ["read", "grep", "find", "ls", "powershell", "write"] : ["read", "grep", "find", "ls", "bash", "write"];
-
-test("buildResearchArgs prefixes the fixed pi flags", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "T",
-    findingsPath: "/tmp/f.md",
-    promptPath: "/tmp/p.md",
-  });
-  assert.deepEqual(args.slice(0, 4), ["--mode", "json", "-p", "--no-session"]);
+test("buildResearchPrompt writes the 60-minute wall-clock cap as a single line by default", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
+  assert.ok(p.includes("60 min"), "the default cap must reach the prompt");
+  assert.ok(p.includes("wall-clock time"), "the wall-clock line must be present");
+  assert.equal(DEFAULT_RESEARCH_WALL_CLOCK_MS, 60 * 60 * 1000, "the default is 60 minutes");
 });
 
-test("buildResearchArgs renders model and thinkingLevel when given", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "T",
-    findingsPath: "/tmp/f.md",
-    model: "p/m",
-    thinkingLevel: "low",
-    promptPath: "/tmp/p.md",
-  });
-  assert.ok(args.includes("--model") && args[args.indexOf("--model") + 1] === "p/m");
-  assert.ok(args.includes("--thinking") && args[args.indexOf("--thinking") + 1] === "low");
+test("buildResearchPrompt reflects a tightened wall-clock cap", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md", 5 * 60 * 1000);
+  assert.ok(p.includes("5 min"));
+  assert.ok(!p.includes("60 min"));
 });
 
-test("buildResearchArgs defaults tools to the research set, mapped for the platform", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "T",
-    findingsPath: "/tmp/f.md",
-    promptPath: "/tmp/p.md",
-  });
-  const i = args.indexOf("--tools");
-  assert.ok(i >= 0);
-  assert.deepEqual(args[i + 1].split(","), TOOLS_EXPECTED);
+test("buildResearchPrompt carries the checkpoint rule and the enough-to-answer rule", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
+  assert.ok(p.includes("checkpoint"), "checkpoint-write behaviour must be in the prompt");
+  assert.ok(p.includes("enough information to answer well"), "the enough-to-answer rule must be in the prompt");
 });
 
-test("buildResearchArgs honors explicit tools over role defaults", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "T",
-    findingsPath: "/tmp/f.md",
-    tools: ["read", "write"],
-    promptPath: "/tmp/p.md",
-  });
-  const i = args.indexOf("--tools");
-  assert.deepEqual(args[i + 1].split(","), ["read", "write"]);
-});
-
-test("buildResearchArgs degrades fff tool names against the given registry", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "T",
-    findingsPath: "/tmp/f.md",
-    tools: ["ffgrep", "ffind", "ls"],
-    availableToolNames: new Set(["grep", "find", "ls"]),
-    promptPath: "/tmp/p.md",
-  });
-  const i = args.indexOf("--tools");
-  assert.deepEqual(args[i + 1].split(","), ["grep", "find", "ls"]);
-});
-
-test("buildResearchArgs routes the prompt file via --append-system-prompt and keeps the task positional", () => {
-  const args = buildResearchArgs({
-    agent: embeddedResearcher(),
-    task: "investigate X",
-    findingsPath: "/tmp/f.md",
-    promptPath: "/tmp/p.md",
-  });
-  const i = args.indexOf("--append-system-prompt");
-  assert.ok(i >= 0);
-  assert.equal(args[i + 1], "/tmp/p.md");
-  assert.equal(args[args.length - 1], "Task: investigate X");
-  assert.ok(
-    !args.some((a) => a.includes("/tmp/f.md")),
-    "findings path must not leak into argv (it lives in the prompt file instead)",
-  );
-  assert.ok(
-    !args.some((a) => a.includes("SP")),
-    "role prompt text must not leak into argv (it lives in the prompt file instead)",
-  );
-});
-
-// AgentScope helpers
-test("scopeAllowsProject is true only for project and both", () => {
-  assert.equal(scopeAllowsProject("user"), false);
-  assert.equal(scopeAllowsProject("project"), true);
-  assert.equal(scopeAllowsProject("both"), true);
-});
-
-// S7 — runBackgroundResearch
-test("runBackgroundResearch backgrounds the researcher, wiring the log fd, and returns a handle", (t) => {
-  const calls: Array<{ cmd: string; args: string[]; opts: { detached?: boolean; shell?: boolean; cwd?: string; stdio?: unknown[] } }> = [];
-  const unrefCalls: boolean[] = [];
-  const fakeSpawn = (cmd: string, args: string[], opts: { detached?: boolean; shell?: boolean; cwd?: string; stdio?: unknown[] }) => {
-    calls.push({ cmd, args, opts });
-    return {
-      unref: () => {
-        unrefCalls.push(true);
-      },
-    };
-  };
-  const agents: AgentConfig[] = [embeddedResearcher()];
-
-  const handle = runBackgroundResearch(
-    {
-      cwd: "/w",
-      model: "p/m",
-      thinkingLevel: "low",
-      tools: ["read", "write"],
-      task: "T",
-      findingsPath: "/tmp/f.md",
-      agents,
-    },
-    fakeSpawn as never,
-  );
-  t.after(() => {
-    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
-  });
-
-  // handle shape: researchId names the tmp dir, logPath is a research.log inside it
-  assert.equal(handle.findingsPath, "/tmp/f.md");
-  assert.match(handle.researchId, /^pi-research-/);
-  assert.match(handle.logPath, /research\.log$/);
-  assert.ok(handle.logPath.includes(handle.researchId));
-
-  // exactly one spawn, with background semantics
-  assert.equal(calls.length, 1);
-  const c = calls[0];
-  assert.equal(c.opts.detached, true);
-  assert.equal(c.opts.shell, false);
-  assert.equal(c.opts.cwd, "/w");
-  assert.equal(c.opts.stdio![0], "ignore");
-  assert.equal(typeof c.opts.stdio![1], "number");
-  assert.equal(c.opts.stdio![1], c.opts.stdio![2]); // stdout+stderr share the log fd
-  assert.equal(unrefCalls.length, 1);
-
-  // args routed through buildResearchArgs (token presence; exact structure is Seam A's job, and
-  // getPiInvocation prepends the current script under node --test)
-  assert.ok(c.args.includes("--mode"));
-  assert.ok(c.args.includes("--model"));
-  assert.ok(c.args.includes("--tools"));
-  assert.ok(c.args.includes("--append-system-prompt"));
-
-  // the prompt file sits next to the log and carries role prompt + findings path
-  const promptFile = path.join(path.dirname(handle.logPath), "prompt.md");
-  const promptText = fs.readFileSync(promptFile, "utf8");
-  assert.ok(promptText.includes("SP"), "role system prompt should be in the file");
-  assert.ok(promptText.includes("/tmp/f.md"), "findings path should be in the file, not argv");
-  assert.ok(promptText.includes("T"), "task should be in the file");
-});
-
-test("runBackgroundResearch throws when no researcher role is available", () => {
-  const fakeSpawn = () => {
-    throw new Error("must not spawn");
-  };
-  assert.throws(
-    () =>
-      runBackgroundResearch(
-        { cwd: "/w", task: "T", findingsPath: "/tmp/f.md", agents: [] },
-        fakeSpawn as never,
-      ),
-    /No "researcher" role available/,
-  );
+test("buildResearchPrompt has no budget block or tiers", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
+  assert.ok(!p.includes("Research budget"));
+  assert.ok(!p.includes("search rounds"));
+  assert.ok(!p.includes("wind-down"));
+  assert.ok(!p.includes("soft_limit_exceeded"));
 });
 
 // tracer bullet for Spec-9: an overridden researcher role must win in the background path
@@ -433,6 +282,319 @@ test("background research prompt uses an overridden researcher role", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// AgentScope helpers
+test("scopeAllowsProject is true only for project and both", () => {
+  assert.equal(scopeAllowsProject("user"), false);
+  assert.equal(scopeAllowsProject("project"), true);
+  assert.equal(scopeAllowsProject("both"), true);
+});
+
+// S7 — runBackgroundResearch (ADR 0013, primary seam). The runner is
+// runtime-free: an injectable child-session factory stands in for the
+// extension's in-process createAgentSession wiring.
+
+/** A fake child session whose behavior tests configure per test. */
+function fakeChild(overrides: Partial<ResearchChildSession> = {}): ResearchChildSession {
+  return {
+    output: (async function* () {
+      return;
+    })(),
+    done: new Promise<void>(() => {}),
+    abort: () => {},
+    ...overrides,
+  };
+}
+
+function pendingChild(): { child: ResearchChildSession; abortCalls: number } {
+  const state = { abortCalls: 0 };
+  return {
+    child: fakeChild({ abort: () => state.abortCalls++ }),
+    get abortCalls() {
+      return state.abortCalls;
+    },
+  };
+}
+
+test("runBackgroundResearch returns immediately and starts the child with the assembled prompt", (t) => {
+  const calls: Array<Record<string, unknown>> = [];
+  let returnedBeforeChildDone = false;
+  const { child } = pendingChild();
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      model: "p/m",
+      thinkingLevel: "low",
+      tools: ["read", "write"],
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      agents: [embeddedResearcher()],
+    },
+    (opts) => {
+      calls.push(opts);
+      return child;
+    },
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  returnedBeforeChildDone = true;
+
+  // handle shape: researchId names the tmp dir, logPath is a research.log inside it
+  assert.equal(handle.findingsPath, "/tmp/f.md");
+  assert.match(handle.researchId, /^pi-research-/);
+  assert.match(handle.logPath, /research\.log$/);
+  assert.ok(handle.logPath.includes(handle.researchId));
+  assert.ok(returnedBeforeChildDone, "the runner must not wait for the child");
+
+  // exactly one child factory call, carrying the assembled prompt surface
+  assert.equal(calls.length, 1);
+  const c = calls[0] as {
+    cwd: string;
+    model: unknown;
+    thinkingLevel: string;
+    tools: string[];
+    systemPrompt: string;
+    task: string;
+    findingsPath: string;
+  };
+  assert.equal(c.cwd, "/w");
+  assert.equal(c.model, "p/m");
+  assert.equal(c.thinkingLevel, "low");
+  assert.deepEqual(c.tools, ["read", "write"]);
+  assert.equal(c.task, "T");
+  assert.equal(c.findingsPath, "/tmp/f.md");
+  assert.ok(c.systemPrompt.includes("SP"), "role system prompt reaches the child");
+  assert.ok(c.systemPrompt.includes("/tmp/f.md"), "findings path reaches the child (in the override, not argv)");
+  assert.ok(c.systemPrompt.includes("60 min"), "the wall-clock cap line reaches the child");
+});
+
+test("runBackgroundResearch resolves tools for the child against the registry", () => {
+  const calls: Array<{ tools?: string[] }> = [];
+  runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      tools: ["ffgrep", "ffind", "ls"],
+      availableToolNames: new Set(["grep", "find", "ls"]),
+      agents: [embeddedResearcher()],
+    },
+    (opts) => {
+      calls.push({ tools: opts.tools });
+      return fakeChild();
+    },
+  );
+  assert.deepEqual(calls[0]?.tools, ["grep", "find", "ls"], "declared fff names degrade to built-ins");
+});
+
+test("runBackgroundResearch throws when no researcher role is available", () => {
+  const factory = () => {
+    throw new Error("must not create a child");
+  };
+  assert.throws(
+    () => runBackgroundResearch({ cwd: "/w", task: "T", findingsPath: "/tmp/f.md", agents: [] }, factory),
+    /No "researcher" role available/,
+  );
+});
+
+test("runBackgroundResearch tees the child output into the per-run log", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const output = (async function* () {
+    yield "first chunk\n";
+    yield "second chunk\n";
+  })();
+  const handle = runBackgroundResearch(
+    { cwd: dir, task: "T", findingsPath, agents: [embeddedResearcher()] },
+    () => fakeChild({ output }),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  assert.equal(logText, "first chunk\nsecond chunk\n");
+});
+
+test("runBackgroundResearch resolves succeeded on a natural completion", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const exits: ResearchExitInfo[] = [];
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      onExit: (info) => exits.push(info),
+    },
+    () => fakeChild({ done: Promise.resolve() }),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "succeeded" }]);
+  assert.ok(!fs.existsSync(findingsPath), "a natural completion must not write the termination marker");
+});
+
+test("runBackgroundResearch resolves failed when the child throws", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const exits: ResearchExitInfo[] = [];
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      onExit: (info) => exits.push(info),
+    },
+    () => fakeChild({ done: Promise.reject(new Error("boom")) }),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "failed", errorMessage: "boom" }]);
+});
+
+test("runBackgroundResearch kills at the wall-clock cap, marks the findings, and resolves terminated", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  fs.writeFileSync(findingsPath, "# Findings\n\npartial content\n");
+  const pending = pendingChild();
+  const exits: ResearchExitInfo[] = [];
+  let timer: (() => void) | undefined;
+  let cleared = false;
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      maxWallClockMs: 5 * 60 * 1000,
+      agents: [embeddedResearcher()],
+      watcherDeps: {
+        now: () => 1_700_000_000_000,
+        setTimeout: (fn: () => void) => {
+          timer = fn;
+          return { unref() {} } as never;
+        },
+        clearTimeout: () => {
+          cleared = true;
+        },
+      },
+      onExit: (info) => exits.push(info),
+    },
+    () => pending.child,
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.equal(typeof timer, "function", "a wall-clock timer must be scheduled");
+  timer!();
+  assert.equal(pending.abortCalls, 1, "the child must be aborted at the cap");
+  assert.deepEqual(exits, [{ status: "terminated" }]);
+  const text = fs.readFileSync(findingsPath, "utf8");
+  assert.ok(text.includes("<!-- research-terminated"), "the slim marker must be on disk");
+  assert.ok(text.includes("reason: wall_clock_exceeded"), "the only cause is the wall clock");
+  assert.ok(text.includes("at: 2023-11-14T22:13:20.000Z"), "the marker carries the injected timestamp");
+  assert.ok(text.includes("partial content"), "existing findings content is preserved");
+  assert.ok(!text.includes("partial: true"), "the slim marker drops the old partial/limit/observed fields");
+});
+
+test("runBackgroundResearch resolves aborted on the abort signal without a marker", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const pending = pendingChild();
+  const exits: ResearchExitInfo[] = [];
+  const controller = new AbortController();
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      abortSignal: controller.signal,
+      onExit: (info) => exits.push(info),
+    },
+    () => pending.child,
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  controller.abort();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(pending.abortCalls, 1, "a manual kill aborts the in-process child");
+  assert.deepEqual(exits, [{ status: "aborted" }]);
+  assert.ok(!fs.existsSync(findingsPath), "a manual kill must not write the termination marker");
+});
+
+test("a pre-aborted signal settles on a microtask, never synchronously before the handle returns", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const pending = pendingChild();
+  const exits: ResearchExitInfo[] = [];
+  const controller = new AbortController();
+  controller.abort();
+  const handleSeenInOnExit = { seen: false };
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      abortSignal: controller.signal,
+      onExit: () => {
+        // The extension reads handle.logPath inside onExit; a synchronous
+        // onExit would hit the const in TDZ. Assert the handle exists here.
+        handleSeenInOnExit.seen = typeof handle.logPath === "string";
+        exits.push({ status: "aborted" });
+      },
+    },
+    () => pending.child,
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.deepEqual(exits, [], "a pre-aborted signal must not settle synchronously");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "aborted" }]);
+  assert.ok(handleSeenInOnExit.seen, "onExit must run after the handle exists (async settle)");
+});
+
+test("runBackgroundResearch unrefs the wall-clock timer so it never holds the host alive", (t) => {
+  const { child } = pendingChild();
+  let unrefCalls = 0;
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      agents: [embeddedResearcher()],
+      watcherDeps: {
+        setTimeout: () =>
+          ({
+            unref() {
+              unrefCalls++;
+            },
+          }) as never,
+      },
+    },
+    () => child,
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.equal(unrefCalls, 1, "the wall-clock timer must be unref'd");
 });
 
 // S8 — resolveThinkingLevel
@@ -511,799 +673,27 @@ test("a user agent frontmatter with an invalid thinkingLevel is ignored", () => 
   }
 });
 
-// S9 — research budget (D4). Literals, not derived from RESEARCH_BUDGETS: the
-// tier table was frozen in the design session (ADR 0003, revised by ADR 0008:
-// tight 10/6/400, standard log 10 MiB) and a regression to different numbers
-// is caught here.
-test("RESEARCH_BUDGETS freezes the tier table at the agreed values", () => {
-  assert.deepEqual(RESEARCH_BUDGETS.standard, {
-    maxSearchRounds: 10,
-    maxFetchPages: 20,
-    maxFindingLines: 500,
-    maxLogBytes: 10 * 1024 * 1024,
-    maxWallClockMs: 15 * 60 * 1000,
-  });
-  assert.deepEqual(RESEARCH_BUDGETS.tight, {
-    maxSearchRounds: 5,
-    maxFetchPages: 8,
-    maxFindingLines: 400,
-    maxLogBytes: 6 * 1024 * 1024,
-    maxWallClockMs: 10 * 60 * 1000,
-  });
-});
-
-test("resolveResearchBudget returns the tier defaults when no overrides are given", () => {
-  assert.deepEqual(resolveResearchBudget("standard"), RESEARCH_BUDGETS.standard);
-  assert.deepEqual(resolveResearchBudget("tight"), RESEARCH_BUDGETS.tight);
-});
-
-test("resolveResearchBudget merges overrides over tier defaults", () => {
-  const b = resolveResearchBudget("standard", { maxFetchPages: 6, maxFindingLines: 100 });
-  assert.equal(b.maxFetchPages, 6);
-  assert.equal(b.maxFindingLines, 100);
-  assert.equal(b.maxLogBytes, RESEARCH_BUDGETS.standard.maxLogBytes); // untouched dim
-  assert.equal(b.maxWallClockMs, RESEARCH_BUDGETS.standard.maxWallClockMs);
-});
-
-test("resolveResearchBudget allows tightening a hard cap within the ceiling", () => {
-  const b = resolveResearchBudget("standard", { maxLogBytes: 1024 * 1024, maxWallClockMs: 5 * 60 * 1000 });
-  assert.equal(b.maxLogBytes, 1024 * 1024);
-  assert.equal(b.maxWallClockMs, 5 * 60 * 1000);
-});
-
-test("resolveResearchBudget rejects a hard override above the tier ceiling", () => {
-  assert.throws(() => resolveResearchBudget("standard", { maxLogBytes: 16 * 1024 * 1024 }), /may only be tightened/);
-  assert.throws(() => resolveResearchBudget("tight", { maxWallClockMs: 20 * 60 * 1000 }), /may only be tightened/);
-});
-
-test("resolveResearchBudget rejects non-positive or non-integer overrides", () => {
-  assert.throws(() => resolveResearchBudget("standard", { maxSearchRounds: 0 }), /positive/);
-  assert.throws(() => resolveResearchBudget("standard", { maxFetchPages: -1 }), /positive/);
-  assert.throws(() => resolveResearchBudget("standard", { maxFindingLines: 1.5 }), /positive/);
-});
-
-test("resolveResearchBudget rejects an unknown tier", () => {
-  assert.throws(() => resolveResearchBudget("deep" as ResearchBudgetTier), /Unknown research budget tier/);
-});
-
-test("resolveResearchBudget rejects an unknown override key", () => {
-  assert.throws(
-    () => resolveResearchBudget("standard", { maxDepth: 5 } as unknown as ResearchBudgetOverrides),
-    /Unknown budget override key/,
-  );
-});
-
-test("resolveEffectiveResearchBudget always yields a budget: call tier > role tier > system default", () => {
-  // role has no tier -> system default standard
-  assert.deepEqual(resolveEffectiveResearchBudget({}), RESEARCH_BUDGETS.standard);
-  assert.deepEqual(resolveEffectiveResearchBudget({ roleTier: undefined }), RESEARCH_BUDGETS.standard);
-  // role tier applies when no per-call tier
-  assert.deepEqual(resolveEffectiveResearchBudget({ roleTier: "tight" }), RESEARCH_BUDGETS.tight);
-  // per-call tier beats the role tier
-  assert.deepEqual(
-    resolveEffectiveResearchBudget({ tier: "standard", roleTier: "tight" }),
-    RESEARCH_BUDGETS.standard,
-  );
-  // overrides still apply on top
-  const b = resolveEffectiveResearchBudget({ roleTier: "tight", overrides: { maxSearchRounds: 3 } });
-  assert.equal(b.maxSearchRounds, 3);
-  assert.equal(b.maxFetchPages, RESEARCH_BUDGETS.tight.maxFetchPages);
-});
-
-// S10 — evaluateResearchRun (hard-cap decision, ADR 0008). 100% line =
-// final notice (starts the grace window), grace-deadline line = kill; the log
-// 110% line remains an immediate runaway backstop that beats the grace
-// window. A kill records only the caps that caused it.
-test("evaluateResearchRun continues below both 100% lines", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(0, 0, 0, b), { action: "continue", caps: [] });
-  assert.deepEqual(evaluateResearchRun(1_000, 0, b.maxLogBytes - 1, b), { action: "continue", caps: [] });
-});
-
-test("evaluateResearchRun issues a final notice at 100% of the log cap", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(0, 0, b.maxLogBytes, b), { action: "final_notice", caps: ["log_bytes"] });
-});
-
-test("evaluateResearchRun issues a final notice between 100% and 110% of the log cap", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(0, 0, Math.floor(b.maxLogBytes * 1.05), b), {
-    action: "final_notice",
-    caps: ["log_bytes"],
-  });
-});
-
-test("evaluateResearchRun kills at 110% of the log cap (runaway backstop)", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(0, 0, Math.ceil(b.maxLogBytes * 1.1), b), {
-    action: "kill",
-    caps: ["log_bytes"],
-  });
-});
-
-test("evaluateResearchRun issues a final notice at 100% of the wall clock cap", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, 0, b), {
-    action: "final_notice",
-    caps: ["wall_clock"],
-  });
-});
-
-test("evaluateResearchRun continues inside the grace period even past 100%", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  // wall at 100% + 5s, grace deadline at 100% + 60s: not yet due
-  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs + 5_000, 0, 0, b, b.maxWallClockMs + 60_000), {
-    action: "continue",
-    caps: [],
-  });
-});
-
-test("evaluateResearchRun kills at the grace deadline", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs + 60_000, 0, 0, b, b.maxWallClockMs + 60_000), {
-    action: "kill",
-    caps: ["wall_clock"],
-  });
-});
-
-test("a grace-deadline kill records the dims currently over 100%", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(
-    evaluateResearchRun(
-      Math.floor(b.maxWallClockMs * 1.05),
-      0,
-      Math.floor(b.maxLogBytes * 1.05),
-      b,
-      Math.floor(b.maxWallClockMs * 1.05),
-    ),
-    { action: "kill", caps: ["log_bytes", "wall_clock"] },
-  );
-});
-
-test("the log 110% runaway backstop beats the grace deadline", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  assert.deepEqual(
-    evaluateResearchRun(Math.ceil(b.maxWallClockMs * 1.2), 0, Math.ceil(b.maxLogBytes * 1.2), b, 0),
-    { action: "kill", caps: ["log_bytes"] },
-  );
-});
-
-test("evaluateResearchRun prefers the log backstop over a would-be final", () => {
-  const b = RESEARCH_BUDGETS.standard;
-  // log at 120% (backstop kill), wall clock at exactly 100% (would-be final notice) -> kill with only log_bytes
-  assert.deepEqual(evaluateResearchRun(b.maxWallClockMs, 0, Math.ceil(b.maxLogBytes * 1.2), b), {
-    action: "kill",
-    caps: ["log_bytes"],
-  });
-});
-
-// S11 — appendResearchTerminationMarker. Expected strings are hand-written
-// literals (the frozen format), not derived from the implementation.
-test("appendResearchTerminationMarker appends the frozen marker for a log-cap kill", () => {
+// S11 — appendResearchTerminatedMarker (ADR 0013). The slim marker is frozen
+// as a literal: reason (always wall_clock_exceeded) + at. No partial/limit/
+// observed fields — `partial` is implied by the marker itself.
+test("appendResearchTerminatedMarker appends the frozen slim marker", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   const findingsPath = path.join(dir, "findings.md");
   try {
     fs.writeFileSync(findingsPath, "# Findings\n\nsome content\n");
-    appendResearchTerminationMarker(findingsPath, {
-      entries: [{ cap: "log_bytes", limit: 8 * 1024 * 1024, observed: Math.floor(8.83 * 1024 * 1024) }],
-      at: "2026-09-17T10:00:00.000Z",
-    });
+    appendResearchTerminatedMarker(findingsPath, "2026-09-17T10:00:00.000Z");
     const text = fs.readFileSync(findingsPath, "utf8");
     assert.ok(text.includes("<!-- research-terminated"));
-    assert.ok(text.includes("reason: log_bytes_exceeded"));
-    assert.ok(text.includes("partial: true"));
-    assert.ok(text.includes("limit: 8 MiB"));
-    assert.ok(text.includes("observed: 8.83 MiB"));
+    assert.ok(text.includes("reason: wall_clock_exceeded"));
     assert.ok(text.includes("at: 2026-09-17T10:00:00.000Z"));
     assert.ok(text.includes("-->"), "marker must be closed");
     assert.ok(text.includes("some content"), "existing findings content is preserved");
+    assert.ok(!text.includes("partial: true"), "the slim marker drops the old fields");
+    assert.ok(!text.includes("limit:"), "no limit/observed fields in the slim marker");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-
-test("appendResearchTerminationMarker creates the findings file when it does not exist", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    appendResearchTerminationMarker(findingsPath, {
-      entries: [{ cap: "wall_clock", limit: 5 * 60 * 1000, observed: 5 * 60 * 1000 + 12_000 }],
-      at: "2026-09-17T10:00:00.000Z",
-    });
-    const text = fs.readFileSync(findingsPath, "utf8");
-    assert.ok(text.includes("reason: wall_clock_exceeded"));
-    assert.ok(text.includes("limit: 5 min"));
-    assert.ok(text.includes("observed: 5.2 min"));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("appendResearchTerminationMarker records both caps with per-cap units, comma-joined", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    appendResearchTerminationMarker(findingsPath, {
-      entries: [
-        { cap: "log_bytes", limit: 8 * 1024 * 1024, observed: Math.floor(8.83 * 1024 * 1024) },
-        { cap: "wall_clock", limit: 15 * 60 * 1000, observed: 16.2 * 60 * 1000 },
-      ],
-      at: "2026-09-17T10:00:00.000Z",
-    });
-    const text = fs.readFileSync(findingsPath, "utf8");
-    assert.ok(text.includes("reason: log_bytes_exceeded, wall_clock_exceeded"));
-    assert.ok(text.includes("limit: 8 MiB, 15 min"));
-    assert.ok(text.includes("observed: 8.83 MiB, 16.2 min"));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("appendResearchTerminationMarker formats small values in B/KiB and seconds", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    appendResearchTerminationMarker(findingsPath, {
-      entries: [
-        { cap: "log_bytes", limit: 1024, observed: 2048 },
-        { cap: "wall_clock", limit: 1000, observed: 2200 },
-      ],
-      at: "2026-09-17T10:00:00.000Z",
-    });
-    const text = fs.readFileSync(findingsPath, "utf8");
-    assert.ok(text.includes("limit: 1 KiB, 1 s"));
-    assert.ok(text.includes("observed: 2 KiB, 2.2 s"));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// S12 — budget block in the research prompt (D4). The block carries the soft
-// dimension numbers + the wall-clock number (self-managed by the model), the
-// enough-to-answer rule, and the wind-down / soft_limit_exceeded behaviour.
-test("buildResearchPrompt appends the budget block when a budget is given", () => {
-  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-  const p = buildResearchPrompt(agent, "do the thing", "/tmp/out.md", RESEARCH_BUDGETS.standard);
-  assert.ok(p.includes("SP"));
-  assert.ok(p.includes("/tmp/out.md"));
-  assert.ok(p.includes("do the thing"));
-  assert.ok(p.includes("search rounds: at most 10"));
-  assert.ok(p.includes("fetch pages (total): at most 20"));
-  assert.ok(p.includes("findings: at most 500 lines"));
-  assert.ok(p.includes("wall clock: at most 15 min"));
-  assert.ok(p.includes("enough-to-answer"), "the enough-to-answer rule must be in the prompt");
-  assert.ok(p.includes("wind-down"), "wind-down behaviour must be in the prompt");
-  assert.ok(p.includes("soft_limit_exceeded"), "the soft-limit marker format must be in the prompt");
-});
-
-test("buildResearchPrompt budget block reflects the tight tier numbers", () => {
-  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-  const p = buildResearchPrompt(agent, "T", "/tmp/out.md", RESEARCH_BUDGETS.tight);
-  assert.ok(p.includes("search rounds: at most 5"));
-  assert.ok(p.includes("fetch pages (total): at most 8"));
-  assert.ok(p.includes("findings: at most 400 lines"));
-  assert.ok(p.includes("wall clock: at most 10 min"));
-});
-
-test("buildResearchPrompt without a budget stays unchanged", () => {
-  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-  const p = buildResearchPrompt(agent, "T", "/tmp/out.md");
-  assert.ok(!p.includes("Research budget"));
-});
-
-test("buildResearchPrompt threads the budget-status path and the ADR 0008 wind-down instructions", () => {
-  const agent: AgentConfig = { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-  const p = buildResearchPrompt(
-    agent,
-    "do the thing",
-    "/tmp/out.md",
-    RESEARCH_BUDGETS.standard,
-    "/tmp/budget-status.txt",
-  );
-  assert.ok(p.includes("/tmp/budget-status.txt"), "the budget-status file path must reach the prompt");
-  assert.ok(p.includes("checkpoint"), "checkpoint-write behaviour must be in the prompt");
-  assert.ok(p.includes("wind-down-complete"), "the wind-down sentinel must be in the prompt");
-  assert.ok(p.includes("STATUS: FINAL"), "the final-notice read instruction must be in the prompt");
-});
-
-// S13 — budget tier on roles (frontmatter, same pattern as thinkingLevel).
-test("embedded researcher role declares the standard budget tier", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  try {
-    const { agents } = discoverAgents(root, path.join(root, "agentDir"), ".pi", "user", stubParser);
-    assert.equal(agents.find((a) => a.name === "researcher")?.budget, "standard");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a user agent frontmatter can set a custom budget tier", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const agentDir = path.join(root, "agentDir");
-  try {
-    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
-    fs.writeFileSync(
-      path.join(agentDir, "agents", "researcher.md"),
-      "---\nname: researcher\ndescription: custom\nbudget: tight\n---\nCUSTOM PROMPT\n",
-    );
-    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
-    const r = agents.find((a) => a.name === "researcher");
-    assert.ok(r);
-    assert.equal(r.budget, "tight");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a user agent frontmatter with an invalid budget tier is ignored", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const agentDir = path.join(root, "agentDir");
-  try {
-    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
-    fs.writeFileSync(
-      path.join(agentDir, "agents", "researcher.md"),
-      "---\nname: researcher\ndescription: custom\nbudget: deep\n---\nCUSTOM PROMPT\n",
-    );
-    const { agents } = discoverAgents(root, agentDir, ".pi", "user", stubParser);
-    const r = agents.find((a) => a.name === "researcher");
-    assert.ok(r);
-    assert.equal(r.budget, undefined);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-// S14 — runBackgroundResearch budget integration + startResearchWatcher.
-// Fake deps make the watcher deterministic: immediate check + manual ticks.
-test("runBackgroundResearch with a budget embeds the budget block and starts a watcher", (t) => {
-  const fakeSpawn = () => ({ unref() {}, kill: () => true, exitCode: null as number | null });
-  let tick: (() => void) | undefined;
-  const handle = runBackgroundResearch(
-    {
-      cwd: "/w",
-      task: "T",
-      findingsPath: "/tmp/f.md",
-      agents: [embeddedResearcher()],
-      budget: RESEARCH_BUDGETS.tight,
-      watcherDeps: {
-        now: () => 0,
-        stat: () => ({ size: 0 }),
-        setInterval: (fn: () => void) => {
-          tick = fn;
-          return { unref() {} } as never;
-        },
-        clearInterval: () => {},
-      },
-    },
-    fakeSpawn as never,
-  );
-  t.after(() => {
-    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
-  });
-
-  const promptText = fs.readFileSync(path.join(path.dirname(handle.logPath), "prompt.md"), "utf8");
-  assert.ok(promptText.includes("Research budget"), "budget block must reach the prompt file");
-  assert.ok(promptText.includes("search rounds: at most 5"), "tight numbers must reach the prompt file");
-  assert.ok(
-    promptText.includes(path.join(path.dirname(handle.logPath), "budget-status.txt")),
-    "the budget-status file path must reach the prompt file",
-  );
-  assert.ok(promptText.includes("checkpoint"), "the checkpoint instruction must reach the prompt file");
-  assert.ok(typeof tick === "function", "a watcher interval must be scheduled when a budget is present");
-});
-
-test("startResearchWatcher kills the child and appends the termination marker when the log cap is exceeded", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "x".repeat(4096));
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 1000,
-      deps: {
-        now: () => 1000,
-        stat: (p) => (p === logPath ? { size: 4096 } : undefined),
-        setInterval: () => ({ unref() {} }) as never,
-        clearInterval: () => {},
-      },
-    });
-    // immediate check: 4096 > 1.1 * 1024 -> kill before any tick
-    assert.deepEqual(killed, ["SIGKILL"]);
-    const text = fs.readFileSync(findingsPath, "utf8");
-    assert.ok(text.includes("research-terminated"));
-    assert.ok(text.includes("reason: log_bytes_exceeded"));
-    assert.ok(text.includes("limit: 1 KiB"));
-    assert.ok(text.includes("observed: 4 KiB"));
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher issues a final notice at 100% of the log cap and does not kill", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    let tick: (() => void) | undefined;
-    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      deps: {
-        now: () => 0,
-        stat: () => ({ size: 1024 }), // exactly 100% of the log cap
-        setInterval: (fn: () => void) => {
-          tick = fn;
-          return { unref() {} } as never;
-        },
-        clearInterval: () => {},
-      },
-    });
-    tick?.();
-    tick?.();
-    const logText = fs.readFileSync(logPath, "utf8");
-    assert.equal((logText.match(/final notice/g) ?? []).length, 1, "the final notice must be written exactly once");
-    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
-    assert.ok(statusText.includes("STATUS: FINAL"), "status file must carry the final notice");
-    assert.ok(statusText.includes("elapsed") && statusText.includes("log"), "status file shows elapsed/log vs caps");
-    assert.deepEqual(killed, [], "a final notice must not kill");
-    assert.ok(!fs.existsSync(findingsPath), "no termination marker without a kill");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher writes the human-readable kill reason to the log tail", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024, maxWallClockMs: 60_000 };
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      deps: {
-        now: () => 4000,
-        stat: () => ({ size: 2048 }), // 2x cap -> kill; wall clock 4s < 110% of 60s
-        setInterval: () => ({ unref() {} }) as never,
-        clearInterval: () => {},
-      },
-    });
-    assert.deepEqual(killed, ["SIGKILL"]);
-    const logText = fs.readFileSync(logPath, "utf8");
-    assert.ok(logText.includes("[research-budget] killed: log exceeded 2 KiB (cap 1 KiB) at 110%"), "kill reason must be in the log tail");
-    // 100% warning happens only if a tick saw [100%,110%); the kill jump skips it
-    assert.ok(!logText.includes("approaching cap"), "no 100% warning when log jumps straight past 110%");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher issues a final notice at 100% of the wall clock cap and starts the grace period", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 64 * 1024 * 1024 }; // log far from cap
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      deps: {
-        now: () => budget.maxWallClockMs, // exactly 100% of the wall clock cap
-        stat: () => ({ size: 0 }),
-        setInterval: () => ({ unref() {} }) as never,
-        clearInterval: () => {},
-      },
-    });
-    assert.deepEqual(killed, [], "a final notice must not kill");
-    const logText = fs.readFileSync(logPath, "utf8");
-    assert.ok(logText.includes("[research-budget] final notice"), "the wall-clock 100% line now surfaces (ADR 0008)");
-    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
-    assert.ok(statusText.includes("STATUS: FINAL"), "status file must carry the final notice");
-    assert.ok(!fs.existsSync(findingsPath), "no termination marker without a kill");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher stops itself when the child has already exited", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const killed: string[] = [];
-    let scheduled = false;
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: 0,
-    };
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget: RESEARCH_BUDGETS.standard,
-      startedAt: 0,
-      deps: {
-        now: () => 0,
-        stat: () => ({ size: 10 * 1024 * 1024 }), // would kill if the child were alive
-        setInterval: () => {
-          scheduled = true;
-          return { unref() {} } as never;
-        },
-        clearInterval: () => {},
-      },
-    });
-    assert.deepEqual(killed, [], "an exited child must not be killed");
-    assert.ok(!scheduled, "no ticks must be scheduled for an already-exited child");
-    assert.ok(!fs.existsSync(findingsPath), "no termination marker for an exited child");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// S15 — startResearchWatcher onExit (D3). The runner must tell the caller
-// when the child is done, both on natural exit and on a hard-cap kill, with
-// the marker written before the kill-path callback fires (the caller
-// distinguishes terminated from failed by the marker).
-test("startResearchWatcher calls onExit with killed:false when the child exits naturally", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: () => true,
-      exitCode: 0,
-    };
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget: RESEARCH_BUDGETS.standard,
-      startedAt: 0,
-      deps: {
-        now: () => 0,
-        stat: () => ({ size: 0 }),
-        setInterval: () => ({ unref() {} }) as never,
-        clearInterval: () => {},
-      },
-      onExit: (info) => exits.push(info),
-    });
-    assert.deepEqual(exits, [{ exitCode: 0, killed: false }], "natural exit must be reported exactly once");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher calls onExit with killed:true after a hard-cap kill, marker first", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    const killed: string[] = [];
-    let markerSeenAtCallback = false;
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    const budget = { ...RESEARCH_BUDGETS.standard, maxLogBytes: 1024 };
-    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      deps: {
-        now: () => 0,
-        stat: () => ({ size: 4096 }), // 4x cap -> kill on the immediate check
-        setInterval: () => ({ unref() {} }) as never,
-        clearInterval: () => {},
-      },
-      onExit: (info) => {
-        markerSeenAtCallback = fs.existsSync(findingsPath) && fs.readFileSync(findingsPath, "utf8").includes("research-terminated");
-        exits.push(info);
-      },
-    });
-    assert.deepEqual(killed, ["SIGKILL"]);
-    assert.deepEqual(exits, [{ exitCode: null, killed: true }], "kill must be reported exactly once");
-    assert.ok(markerSeenAtCallback, "the termination marker must be on disk before onExit fires");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// S14b — ADR 0008 grace period: at 100% the watcher grants graceMs before
-// killing; a natural exit inside the period is a success, a deadline crossing
-// is a kill with the termination marker.
-test("startResearchWatcher kills at the grace deadline and appends the marker", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    let nowVal = 0;
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    let tick: (() => void) | undefined;
-    const budget = { ...RESEARCH_BUDGETS.standard, maxWallClockMs: 1000, maxLogBytes: 64 * 1024 * 1024 };
-    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      graceMs: 2000,
-      deps: {
-        now: () => nowVal,
-        stat: () => ({ size: 0 }),
-        setInterval: (fn: () => void) => {
-          tick = fn;
-          return { unref() {} } as never;
-        },
-        clearInterval: () => {},
-      },
-      onExit: (info) => exits.push(info),
-    });
-    // immediate check at t=0: below 100% -> running status
-    const running = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
-    assert.ok(running.includes("STATUS: running"), "status file starts in running state");
-    // t=1000: wall at 100% -> final notice + grace until t=3000
-    nowVal = 1000;
-    tick?.();
-    assert.deepEqual(killed, [], "final notice must not kill");
-    // t=2500: inside the grace period -> still alive
-    nowVal = 2500;
-    tick?.();
-    assert.deepEqual(killed, [], "still inside the grace period");
-    // t=3000: deadline -> kill + marker
-    nowVal = 3000;
-    tick?.();
-    assert.deepEqual(killed, ["SIGKILL"], "kill lands at the grace deadline");
-    assert.deepEqual(exits, [{ exitCode: null, killed: true }]);
-    const text = fs.readFileSync(findingsPath, "utf8");
-    assert.ok(text.includes("research-terminated"));
-    assert.ok(text.includes("reason: wall_clock_exceeded"));
-    assert.ok(text.includes("limit: 1 s"));
-    assert.match(text, /observed: 3 s/);
-    const logText = fs.readFileSync(logPath, "utf8");
-    assert.ok(
-      logText.includes("wall clock exceeded 3 s (cap 1 s) at grace deadline"),
-      "kill reason must label the grace-deadline trigger",
-    );
-    const statusText = fs.readFileSync(path.join(dir, "budget-status.txt"), "utf8");
-    assert.ok(statusText.includes("STATUS: FINAL"), "status file ends in the final state");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("startResearchWatcher reports a natural exit inside the grace period as succeeded", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
-  const logPath = path.join(dir, "research.log");
-  const findingsPath = path.join(dir, "findings.md");
-  try {
-    fs.writeFileSync(logPath, "");
-    let nowVal = 0;
-    const killed: string[] = [];
-    const child: ResearchChild = {
-      unref() {},
-      kill: (s) => {
-        killed.push(String(s ?? ""));
-        return true;
-      },
-      exitCode: null,
-    };
-    let tick: (() => void) | undefined;
-    const budget = { ...RESEARCH_BUDGETS.standard, maxWallClockMs: 1000, maxLogBytes: 64 * 1024 * 1024 };
-    const exits: Array<{ exitCode: number | null; killed: boolean }> = [];
-    startResearchWatcher({
-      child,
-      logPath,
-      findingsPath,
-      budget,
-      startedAt: 0,
-      graceMs: 2000,
-      deps: {
-        now: () => nowVal,
-        stat: () => ({ size: 0 }),
-        setInterval: (fn: () => void) => {
-          tick = fn;
-          return { unref() {} } as never;
-        },
-        clearInterval: () => {},
-      },
-      onExit: (info) => exits.push(info),
-    });
-    // t=1500: wall past 100% -> final notice, grace until t=3500
-    nowVal = 1500;
-    tick?.();
-    assert.deepEqual(killed, [], "final notice must not kill");
-    // the child winds down and exits naturally inside the grace period
-    child.exitCode = 0;
-    nowVal = 2000;
-    tick?.();
-    assert.deepEqual(killed, [], "a natural exit inside the grace period must not be killed");
-    assert.deepEqual(exits, [{ exitCode: 0, killed: false }], "natural exit is reported as succeeded");
-    assert.ok(!fs.existsSync(findingsPath), "no termination marker for a natural exit");
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 // S16 — run registry (D3, Seam A). The status enum is frozen as a literal;
 // terminal states are frozen (no further updates); transitions are guarded.
 test("RUN_STATUSES freezes the D3 status enum", () => {
@@ -1584,8 +974,8 @@ test("readLogTail honors an injected fs surface", () => {
 });
 
 // S19 — outcome mapping (D3). blockingRunStatus mirrors isFailedResult
-// semantics + the abort flag; resolveResearchRunStatus maps watcher exit
-// info, distinguishing terminated (kill + marker) from failed.
+// semantics + the abort flag. The background status resolution moved into the
+// runner itself (ADR 0013): onExit delivers the resolved terminal status.
 test("blockingRunStatus maps a single result to a run status", () => {
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "end" }), "succeeded");
   assert.equal(blockingRunStatus({ exitCode: 0 }), "succeeded");
@@ -1611,29 +1001,9 @@ test("formatBlockingToolError formats a failed chain step as the tool error", ()
   );
 });
 
-test("resolveResearchRunStatus maps watcher exit info to a run status", () => {
-  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0 }), "succeeded");
-  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1 }), "failed");
-  assert.equal(resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "<!-- research-terminated" }), "terminated");
-  assert.equal(resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "# no marker" }), "failed", "kill without marker is a failure");
-});
-
-// S20 — run management (D6, ADR 0009): pid/remove, killProcessGroup, args, aborted, intents.
-test("createRunRegistry stores an optional pid on a registered run", () => {
-  const reg = createRunRegistry();
-  const id = reg.register({
-    role: "researcher",
-    source: "embedded",
-    channel: "background",
-    startedAt: 0,
-    status: "running",
-    pid: 4242,
-  });
-  assert.equal(reg.get(id)?.pid, 4242);
-  const noPid = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
-  assert.equal(reg.get(noPid)?.pid, undefined, "pid is optional and absent by default");
-});
-
+// S20 — run management (D6): prune/remove, args. Kill moved from pid/OS-signal
+// to aborting the in-process child (ADR 0013), so there is no pid plumbing to
+// assert here — the runner's abort-signal test covers the kill semantics.
 test("createRunRegistry remove drops the entry and is safe for unknown ids", () => {
   const reg = createRunRegistry();
   const a = reg.register({ role: "a", source: "embedded", channel: "blocking", startedAt: 0, status: "succeeded" });
@@ -1643,73 +1013,6 @@ test("createRunRegistry remove drops the entry and is safe for unknown ids", () 
   assert.deepEqual(reg.list().map((r) => r.id), [b]);
   assert.equal(reg.snapshot().length, 1, "snapshot reflects the removal");
   assert.doesNotThrow(() => reg.remove("nope"));
-});
-
-test("killProcessGroup sends SIGKILL to the negative pid on POSIX", () => {
-  const signals: Array<[number, string]> = [];
-  killProcessGroup(4242, {
-    platform: "linux",
-    kill: (pid, sig) => {
-      signals.push([pid, sig]);
-      return true;
-    },
-  });
-  assert.deepEqual(signals, [[-4242, "SIGKILL"]]);
-});
-
-test("killProcessGroup swallows ESRCH as success (process already gone)", () => {
-  const err = Object.assign(new Error("no such process"), { code: "ESRCH" });
-  assert.doesNotThrow(() =>
-    killProcessGroup(4242, {
-      platform: "linux",
-      kill: () => {
-        throw err;
-      },
-    }),
-  );
-});
-
-test("killProcessGroup rethrows a non-ESRCH kill error", () => {
-  const err = Object.assign(new Error("permission denied"), { code: "EPERM" });
-  assert.throws(() =>
-    killProcessGroup(4242, {
-      platform: "linux",
-      kill: () => {
-        throw err;
-      },
-    }),
-  );
-});
-
-test("killProcessGroup runs taskkill /T /F on win32 and treats a gone process as success", () => {
-  const calls: string[][] = [];
-  assert.doesNotThrow(() =>
-    killProcessGroup(4242, {
-      platform: "win32",
-      kill: () => {
-        throw new Error("must not use process.kill on win32");
-      },
-      spawnSync: (cmd, args) => {
-        calls.push([cmd, ...args]);
-        return { status: 128 }; // taskkill: no such process
-      },
-    }),
-  );
-  assert.deepEqual(calls, [["taskkill", "/pid", "4242", "/T", "/F"]]);
-});
-
-test("killProcessGroup rethrows a failed taskkill invocation", () => {
-  assert.throws(
-    () =>
-      killProcessGroup(4242, {
-        platform: "win32",
-        kill: () => {
-          throw new Error("must not use process.kill on win32");
-        },
-        spawnSync: () => ({ status: null, error: new Error("ENOENT: taskkill not found") }),
-      }),
-    /taskkill not found/,
-  );
 });
 
 test("parseSubagentsArgs maps the four command forms and rejects the rest", () => {
@@ -1731,43 +1034,6 @@ test("parseSubagentsArgs maps the four command forms and rejects the rest", () =
     reason: "unexpected extra arguments: extra",
   });
   assert.deepEqual(parseSubagentsArgs("bogus"), { action: "invalid", reason: 'unknown action "bogus"' });
-});
-
-test("resolveResearchRunStatus honors an explicit abort over all exit info", () => {
-  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0, aborted: true }), "aborted");
-  assert.equal(
-    resolveResearchRunStatus({ killed: true, exitCode: null, findingsText: "<!-- research-terminated", aborted: true }),
-    "aborted",
-  );
-  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 1, aborted: true }), "aborted");
-  assert.equal(resolveResearchRunStatus({ killed: false, exitCode: 0 }), "succeeded", "no aborted flag keeps old semantics");
-});
-
-test("cleanupAbortIntents drops intents for terminal or missing runs, keeps active ones", () => {
-  const runs: RunEntry[] = [
-    { id: "r1", role: "researcher", source: "embedded", channel: "background", status: "running", startedAt: 0 },
-    { id: "r2", role: "researcher", source: "embedded", channel: "background", status: "aborted", startedAt: 0 },
-    { id: "r3", role: "researcher", source: "embedded", channel: "background", status: "queued", startedAt: 0 },
-  ];
-  const kept = cleanupAbortIntents(new Set(["r1", "r2", "r3", "gone"]), runs);
-  assert.deepEqual([...kept].sort(), ["r1", "r3"], "queued is active; terminal and missing ids are dropped");
-});
-
-test("runBackgroundResearch exposes the spawned child pid on the handle", (t) => {
-  const fakeSpawn = () => ({
-    unref() {},
-    kill: () => true,
-    exitCode: null as number | null,
-    pid: 7777,
-  });
-  const handle = runBackgroundResearch(
-    { cwd: "/w", task: "T", findingsPath: "/tmp/f.md", agents: [embeddedResearcher()] },
-    fakeSpawn as never,
-  );
-  t.after(() => {
-    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
-  });
-  assert.equal(handle.pid, 7777);
 });
 
 // ---------------------------------------------------------------------------
@@ -1836,18 +1102,6 @@ test("mergeToolParams rejects unknown keys in input by path", () => {
   );
 });
 
-test("mergeToolParams keeps the parent path on nested unknown keys", () => {
-  assert.throws(
-    () =>
-      mergeToolParams({
-        direct: { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>,
-        input: '{"budgetOverrides": {"bogus": 1}}',
-        fullSchema: RESEARCH_FULL_PARAMS,
-      }),
-    /\/budgetOverrides\/bogus: unknown parameter/,
-  );
-});
-
 test("mergeToolParams validates nested input paths", () => {
   assert.throws(
     () => mergeToolParams({ direct: { task: "T" }, input: '{"tasks": [{"agent": 5}]}', fullSchema: SUBAGENT_FULL_PARAMS }),
@@ -1855,14 +1109,14 @@ test("mergeToolParams validates nested input paths", () => {
   );
 });
 
-test("mergeToolParams validates the research full contract (model routed, unknown keys rejected)", () => {
+test("mergeToolParams validates the research full contract (model + maxWallClockMs routed, unknown keys rejected)", () => {
   const merged = mergeToolParams({
     direct: { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>,
-    input: '{"model": "openai/gpt-x", "budget": "tight"}',
+    input: JSON.stringify({ model: "openai/gpt-x", maxWallClockMs: 5 * 60 * 1000 }),
     fullSchema: RESEARCH_FULL_PARAMS,
   });
   assert.equal(merged.model, "openai/gpt-x");
-  assert.equal(merged.budget, "tight");
+  assert.equal(merged.maxWallClockMs, 5 * 60 * 1000);
   assert.throws(
     () =>
       mergeToolParams({
@@ -1871,6 +1125,43 @@ test("mergeToolParams validates the research full contract (model routed, unknow
         fullSchema: RESEARCH_FULL_PARAMS,
       }),
     /\/steer: unknown parameter/,
+  );
+});
+
+test("maxWallClockMs is a hidden positive integer that may only tighten the 60-minute default", () => {
+  const direct = { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>;
+  // tighten: accepted
+  const tight = mergeToolParams({
+    direct,
+    input: JSON.stringify({ maxWallClockMs: 60_000 }),
+    fullSchema: RESEARCH_FULL_PARAMS,
+  });
+  assert.equal(tight.maxWallClockMs, 60_000);
+  // the 60-minute ceiling itself: accepted
+  const ceiling = mergeToolParams({
+    direct,
+    input: JSON.stringify({ maxWallClockMs: DEFAULT_RESEARCH_WALL_CLOCK_MS }),
+    fullSchema: RESEARCH_FULL_PARAMS,
+  });
+  assert.equal(ceiling.maxWallClockMs, DEFAULT_RESEARCH_WALL_CLOCK_MS);
+  // above the ceiling: rejected (tighten-only)
+  assert.throws(
+    () =>
+      mergeToolParams({
+        direct,
+        input: JSON.stringify({ maxWallClockMs: DEFAULT_RESEARCH_WALL_CLOCK_MS + 1 }),
+        fullSchema: RESEARCH_FULL_PARAMS,
+      }),
+    /maxWallClockMs/,
+  );
+  // non-positive or non-integer: rejected
+  assert.throws(
+    () => mergeToolParams({ direct, input: '{"maxWallClockMs": 0}', fullSchema: RESEARCH_FULL_PARAMS }),
+    /maxWallClockMs/,
+  );
+  assert.throws(
+    () => mergeToolParams({ direct, input: '{"maxWallClockMs": 1.5}', fullSchema: RESEARCH_FULL_PARAMS }),
+    /maxWallClockMs/,
   );
 });
 
@@ -1886,8 +1177,9 @@ test("mergeToolParams validates the research full contract (model routed, unknow
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
 // Per-tool tokens of description + serialized parameter schema, measured
-// with pi 0.86.1 on 2026-09-21.
-const TOKEN_BASELINE: Record<string, number> = { subagent: 630, research: 735 };
+// with pi 0.87.0 on 2026-09-22 after the ADR 0013 surface change (research
+// lost budget/budgetOverrides, gained the hidden maxWallClockMs).
+const TOKEN_BASELINE: Record<string, number> = { subagent: 630, research: 517 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
@@ -1902,11 +1194,11 @@ test("subagent schema keeps its public fields and gains the input field", () => 
   assert.deepEqual(SUBAGENT_TOOL_PARAMS.required ?? [], [], "subagent has no required parameters");
 });
 
-test("research schema keeps its public fields and gains the input field", () => {
+test("research schema keeps its public fields and gains the input field, budget fields gone", () => {
   const props = Object.keys(RESEARCH_TOOL_PARAMS.properties ?? {});
   assert.deepEqual(
     new Set(props),
-    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "budget", "budgetOverrides", "input"]),
+    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "input"]),
   );
   assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
 });
@@ -1922,12 +1214,14 @@ test("hidden parameters live only in the full schemas, never in the public ones"
     assert.ok(!fullProps.includes("input"), `${contract.name} full schema consumes the transport field`);
   }
   assert.deepEqual(SUBAGENT_INPUT_KEYS, ["model", "thinkingOverride"]);
-  assert.deepEqual(RESEARCH_INPUT_KEYS, ["model"]);
+  assert.deepEqual(RESEARCH_INPUT_KEYS, ["model", "maxWallClockMs"]);
 });
 
 test("the registered descriptions match the frozen surface", () => {
   assert.ok(SUBAGENT_TOOL_DESCRIPTION.startsWith("Delegate tasks to specialized subagents"));
   assert.ok(RESEARCH_TOOL_DESCRIPTION.startsWith("Run a background research subagent"));
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("pushed"), "the description advertises push delivery");
+  assert.ok(!RESEARCH_TOOL_DESCRIPTION.includes("budget"), "the description no longer mentions budget tiers");
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "subagent")?.description, SUBAGENT_TOOL_DESCRIPTION);
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "research")?.description, RESEARCH_TOOL_DESCRIPTION);
 });

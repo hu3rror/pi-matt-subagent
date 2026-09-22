@@ -7,8 +7,11 @@
  *   - `subagent` (blocking): single / parallel / chain. Does not return until
  *     every subagent finishes; full results come back in one tool result. This
  *     is the primitive a skill means when it says "spawn sub-agents".
- *   - `research` (background): spawns a background researcher process that
- *     writes findings to a file, then returns immediately with a handle.
+ *   - `research` (background, ADR 0013): runs an in-process second session
+ *     (`createAgentSession` + `SessionManager.inMemory()`) that writes findings
+ *     to a file, returns immediately with a handle, and pushes every terminal
+ *     state (succeeded / failed / terminated / aborted) into the main context
+ *     via `pi.sendMessage` — no polling.
  *
  * Six bundled roles live in src/lib.ts (standards-reviewer, spec-reviewer,
  * design-explorer, architecture-scout, researcher, fact-finder). User agents
@@ -20,22 +23,25 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Message } from "@earendil-works/pi-ai";
+import type { AgentToolResult, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Message, Model } from "@earendil-works/pi-ai";
 import {
   CONFIG_DIR_NAME,
+  createAgentSession,
+  DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
   parseFrontmatter,
+  SessionManager,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 
 import {
   blockingRunStatus,
   buildDispatchArgs,
-  cleanupAbortIntents,
   createRunRegistry,
+  DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
   emptyUsage,
   formatBlockingToolError,
@@ -44,15 +50,12 @@ import {
   getPiInvocation,
   isActiveRunStatus,
   isTerminalRunStatus,
-  killProcessGroup,
   mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
   RESEARCH_FULL_PARAMS,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
-  resolveEffectiveResearchBudget,
-  resolveResearchRunStatus,
   resolveThinkingLevel,
   runBackgroundResearch,
   RUN_STATUS_ICONS,
@@ -65,10 +68,9 @@ import {
   type AgentSource,
   type AgentFrontmatter,
   type FrontmatterParser,
-  type ResearchBudgetTier,
+  type ResearchExitInfo,
   type ResearchHandle,
-  type ResearchBudget,
-  type ResearchBudgetOverrides,
+  type ResearchChildSession,
   type RunEntry,
   type RunRegistry,
   type ThinkingLevel,
@@ -80,6 +82,172 @@ const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<A
 const MAX_TASKS_PER_CALL = 8;
 const MAX_CONCURRENCY = 4;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+
+// ---------------------------------------------------------------------------
+// In-process research child (ADR 0013)
+//   The real `createChildSession` factory wired into `runBackgroundResearch`:
+//   an in-process second session (`createAgentSession` +
+//   `SessionManager.inMemory()`) built with `noExtensions: true` +
+//   `systemPromptOverride` and only built-in tools (no recursive extension
+//   re-entry, no subagent/research in the child). The async body is wrapped in
+//   try/catch; every session is tracked here so `session_shutdown` disposes
+//   any that outlive their runs (session-scoped research lifetime).
+// ---------------------------------------------------------------------------
+
+interface Disposable {
+  dispose(): void;
+}
+
+/** Every live in-process research session; disposed on session_shutdown. */
+const researchChildren = new Set<Disposable>();
+
+/** Extracts the assistant text parts of a message_end event (the tee input). */
+function assistantTextOf(msg: AgentMessage): string {
+  if (msg.role !== "assistant") return "";
+  return (msg.content as Array<{ type: string; text?: string }>)
+    .filter((p) => p.type === "text" && p.text)
+    .map((p) => p.text as string)
+    .join("");
+}
+
+/**
+ * The real child-session factory (ADR 0013): creates the in-process research
+ * session, returns a `ResearchChildSession` immediately (creation is async,
+ * so `done`/`output` are backed by promises), tees assistant output into the
+ * runner's log via `output`, and rejects `done` when the child throws or is
+ * aborted. `session.abort()` is the kill path shared by the wall-clock cap
+ * and the manual /subagents kill.
+ * Named export so the dev-only push-e2e script (`scripts/push-e2e.ts`) can
+ * exercise the real wiring against pi.
+ */
+export function createResearchChildSession(opts: {
+  cwd: string;
+  model?: unknown;
+  thinkingLevel?: string;
+  tools?: string[];
+  systemPrompt: string;
+  task: string;
+  findingsPath: string;
+}): ResearchChildSession {
+  // A tiny async queue serving the runner's `for await` tee over `output`.
+  const chunks: string[] = [];
+  let ended = false;
+  const waiters: Array<() => void> = [];
+  const flush = () => {
+    while (waiters.length > 0 && chunks.length > 0) waiters.shift()!();
+  };
+  const pushChunk = (chunk: string) => {
+    chunks.push(chunk);
+    flush();
+  };
+  const endStream = () => {
+    ended = true;
+    flush();
+  };
+
+  const output = (async function* () {
+    while (true) {
+      while (chunks.length > 0) yield chunks.shift()!;
+      if (ended) return;
+      await new Promise<void>((resolve) => waiters.push(resolve));
+    }
+  })();
+
+  let session: Disposable & { abort: () => Promise<void>; subscribe: (l: (e: { type: string; message?: AgentMessage }) => void) => () => void } | undefined;
+  // Internal abort flag: `abort()` before the session exists (a manual kill or
+  // a very tight wall-clock cap landing inside the async creation window) must
+  // still stop the researcher — after creation resolves, the flag is checked
+  // before the session ever prompts, and the fresh session is disposed instead
+  // of started.
+  const abortController = new AbortController();
+  const done = (async () => {
+    try {
+      const loader = new DefaultResourceLoader({
+        cwd: opts.cwd,
+        agentDir: getAgentDir(),
+        noExtensions: true,
+        systemPromptOverride: () => opts.systemPrompt,
+      });
+      await loader.reload();
+      const created = await createAgentSession({
+        cwd: opts.cwd,
+        agentDir: getAgentDir(),
+        sessionManager: SessionManager.inMemory(),
+        model: opts.model as Model<any> | undefined,
+        thinkingLevel: opts.thinkingLevel as ThinkingLevel | undefined,
+        tools: opts.tools,
+        resourceLoader: loader,
+      });
+      if (abortController.signal.aborted) {
+        // The run was already killed while the session was being created:
+        // dispose the fresh session and settle as a rejection — the runner has
+        // already resolved the terminal status, so this only stops the work.
+        created.session.dispose();
+        throw new Error("research child aborted before start");
+      }
+      session = created.session;
+      researchChildren.add(session);
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type === "message_end" && event.message) {
+          const text = assistantTextOf(event.message);
+          if (text) pushChunk(`${text}\n`);
+        }
+      });
+      try {
+        if (abortController.signal.aborted) throw new Error("research child aborted before start");
+        await session.prompt(opts.task);
+      } finally {
+        unsubscribe();
+        researchChildren.delete(session);
+        try {
+          session.dispose();
+        } catch {
+          /* ignore */
+        }
+        endStream();
+      }
+    } catch (err) {
+      endStream();
+      throw err;
+    }
+  })();
+
+  return {
+    output,
+    done,
+    abort: () => {
+      abortController.abort();
+      const s = session;
+      if (s) void s.abort().catch(() => {});
+    },
+  };
+}
+
+/** The `customType` of the push card that renders research terminal states. */
+export const RESEARCH_STATUS_CUSTOM_TYPE = "research-status";
+
+/**
+ * The pushed content for one terminal state — load-bearing: it becomes the
+ * triggered turn's prompt, so it must instruct reading the findings file
+ * (ADR 0013, prototype lesson), not just summarize.
+ */
+export function researchStatusContent(
+  status: ResearchExitInfo["status"],
+  findingsPath: string,
+  logPath?: string,
+): string {
+  const log = logPath ? ` The run log is at ${logPath}.` : "";
+  switch (status) {
+    case "succeeded":
+      return `The background research you started has completed. Read the findings file at ${findingsPath} to collect the results.`;
+    case "failed":
+      return `The background research you started failed. Read any partial findings at ${findingsPath} to see what exists.${log}`;
+    case "terminated":
+      return `The background research you started was stopped by its wall-clock limit, so the findings may be truncated. Read them at ${findingsPath} and judge by content.${log}`;
+    case "aborted":
+      return `The background research you started was stopped. Read any partial findings at ${findingsPath} to decide next steps.${log}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Display helpers
@@ -488,18 +656,51 @@ export default function (pi: ExtensionAPI) {
   // background). Cleared on session teardown so no stale state survives into
   // a new session.
   const subagentRuns = createRunRegistry();
-  // D6 — kill intent pre-registered before the signal so the watcher's onExit resolves to aborted, not failed.
-  let abortIntents = new Set<string>();
+  // ADR 0013 — per-run AbortController backing /subagents kill: aborting it
+  // aborts the in-process child session; the runner resolves the run `aborted`
+  // and pushes the outcome (no OS signals, no pid reuse hazard).
+  const researchAborts = new Map<string, AbortController>();
 
   pi.on("session_shutdown", () => {
     subagentRuns.clear();
-    abortIntents.clear();
+    researchAborts.clear();
+    // Session-scoped research lifetime (ADR 0013): dispose every in-process
+    // child session that is still alive so no orphaned work outlives the session.
+    for (const child of researchChildren) {
+      try {
+        child.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    researchChildren.clear();
+  });
+
+  // ADR 0013 — the push card: renders a research terminal state as a readable
+  // transcript entry (status + findings path + log path; expanded shows the tail).
+  pi.registerMessageRenderer(RESEARCH_STATUS_CUSTOM_TYPE, (message, { expanded, outputPad }, theme) => {
+    const details = message.details as
+      | { status?: string; findingsPath?: string; logPath?: string; lastOutput?: string }
+      | undefined;
+    const status = details?.status ?? "succeeded";
+    // Reuse the frozen icon map from lib (single source for status icons);
+    // only the color stays renderer-local.
+    const icon = RUN_STATUS_ICONS[status as keyof typeof RUN_STATUS_ICONS] ?? "?";
+    const color =
+      status === "succeeded" ? "success" : status === "failed" ? "error" : status === "terminated" ? "warning" : "dim";
+    const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(`${theme.fg("toolTitle", theme.bold("research"))} ${theme.fg(color, `${icon} ${status}`)}`, 0, 0));
+    if (details?.findingsPath) box.addChild(new Text(`findings: ${details.findingsPath}`, 0, 0));
+    if (details?.logPath) box.addChild(new Text(`log: ${details.logPath}`, 0, 0));
+    if (expanded && details?.lastOutput) box.addChild(new Text(theme.fg("dim", details.lastOutput), 0, 0));
+    return box;
   });
 
   // D3 — unified overview of all tracked runs; use when idle to read the
   // snapshot (blocking runs are not reachable mid-run by design, since input
   // queues until the agent finishes).
-  // D6 — /subagents surface: kill needs a live pid (never re-kill a finished run — PID reuse), prune is terminal-only, tail is byte-capped.
+  // D6 — /subagents surface: kill aborts an in-process researcher via its
+  // AbortController (never re-kill a finished run), prune is terminal-only, tail is byte-capped.
   type SubagentsUi = {
     hasUI: boolean;
     ui: {
@@ -528,7 +729,9 @@ export default function (pi: ExtensionAPI) {
 
   const runLabel = (r: RunEntry) => `${r.id} · ${RUN_STATUS_ICONS[r.status]} ${r.role} (${r.source})`;
   const runRef = (r: RunEntry) => `${r.id} (${r.role})`;
-  const isKillable = (r: RunEntry) => r.status === "running" && r.pid != null;
+  // Only running background runs with a live abort handle are killable
+  // (ADR 0013): blocking runs stay interruptible via Esc only.
+  const isKillable = (r: RunEntry) => r.status === "running" && r.channel === "background" && researchAborts.has(r.id);
 
   const killRun = async (id: string, ctx: SubagentsUi) => {
     const run = subagentRuns.get(id);
@@ -544,18 +747,11 @@ export default function (pi: ExtensionAPI) {
       const ok = await ctx.ui.confirm("Stop subagent run?", `Stop ${runRef(run)}? Partial findings stay on disk.`);
       if (!ok) return;
     }
-    abortIntents.add(id);
-    // isKillable(run) above guarantees a live pid; it is never cleared for a registered run.
-    const pid = run.pid;
-    if (pid == null) return;
-    try {
-      killProcessGroup(pid);
-    } catch (err) {
-      abortIntents.delete(id);
-      ctx.ui.notify(`Failed to stop ${runRef(run)}: ${(err as Error).message}`, "error");
-      return;
-    }
-    ctx.ui.notify(`Stop signal sent to ${runRef(run)}; status settles when the watcher observes the exit.`, "info");
+    const controller = researchAborts.get(id);
+    if (!controller) return;
+    researchAborts.delete(id);
+    controller.abort();
+    ctx.ui.notify(`Stop signal sent to ${runRef(run)}; the outcome is pushed when the run settles.`, "info");
   };
 
   const tailRun = (id: string, ctx: SubagentsUi) => {
@@ -585,8 +781,10 @@ export default function (pi: ExtensionAPI) {
       );
       if (!ok) return;
     }
-    for (const r of terminal) subagentRuns.remove(r.id);
-    abortIntents = cleanupAbortIntents(abortIntents, subagentRuns.list());
+    for (const r of terminal) {
+      subagentRuns.remove(r.id);
+      researchAborts.delete(r.id);
+    }
     updateSubagentFooter(ctx, subagentRuns);
     ctx.ui.notify(`Cleared ${terminal.length} finished run(s).`, "info");
   };
@@ -1008,7 +1206,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const { input, ...directParams } = params;
-      const merged = mergeToolParams<typeof directParams, { model?: string }>({
+      const merged = mergeToolParams<typeof directParams, { model?: string; maxWallClockMs?: number }>({
         direct: directParams,
         input,
         fullSchema: RESEARCH_FULL_PARAMS,
@@ -1034,23 +1232,30 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }], details: undefined };
       }
 
+      // The in-process child needs a Model object, not a provider/id string:
+      // inherit the main session's model, or resolve the input `model` override
+      // through the registry. An unresolvable override fails loudly.
+      let childModel: Model<any> | undefined = ctx.model;
+      if (merged.model) {
+        const slash = merged.model.indexOf("/");
+        const found =
+          slash > 0
+            ? ctx.modelRegistry.find(merged.model.slice(0, slash), merged.model.slice(slash + 1))
+            : undefined;
+        if (!found) {
+          return {
+            content: [{ type: "text", text: `Unknown model override: ${merged.model}` }],
+            details: undefined,
+          };
+        }
+        childModel = found;
+      }
+
       const researcher = agents.find((a) => a.name === "researcher");
       const thinking = resolveDispatchThinking(researcher, {
         thinkingLevel: ctx.thinkingLevel,
         thinkingOverride: merged.thinkingLevel,
       });
-
-      let effectiveBudget: ResearchBudget;
-      try {
-        // every run carries a budget: call tier > role frontmatter tier > standard (ADR 0003)
-        effectiveBudget = resolveEffectiveResearchBudget({
-          tier: merged.budget as ResearchBudgetTier | undefined,
-          roleTier: researcher?.budget,
-          overrides: merged.budgetOverrides as ResearchBudgetOverrides | undefined,
-        });
-      } catch (err) {
-        return { content: [{ type: "text", text: `Invalid research budget: ${(err as Error).message}` }], details: undefined };
-      }
 
       const runId = subagentRuns.register({
         role: "researcher",
@@ -1060,47 +1265,53 @@ export default function (pi: ExtensionAPI) {
         startedAt: Date.now(),
         findingsPath,
       });
+      // ADR 0013 — per-run abort handle backing /subagents kill; the runner
+      // resolves the run `aborted` and the push below delivers the outcome.
+      const abortController = new AbortController();
+      researchAborts.set(runId, abortController);
       updateSubagentFooter(ctx, subagentRuns);
 
-      const handle = runBackgroundResearch({
-        cwd: merged.cwd ?? ctx.cwd,
-        model: merged.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
-        thinkingLevel: thinking,
-        tools: merged.tools,
-        task: merged.task,
-        findingsPath,
-        budget: effectiveBudget,
-        availableToolNames,
-        agents,
-        // The watcher fires this on natural exit and on hard-cap kill (after
-        // the termination marker is on disk); resolve the run to its terminal
-        // status and refresh the footer.
-        onExit: (info) => {
-          // D6 — the watcher sees a signal kill as a plain exit; the intent keeps it aborted, not failed.
-          const aborted = abortIntents.has(runId);
-          if (aborted) abortIntents.delete(runId);
-          let findingsText: string | undefined;
-          try {
-            findingsText = fs.readFileSync(findingsPath, "utf8");
-          } catch {
-            /* findings not written yet */
-          }
-          try {
-            subagentRuns.update(runId, {
-              status: resolveResearchRunStatus({ killed: info.killed, exitCode: info.exitCode, findingsText, aborted }),
-            });
-          } catch {
-            /* run already terminal (frozen elsewhere) — the first terminal wins */
-          }
-          updateSubagentFooter(ctx, subagentRuns);
+      const handle = runBackgroundResearch(
+        {
+          cwd: merged.cwd ?? ctx.cwd,
+          model: childModel,
+          thinkingLevel: thinking,
+          tools: merged.tools,
+          task: merged.task,
+          findingsPath,
+          maxWallClockMs: merged.maxWallClockMs,
+          availableToolNames,
+          agents,
+          abortSignal: abortController.signal,
+          // Fires exactly once at a terminal state: settle the registry entry
+          // and push the outcome into the main context — content worded as an
+          // instruction to read the findings file (ADR 0013).
+          onExit: (info) => {
+            researchAborts.delete(runId);
+            const lastOutput = readLogTail(handle.logPath);
+            try {
+              subagentRuns.update(runId, { status: info.status, lastOutput: lastOutput || undefined });
+            } catch {
+              /* run already terminal (frozen elsewhere) — the first terminal wins */
+            }
+            updateSubagentFooter(ctx, subagentRuns);
+            pi.sendMessage(
+              {
+                customType: RESEARCH_STATUS_CUSTOM_TYPE,
+                content: researchStatusContent(info.status, findingsPath, handle.logPath),
+                display: true,
+                details: { status: info.status, findingsPath, logPath: handle.logPath, lastOutput },
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            );
+          },
         },
-      });
-      // logPath and pid are only known after the runner allocates its tmp dir
-      // and spawns the child. The watcher's first check() is synchronous, so
-      // the run may already be terminal (frozen) by the time we get here — a
-      // failed update must not surface as a tool error.
+        (childOpts) => createResearchChildSession(childOpts),
+      );
+      // logPath is only known after the runner allocates its tmp dir; the run
+      // may already be terminal (a failed update must not surface as a tool error).
       try {
-        subagentRuns.update(runId, { logPath: handle.logPath, pid: handle.pid });
+        subagentRuns.update(runId, { logPath: handle.logPath });
       } catch {
         /* run already frozen by onExit */
       }
@@ -1114,7 +1325,7 @@ export default function (pi: ExtensionAPI) {
               `Research started (id: ${handle.researchId}). It is running in the background; ` +
               `findings will be written to: ${findingsPath}\n` +
               `Log: ${handle.logPath}\n\n` +
-              `Keep working. Read ${findingsPath} later to collect the results.`,
+              `Keep working. The completion (succeeded / failed / terminated / aborted) is pushed to you — no polling needed.`,
           },
         ],
         details: handle,
