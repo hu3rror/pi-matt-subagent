@@ -22,6 +22,7 @@ _Avoid_: async, fire-and-forget, detached
 
 **push（推送交付）**:
 后台 subagent 到达任一终态（succeeded / failed / terminated / aborted）时，扩展经 `pi.sendMessage`（`deliverAs: "followUp"` + `triggerTurn: true`）把结果摘要与 findings 路径推进主会话上下文的语义——主会话空闲时立即触发新回合，正在回合中则排队到当前回合工具调用结束。推送内容成为被触发回合的 prompt，须措辞为「读取 findings 文件」的指令；另由消息渲染器（`pi.registerMessageRenderer`）负责转录显示。手动 kill（aborted）同样推送，告知主 agent 研究已被停止。
+两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，抛出的工具错误（ADR 0010）即模型可见信号；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。
 _Avoid_: notify, callback, poll
 
 **two-axis review**:
@@ -73,7 +74,7 @@ _Avoid_: 管理面板, panel
 _Avoid_: status panel, 面板
 
 **tool error（工具错误信号）**:
-失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled 文本）不在此语义内。
+失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled 文本）不在此语义内；research 运行未启动即失败的 runner 级错误同样走 throw，不推送（见 push）。
 _Avoid_: isError 字段, 错误返回
 
 **input-JSON**:
