@@ -133,3 +133,15 @@ npm test   # unit tests, no pi runtime needed — src/lib.ts stays runtime-free
 ```
 
 The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, background spawn with injectable seams, `input` merge/validation, the surface contract) are what the tests cover. `node scripts/benchmark-tools.ts` refreshes the token-benchmark numbers and the guard baseline when the registered surface changes.
+
+### Re-applying the skill patches after an upstream sync
+
+The installed skills track mattpocock upstream, and a sync overwrites the ADR 0013 patch texts in `research/SKILL.md` and `wayfinder/SKILL.md` (the texts live in `docs/design/research-redesign/`). After each sync run:
+
+```sh
+node scripts/apply-skill-patch.ts                 # re-apply to ~/.pi/agent/skills
+node scripts/apply-skill-patch.ts --skills-dir X  # custom skills dir
+node scripts/apply-skill-patch.ts --dry-run       # preview only
+```
+
+The script re-applies both patches straight from the design docs, idempotently (an already-patched target is a no-op, CRLF-safe), all-or-nothing on missing targets (any missing file means the sync hasn't run — nothing is touched, exit 1), and reports argument errors with a usage hint instead of a stack trace.

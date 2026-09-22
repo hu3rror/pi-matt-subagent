@@ -131,3 +131,15 @@ npm test   # 单元测试，不需要 pi 运行时——src/lib.ts 保持零运�
 ```
 
 扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入子会话工厂 seam 的后台 runner、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。
+
+### 上游同步后重打 skill 补丁
+
+已安装的 skills 跟随 mattpocock 上游，一次 sync 会覆盖 `research/SKILL.md` 和 `wayfinder/SKILL.md` 里的 ADR 0013 补丁文本（补丁文本保存在 `docs/design/research-redesign/`）。每次 sync 后运行：
+
+```sh
+node scripts/apply-skill-patch.ts                 # 重打到 ~/.pi/agent/skills
+node scripts/apply-skill-patch.ts --skills-dir X  # 自定义 skills 目录
+node scripts/apply-skill-patch.ts --dry-run       # 只预览不写
+```
+
+脚本直接从设计文档重打两个补丁：幂等（已打补丁的目标是 no-op，CRLF 安全）；缺目标时 all-or-nothing（任一文件缺失即视为 sync 未跑——一个文件都不动，exit 1）；参数错误报 usage 提示而不是崩溃栈。
