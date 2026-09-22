@@ -657,7 +657,13 @@ export interface ResearchRunOptions {
 
 /** The research run's terminal outcome, resolved by the runner. */
 export interface ResearchExitInfo {
-  status: "succeeded" | "failed" | "terminated" | "aborted";
+  /**
+   * The runner's terminal outcomes — derived from the frozen
+   * TERMINAL_RUN_STATUSES (lib.ts) so the two cannot drift: the runner
+   * resolves exactly these four, and a manual kill never produces
+   * `terminated`.
+   */
+  status: (typeof TERMINAL_RUN_STATUSES)[number];
   errorMessage?: string;
 }
 
@@ -941,6 +947,30 @@ export function buildResearchPrompt(
   ].join("\n");
 }
 
+/**
+ * The pushed content for one terminal state — load-bearing: it becomes the
+ * triggered turn's prompt, so it must instruct reading the findings file
+ * (ADR 0013, prototype lesson), not just summarize. Runtime-free so the
+ * wording is pinned by node --test.
+ */
+export function researchStatusContent(
+  status: ResearchExitInfo["status"],
+  findingsPath: string,
+  logPath?: string,
+): string {
+  const log = logPath ? ` The run log is at ${logPath}.` : "";
+  switch (status) {
+    case "succeeded":
+      return `The background research you started has completed. Read the findings file at ${findingsPath} to collect the results.`;
+    case "failed":
+      return `The background research you started failed. Read any partial findings at ${findingsPath} to see what exists.${log}`;
+    case "terminated":
+      return `The background research you started was stopped by its wall-clock limit, so the findings may be truncated. Read them at ${findingsPath} and judge by content.${log}`;
+    case "aborted":
+      return `The background research you started was stopped. Read any partial findings at ${findingsPath} to decide next steps.${log}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Research termination marker (ADR 0013)
 //   The slim `research-terminated` marker the runner appends to the findings
@@ -989,7 +1019,11 @@ export const RUN_STATUSES = ["queued", "running", "succeeded", "failed", "aborte
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running"];
-export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = ["succeeded", "failed", "aborted", "terminated"];
+// `satisfies` (not the plain annotation) so the element type stays the four
+// literals: a `readonly RunStatus[]` annotation would widen them to the full
+// six-member RunStatus, silently defeating derived types like
+// ResearchExitInfo.status (the runner resolves only terminal outcomes).
+export const TERMINAL_RUN_STATUSES = ["succeeded", "failed", "aborted", "terminated"] as const satisfies readonly RunStatus[];
 
 export function isActiveRunStatus(status: RunStatus): boolean {
   return (ACTIVE_RUN_STATUSES as readonly string[]).includes(status);

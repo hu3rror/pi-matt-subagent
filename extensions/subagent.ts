@@ -53,6 +53,7 @@ import {
   mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
+  researchStatusContent,
   RESEARCH_FULL_PARAMS,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
@@ -68,7 +69,6 @@ import {
   type AgentSource,
   type AgentFrontmatter,
   type FrontmatterParser,
-  type ResearchExitInfo,
   type ResearchHandle,
   type ResearchChildSession,
   type RunEntry,
@@ -229,29 +229,6 @@ export function createResearchChildSession(opts: {
 
 /** The `customType` of the push card that renders research terminal states. */
 export const RESEARCH_STATUS_CUSTOM_TYPE = "research-status";
-
-/**
- * The pushed content for one terminal state — load-bearing: it becomes the
- * triggered turn's prompt, so it must instruct reading the findings file
- * (ADR 0013, prototype lesson), not just summarize.
- */
-export function researchStatusContent(
-  status: ResearchExitInfo["status"],
-  findingsPath: string,
-  logPath?: string,
-): string {
-  const log = logPath ? ` The run log is at ${logPath}.` : "";
-  switch (status) {
-    case "succeeded":
-      return `The background research you started has completed. Read the findings file at ${findingsPath} to collect the results.`;
-    case "failed":
-      return `The background research you started failed. Read any partial findings at ${findingsPath} to see what exists.${log}`;
-    case "terminated":
-      return `The background research you started was stopped by its wall-clock limit, so the findings may be truncated. Read them at ${findingsPath} and judge by content.${log}`;
-    case "aborted":
-      return `The background research you started was stopped. Read any partial findings at ${findingsPath} to decide next steps.${log}`;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Display helpers
@@ -686,7 +663,7 @@ export default function (pi: ExtensionAPI) {
     const details = message.details as
       | { status?: string; findingsPath?: string; logPath?: string; lastOutput?: string }
       | undefined;
-    const status = details?.status ?? "succeeded";
+    const status = details?.status ?? "unknown";
     // Reuse the frozen icon map from lib (single source for status icons);
     // only the color stays renderer-local.
     const icon = RUN_STATUS_ICONS[status as keyof typeof RUN_STATUS_ICONS] ?? "?";

@@ -17,6 +17,7 @@ import {
   mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
+  researchStatusContent,
   RESEARCH_FULL_PARAMS,
   RESEARCH_INPUT_KEYS,
   RESEARCH_TOOL_DESCRIPTION,
@@ -32,6 +33,7 @@ import {
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
+  TERMINAL_RUN_STATUSES,
   TOKEN_GUARD_MULTIPLIER,
   TOOL_ALIASES,
   TOOL_CONTRACTS,
@@ -279,6 +281,30 @@ test("background research prompt uses an overridden researcher role", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// S5a — researchStatusContent (ADR 0013): the pushed content becomes the
+// triggered turn's prompt — every terminal state must instruct reading the
+// findings file (prototype lesson), not just summarize.
+test("researchStatusContent words every terminal state as a read-the-findings instruction", () => {
+  // Iterate the frozen terminal-status const, not a hand-copied list: the
+  // derived ResearchExitInfo.status stays exact only while the const's
+  // element type is the four literals (lib.ts), so this loop doubles as the
+  // drift guard for both.
+  for (const status of TERMINAL_RUN_STATUSES) {
+    const text = researchStatusContent(status, "/tmp/f.md", "/tmp/research.log");
+    assert.ok(text.includes("Read"), `${status}: the pushed content must instruct reading the findings file`);
+    assert.ok(text.includes("/tmp/f.md"), `${status}: the findings path must be named`);
+  }
+});
+
+test("researchStatusContent flags the wall-clock cut and names the log only when present", () => {
+  const terminated = researchStatusContent("terminated", "/tmp/f.md");
+  assert.ok(terminated.includes("wall-clock"), "terminated must flag truncation risk");
+  assert.ok(terminated.includes("truncated"), "terminated must warn the findings may be truncated");
+  assert.ok(!terminated.includes("research.log"), "no log line without a logPath");
+  const failed = researchStatusContent("failed", "/tmp/f.md", "/tmp/research.log");
+  assert.ok(failed.includes("/tmp/research.log"), "the run log is named when available");
 });
 
 // AgentScope helpers
