@@ -59,7 +59,36 @@ Or from a local checkout:
 pi install <path-to-this-repo>
 ```
 
-Both install the extension (the two tools) and the prompts (the three slash commands). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
+Both install the extension (the two tools) and the prompt templates (three of the four slash commands — `/code-review`, `/design-it-twice`, `/research`; `/subagents` ships in the extension itself). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
+
+## Quick start
+
+Everything here is model-facing: you describe the job and the main agent makes the call.
+
+- **Review your last commit** — `/code-review HEAD~1` runs the Standards and Spec axes as two parallel blocking subagents and reports them side by side.
+- **Research in the background while you keep working** — `/research "verify the claim that …"` returns a handle immediately; the findings path is pushed to you when the run finishes.
+- **Call the tools directly** — say "run a `subagent` review of `src/lib.ts` with `standards-reviewer`" or "start a `research` on ADR 0013 and write findings to `docs/research-0013.md`".
+
+### Use a different model per run
+
+Both tools default to the main session's model, and both accept per-run overrides through the hidden `input` field:
+
+| Tool | Hidden `input` keys | Effect |
+| --- | --- | --- |
+| `subagent` | `model`, `thinkingOverride` | Model (`provider/id`) and thinking level for this run |
+| `research` | `model`, `maxWallClockMs` | Model override; wall-clock cap — tighten-only, default 60 minutes |
+
+You don't write `input` by hand — just say "run that review with `deepseek-v4-pro`" or "research this with a 30-second cap" and the main agent carries the override in the tool call. Directly, one call looks like:
+
+```json
+{
+  "task": "review the diff since HEAD~1 for standards compliance",
+  "agent": "standards-reviewer",
+  "input": "{\"model\": \"sensenova/deepseek-v4-pro\", \"thinkingOverride\": \"high\"}"
+}
+```
+
+Model names resolve against your `~/.pi/agent/models.json` registry as `provider/id`; an unresolvable name fails loudly at the tool layer and the run never starts. Direct fields beat same-name JSON keys, and the merged result is validated against the full contract before dispatch (ADR 0011).
 
 ## Project layout
 

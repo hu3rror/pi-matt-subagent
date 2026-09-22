@@ -59,7 +59,36 @@ pi install npm:pi-matt-subagent
 pi install <本仓库路径>
 ```
 
-两种方式都会安装扩展（两个工具）和 prompts（三个 slash command）。用 `pi list` 确认；prompts 会出现在 TUI 的 `/` 补全里。
+两种方式都会安装扩展（两个工具）和 prompt 模板（四个 slash command 中的三个——`/code-review`、`/design-it-twice`、`/research`；`/subagents` 随扩展内置）。用 `pi list` 确认；prompts 会出现在 TUI 的 `/` 补全里。
+
+## 快速上手
+
+装完开一个会话就能用。工具面向模型：你描述任务，主 agent 负责调用。
+
+- **审你最近的提交** —— `/code-review HEAD~1` 用两个并行 blocking 子代理分别跑 Standards 和 Spec 两轴，并排报告。
+- **后台研究，同时继续干活** —— `/research "验证某个论断…"` 立即返回 handle；run 结束时 findings 路径会推送给你。
+- **直接调工具** —— 对主 agent 说 "run a `subagent` review of `src/lib.ts` with `standards-reviewer`"，或 "start a `research` on ADR 0013 and write findings to `docs/research-0013.md`"。
+
+### 每次运行换模型
+
+两个工具默认沿用主会话的模型，都支持通过隐藏的 `input` 字段按次覆盖：
+
+| 工具 | 隐藏 `input` 键 | 作用 |
+| --- | --- | --- |
+| `subagent` | `model`、`thinkingOverride` | 本次运行的模型（`provider/id`）与思考档位 |
+| `research` | `model`、`maxWallClockMs` | 模型覆盖；墙钟上限——只能收紧，默认 60 分钟 |
+
+不用手写 `input`——直接说 "run that review with `deepseek-v4-pro`" 或 "research this with a 30-second cap"，主 agent 会在工具调用里带上。手写时形如：
+
+```json
+{
+  "task": "review the diff since HEAD~1 for standards compliance",
+  "agent": "standards-reviewer",
+  "input": "{\"model\": \"sensenova/deepseek-v4-pro\", \"thinkingOverride\": \"high\"}"
+}
+```
+
+模型名按 `provider/id` 对照 `~/.pi/agent/models.json` 注册表解析；解析不了的名字在工具层大声报错，run 不会启动。直接字段优先于 JSON 同名键，合并结果派发前按完整契约校验（ADR 0011）。
 
 ## 项目结构
 
