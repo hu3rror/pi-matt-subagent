@@ -714,7 +714,15 @@ export interface ResearchHandle {
 export interface ResearchChildSession {
   /** The child's output stream; every chunk is tee'd into the per-run log. */
   output: AsyncIterable<string>;
-  /** Settles when the child session ends: resolves on success, rejects on failure. */
+  /**
+   * Settles when the child session ends: resolves on success, rejects on
+   * failure. Contract: the output stream must end before `done` settles —
+   * the runner's natural-completion push (succeeded/failed) waits for the
+   * full teed log, so a stream that outlives `done` would delay the push
+   * indefinitely. Kill paths (wall-clock, manual) do not rely on this: the
+   * runner bounds their drain, so the push arrives even on a stream that
+   * never ends (see `push` in CONTEXT.md).
+   */
   done: Promise<void>;
   /** Aborts the in-process child (wall-clock kill and manual kill share this path). */
   abort(): void;
