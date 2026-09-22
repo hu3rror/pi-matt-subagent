@@ -11,22 +11,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runBackgroundResearch, type AgentConfig, type ResearchChildSession, type ResearchExitInfo } from "./lib.ts";
-
-function embeddedResearcher(): AgentConfig {
-  return { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-}
-
-function fakeChild(overrides: Partial<ResearchChildSession> = {}): ResearchChildSession {
-  return {
-    output: (async function* () {
-      return;
-    })(),
-    done: new Promise<void>(() => {}),
-    abort: () => {},
-    ...overrides,
-  };
-}
+import { runBackgroundResearch, type ResearchExitInfo } from "./lib.ts";
+import { embeddedResearcher, fakeChild } from "./test-helpers.ts";
 
 // Seam C — ADR 0013. A delayed findings write: the child session writes the
 // findings file after 1000ms and then settles; the caller must have returned

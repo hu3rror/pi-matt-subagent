@@ -42,6 +42,7 @@ import {
   type ResearchExitInfo,
   type RunEntry,
 } from "./lib.ts";
+import { embeddedResearcher, fakeChild } from "./test-helpers.ts";
 
 const stubParser: FrontmatterParser = (content) => {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
@@ -236,10 +237,6 @@ test("buildResearchPrompt embeds the agent system prompt, findings path, and tas
   assert.ok(p.includes("do the thing"));
 });
 
-function embeddedResearcher(): AgentConfig {
-  return { name: "researcher", description: "", source: "embedded", systemPrompt: "SP" };
-}
-
 test("buildResearchPrompt writes the 60-minute wall-clock cap as a single line by default", () => {
   const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
   assert.ok(p.includes("60 min"), "the default cap must reach the prompt");
@@ -294,18 +291,6 @@ test("scopeAllowsProject is true only for project and both", () => {
 // S7 — runBackgroundResearch (ADR 0013, primary seam). The runner is
 // runtime-free: an injectable child-session factory stands in for the
 // extension's in-process createAgentSession wiring.
-
-/** A fake child session whose behavior tests configure per test. */
-function fakeChild(overrides: Partial<ResearchChildSession> = {}): ResearchChildSession {
-  return {
-    output: (async function* () {
-      return;
-    })(),
-    done: new Promise<void>(() => {}),
-    abort: () => {},
-    ...overrides,
-  };
-}
 
 function pendingChild(): { child: ResearchChildSession; abortCalls: number } {
   const state = { abortCalls: 0 };
@@ -500,6 +485,8 @@ test("runBackgroundResearch kills at the wall-clock cap, marks the findings, and
   assert.equal(typeof timer, "function", "a wall-clock timer must be scheduled");
   timer!();
   assert.equal(pending.abortCalls, 1, "the child must be aborted at the cap");
+  // onExit fires only after the tee has drained the child's output into the log
+  await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(exits, [{ status: "terminated" }]);
   const text = fs.readFileSync(findingsPath, "utf8");
   assert.ok(text.includes("<!-- research-terminated"), "the slim marker must be on disk");

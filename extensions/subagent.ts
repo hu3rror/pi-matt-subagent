@@ -133,8 +133,12 @@ export function createResearchChildSession(opts: {
   const chunks: string[] = [];
   let ended = false;
   const waiters: Array<() => void> = [];
+  // Wake waiters whenever there is something to consume OR the stream has
+  // ended: a consumer suspended on an empty queue must still be released by
+  // endStream(), otherwise the runner's tee never terminates and logFd stays
+  // open whenever the child ends without trailing output.
   const flush = () => {
-    while (waiters.length > 0 && chunks.length > 0) waiters.shift()!();
+    while (waiters.length > 0 && (chunks.length > 0 || ended)) waiters.shift()!();
   };
   const pushChunk = (chunk: string) => {
     chunks.push(chunk);

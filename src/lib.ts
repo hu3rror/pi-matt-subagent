@@ -793,7 +793,11 @@ export function runBackgroundResearch(
     if (terminal) return;
     terminal = true;
     if (timer !== undefined) clearTimer(timer);
-    opts.onExit?.({ status, ...extra });
+    // Fire onExit only after the tee has drained the child's output into the
+    // log: onExit readers (the push's lastOutput tail) must never see a
+    // half-flushed log. The flush-fix in the real child factory guarantees the
+    // stream always terminates once ended (ADR 0013).
+    void tee.finally(() => opts.onExit?.({ status, ...extra }));
   };
 
   timer = setTimer(() => {

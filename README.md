@@ -3,10 +3,10 @@
 > 简体中文: [README.zh-CN.md](README.zh-CN.md)
 
 <p align="center">
-  <img src="docs/banner.png" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background sub-agents" width="800">
+  <img src="docs/banner.png" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
 </p>
 
-A pi plugin that makes the sub-agent instructions in [Matt Pocock's skills](https://github.com/mattpocock) actually run. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer: it starts real pi sub-agents — detached subprocesses for blocking runs, an in-process second session for background research (ADR 0013) — waits for them (or not, in the background case), and hands you their results.
+A pi plugin that makes the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) actually run. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer: it starts real pi subagents — detached subprocesses for blocking runs, an in-process second session for background research (ADR 0013) — waits for them (or not, in the background case), and hands you their results.
 
 Built as a dogfooding case study: the plugin exists because the upstream skills demanded it, and its two tools map one-to-one onto the sub-agent patterns those skills describe.
 
@@ -27,7 +27,7 @@ Two tools, matching the two semantics the upstream skills need:
 
 | Tool | Semantics | What it does |
 |---|---|---|
-| `subagent` | **blocking** | Runs single / parallel / chain sub-agents. Does not return until every sub-agent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
+| `subagent` | **blocking** | Runs single / parallel / chain subagents. Does not return until every subagent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
 | `research` | **background** | Runs an in-process second session (ADR 0013) that writes cited findings to a file, returns immediately with a handle, and pushes the completion (succeeded / failed / terminated / aborted) into your context — no polling. |
 
 Six bundled roles: `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder`. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name; project agents sit behind a trust confirmation.
@@ -40,8 +40,8 @@ Every run shows in a footer counter (`⧗ N subagents running`), including block
 
 Four slash commands — the first three are direct entries into one upstream pattern each:
 
-- **`/code-review <ref>`** — two-axis review (Standards + Spec) of the diff since `<ref>`, run as two parallel blocking sub-agents. Use it to review a commit, branch, or merge-base. Maps to the `code-review` skill.
-- **`/design-it-twice <candidate>`** — generate 3-4 radically different interface designs for one deepening candidate as parallel blocking sub-agents, then compare by depth, locality, and seam placement. Maps to `codebase-design`'s DESIGN-IT-TWICE pattern (the final step of `improve-codebase-architecture`).
+- **`/code-review <ref>`** — two-axis review (Standards + Spec) of the diff since `<ref>`, run as two parallel blocking subagents. Use it to review a commit, branch, or merge-base. Maps to the `code-review` skill.
+- **`/design-it-twice <candidate>`** — generate 3-4 radically different interface designs for one deepening candidate as parallel blocking subagents, then compare by depth, locality, and seam placement. Maps to `codebase-design`'s DESIGN-IT-TWICE pattern (the final step of `improve-codebase-architecture`).
 - **`/research <question>`** — start a background researcher against primary sources and keep working; the completion (succeeded / failed / terminated / aborted) is pushed to you with the findings path. Maps to the `research` skill (and `wayfinder`'s research tickets).
 - **`/subagents`** — overview and management of every run: follow progress, stop a runaway researcher (aborts the in-process child), clear finished records, read a background run's log.
 
@@ -100,7 +100,7 @@ Measured with pi 0.87.0 on 2026-09-22 in a separate temporary process with an em
 ## Development
 
 ```sh
-npm test   # 141 tests, no pi runtime needed — src/lib.ts stays runtime-free
+npm test   # unit tests, no pi runtime needed — src/lib.ts stays runtime-free
 ```
 
 The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, background spawn with injectable seams, `input` merge/validation, the surface contract) are what the tests cover. `node scripts/benchmark-tools.ts` refreshes the token-benchmark numbers and the guard baseline when the registered surface changes.

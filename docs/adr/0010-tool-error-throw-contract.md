@@ -8,7 +8,7 @@ Scope of the change, deliberately narrow:
 - **Single run failure** throws `Agent <stopReason|failed>: <output>` (`stopReason` includes `aborted` — an aborted run is a failure and now surfaces as one, consistent with the existing throw from `runSingleAgent` on abort);
 - Both messages are built by one pure function, `formatBlockingToolError(mode, { agent, step, stopReason, output })` in `src/lib.ts`, tested under `node --test` with known-good literals;
 - Registry/footer updates run before the throw — the run record's terminal status is set and visible before the error escapes;
-- **Parallel mode is unchanged**: it aggregates per-task status into one success result by design (partial failure is part of the deliverable, not a failed call); the **research tool is unchanged** (it returns a handle or a canceled/budget-error message, never a "failed run" result).
+- **Parallel mode is unchanged**: it aggregates per-task status into one success result by design (partial failure is part of the deliverable, not a failed call); the **research tool is unchanged** (it returns a handle or a text error message — canceled/budget-error, or an unresolvable `model` override — never a "failed run" result). Parameter and resolution errors on the research path stay return-text by design, matching the blocking path's "Unknown agent" text; the ADR 0011 loud-failure contract covers `input` parsing/validation only.
 
 ## Considered options
 
