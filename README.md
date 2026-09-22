@@ -6,7 +6,7 @@
   <img src="docs/banner.png" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
 </p>
 
-A pi plugin that makes the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) actually run. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer: it starts real pi subagents — detached subprocesses for blocking runs, an in-process second session for background research (ADR 0013) — waits for them (or not, in the background case), and hands you their results.
+A pi plugin that makes the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) actually run. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer: it starts real pi subagents — separate subprocesses for blocking runs, an in-process second session for background research (ADR 0013) — waits for them (or not, in the background case), and hands you their results.
 
 Built as a dogfooding case study: the plugin exists because the upstream skills demanded it, and its two tools map one-to-one onto the sub-agent patterns those skills describe.
 

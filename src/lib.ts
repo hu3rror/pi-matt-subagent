@@ -790,18 +790,18 @@ export function runBackgroundResearch(
   // The runner owns the per-run log: every child output chunk is appended,
   // serving `/subagents tail` and post-mortem inspection (ADR 0013).
   const logFd = fs.openSync(logPath, "a");
+  const closeLogFd = () => {
+    try {
+      fs.closeSync(logFd);
+    } catch {
+      /* already closed */
+    }
+  };
   const tee = (async () => {
     for await (const chunk of child.output) {
       fs.writeSync(logFd, chunk);
     }
   })();
-  void tee.finally(() => {
-    try {
-      fs.closeSync(logFd);
-    } catch {
-      /* ignore */
-    }
-  });
 
   const deps = opts.watcherDeps ?? {};
   const nowFn = deps.now ?? Date.now;
@@ -810,30 +810,37 @@ export function runBackgroundResearch(
 
   let terminal = false;
   let timer: unknown | undefined;
-  // Abort paths (wall-clock kill, manual kill) bound the tee drain: abort()
-  // may not end the child's stream (a model call that ignores the abort), and
-  // the push must still arrive (ADR 0013: every terminal state is pushed).
-  // The status is resolved synchronously here, so a later done-rejection
-  // cannot override it; only the onExit delivery waits for the drain (or the
-  // bounded window).
-  const drainTeeWithBound = (): Promise<void> => {
+  // The single exit path for the per-run log: resolves once the tee has
+  // flushed (natural end) or, for a stuck stream, after the bound — closing
+  // the fd exactly once either way. onExit fires only after this resolves, so
+  // the push's lastOutput tail never sees a half-flushed log, and a stream
+  // that never ends cannot lose the push (ADR 0013: every terminal state is
+  // pushed). Abort paths (wall-clock kill, manual kill) pass `bounded`:
+  // abort() may not end the child's stream (a model call that ignores the
+  // abort). The terminal status is resolved synchronously by the caller, so a
+  // later done-rejection cannot override it; only the onExit delivery waits.
+  const drainLog = (bounded: boolean): Promise<void> => {
+    if (!bounded) {
+      return tee
+        .finally(() => {
+          closeLogFd();
+        })
+        .catch(() => {});
+    }
     let bound: unknown | undefined;
     return new Promise<void>((resolve) => {
       bound = setTimer(() => {
         // The stream is stuck: close the log fd so a stuck run does not leak
         // it for the rest of the session. Any chunk that lands after the
         // close fails harmlessly (the tee rejection is swallowed below).
-        try {
-          fs.closeSync(logFd);
-        } catch {
-          /* already closed by the tee drain */
-        }
+        closeLogFd();
         resolve();
       }, TEE_DRAIN_BOUND_MS);
       (bound as { unref?: () => void } | undefined)?.unref?.();
       void tee
         .finally(() => {
           if (bound !== undefined) clearTimer(bound);
+          closeLogFd();
           resolve();
         })
         .catch(() => {});
@@ -842,16 +849,12 @@ export function runBackgroundResearch(
   const settle = (
     status: ResearchExitInfo["status"],
     extra: { errorMessage?: string } = {},
-    wait: "tee" | "tee-bounded" = "tee",
+    drain: "until-drained" | "bounded" = "until-drained",
   ) => {
     if (terminal) return;
     terminal = true;
     if (timer !== undefined) clearTimer(timer);
-    // Fire onExit once the log is drained — naturally (the tee end closes the
-    // fd, see above) or at the bound for a stuck stream — so the push's
-    // lastOutput tail never sees a half-flushed log, and is never lost to a
-    // stream that never ends.
-    const drained = wait === "tee-bounded" ? drainTeeWithBound() : tee.finally(() => {});
+    const drained = drainLog(drain === "bounded");
     void drained.then(
       () => opts.onExit?.({ status, ...extra }),
       () => opts.onExit?.({ status, ...extra }),
@@ -863,7 +866,7 @@ export function runBackgroundResearch(
     // The marker lands before onExit so a standalone reader can tell a
     // wall-clock cut from a complete run without the push's context.
     appendResearchTerminatedMarker(opts.findingsPath, new Date(nowFn()).toISOString());
-    settle("terminated", {}, "tee-bounded");
+    settle("terminated", {}, "bounded");
   }, maxWallClockMs);
   const asTimeout = timer as { unref?: () => void } | undefined;
   asTimeout?.unref?.();
@@ -876,7 +879,7 @@ export function runBackgroundResearch(
   if (opts.abortSignal) {
     const onAbort = () => {
       child.abort();
-      settle("aborted", {}, "tee-bounded");
+      settle("aborted", {}, "bounded");
     };
     if (opts.abortSignal.aborted) {
       // A pre-aborted signal settles on a microtask, not synchronously: onExit
@@ -969,6 +972,20 @@ export function researchStatusContent(
     case "aborted":
       return `The background research you started was stopped. Read any partial findings at ${findingsPath} to decide next steps.${log}`;
   }
+}
+
+/**
+ * The push payload for one research terminal state (ADR 0013): the frozen
+ * status union plus the paths the pushed instruction and the renderer card
+ * need. Shared by the extension's `sendMessage` call and its message renderer
+ * so the two cannot drift — the renderer's `status` stays on the frozen union
+ * instead of re-widening to `string`.
+ */
+export interface ResearchStatusDetails {
+  status: (typeof TERMINAL_RUN_STATUSES)[number];
+  findingsPath: string;
+  logPath?: string;
+  lastOutput?: string;
 }
 
 // ---------------------------------------------------------------------------

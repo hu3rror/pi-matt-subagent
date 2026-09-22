@@ -71,7 +71,9 @@ import {
   type FrontmatterParser,
   type ResearchHandle,
   type ResearchChildSession,
+  type ResearchStatusDetails,
   type RunEntry,
+  type RunPatch,
   type RunRegistry,
   type ThinkingLevel,
   type UsageStats,
@@ -229,6 +231,19 @@ export function createResearchChildSession(opts: {
 
 /** The `customType` of the push card that renders research terminal states. */
 export const RESEARCH_STATUS_CUSTOM_TYPE = "research-status";
+
+// Status → theme color for the push card, keyed on the frozen terminal
+// statuses (like the shared RUN_STATUS_ICONS map) so the renderer's colors
+// cannot drift from what the runner resolves. Theme colors stay renderer-side
+// — lib is pi-runtime-free — but the key set is the exact union, so the map
+// is total and needs no fallback.
+const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown", string> = {
+  succeeded: "success",
+  failed: "error",
+  terminated: "warning",
+  aborted: "dim",
+  unknown: "dim",
+};
 
 // ---------------------------------------------------------------------------
 // Display helpers
@@ -641,6 +656,16 @@ export default function (pi: ExtensionAPI) {
   // aborts the in-process child session; the runner resolves the run `aborted`
   // and pushes the outcome (no OS signals, no pid reuse hazard).
   const researchAborts = new Map<string, AbortController>();
+  // Registry update that tolerates the already-terminal race: the first
+  // terminal status wins, and a late backfill (logPath) can race the push, so
+  // a frozen-update error must never surface as a tool error.
+  const updateRun = (runId: string, patch: RunPatch) => {
+    try {
+      subagentRuns.update(runId, patch);
+    } catch {
+      /* run already terminal (frozen elsewhere) — the first terminal wins */
+    }
+  };
 
   pi.on("session_shutdown", () => {
     subagentRuns.clear();
@@ -660,15 +685,15 @@ export default function (pi: ExtensionAPI) {
   // ADR 0013 — the push card: renders a research terminal state as a readable
   // transcript entry (status + findings path + log path; expanded shows the tail).
   pi.registerMessageRenderer(RESEARCH_STATUS_CUSTOM_TYPE, (message, { expanded, outputPad }, theme) => {
-    const details = message.details as
-      | { status?: string; findingsPath?: string; logPath?: string; lastOutput?: string }
-      | undefined;
-    const status = details?.status ?? "unknown";
+    // `Partial` because the renderer must tolerate malformed messages; the
+    // status stays on the frozen terminal union (plus an explicit `unknown`
+    // sentinel) instead of re-widening to `string`.
+    const details = message.details as Partial<ResearchStatusDetails> | undefined;
+    const status: ResearchStatusDetails["status"] | "unknown" = details?.status ?? "unknown";
     // Reuse the frozen icon map from lib (single source for status icons);
-    // only the color stays renderer-local.
-    const icon = RUN_STATUS_ICONS[status as keyof typeof RUN_STATUS_ICONS] ?? "?";
-    const color =
-      status === "succeeded" ? "success" : status === "failed" ? "error" : status === "terminated" ? "warning" : "dim";
+    // colors come from the sibling RESEARCH_STATUS_COLORS map, not a cascade.
+    const icon = status === "unknown" ? "?" : RUN_STATUS_ICONS[status];
+    const color = RESEARCH_STATUS_COLORS[status];
     const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
     box.addChild(new Text(`${theme.fg("toolTitle", theme.bold("research"))} ${theme.fg(color, `${icon} ${status}`)}`, 0, 0));
     if (details?.findingsPath) box.addChild(new Text(`findings: ${details.findingsPath}`, 0, 0));
@@ -1272,18 +1297,19 @@ export default function (pi: ExtensionAPI) {
             onExit: (info) => {
               researchAborts.delete(runId);
               const lastOutput = readLogTail(handle.logPath);
-              try {
-                subagentRuns.update(runId, { status: info.status, lastOutput: lastOutput || undefined });
-              } catch {
-                /* run already terminal (frozen elsewhere) — the first terminal wins */
-              }
+              updateRun(runId, { status: info.status, lastOutput: lastOutput || undefined });
               updateSubagentFooter(ctx, subagentRuns);
               pi.sendMessage(
                 {
                   customType: RESEARCH_STATUS_CUSTOM_TYPE,
                   content: researchStatusContent(info.status, findingsPath, handle.logPath),
                   display: true,
-                  details: { status: info.status, findingsPath, logPath: handle.logPath, lastOutput },
+                  details: {
+                    status: info.status,
+                    findingsPath,
+                    logPath: handle.logPath,
+                    lastOutput,
+                  } satisfies ResearchStatusDetails,
                 },
                 { deliverAs: "followUp", triggerTurn: true },
               );
@@ -1299,21 +1325,14 @@ export default function (pi: ExtensionAPI) {
         // the run never started, and the thrown tool error is the model's
         // signal (ADR 0010).
         researchAborts.delete(runId);
-        try {
-          subagentRuns.update(runId, { status: "failed" });
-        } catch {
-          /* already terminal elsewhere */
-        }
+        updateRun(runId, { status: "failed" });
         updateSubagentFooter(ctx, subagentRuns);
         throw err;
       }
       // logPath is only known after the runner allocates its tmp dir; the run
-      // may already be terminal (a failed update must not surface as a tool error).
-      try {
-        subagentRuns.update(runId, { logPath: handle.logPath });
-      } catch {
-        /* run already frozen by onExit */
-      }
+      // may already be terminal, and a frozen-update error must not surface as
+      // a tool error.
+      updateRun(runId, { logPath: handle.logPath });
       updateSubagentFooter(ctx, subagentRuns);
 
       return {

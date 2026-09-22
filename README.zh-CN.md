@@ -6,7 +6,7 @@
   <img src="docs/banner.png" alt="pi-matt-subagent：从 Matt Pocock skills 到 blocking/background 子代理" width="800">
 </p>
 
-一个 pi 插件，负责把 [Matt Pocock 的 skills](https://github.com/mattpocock) 里「spawn sub-agents」这类指令变成真实可跑的动作。当某个 skill 写着 *"spawn sub-agents in parallel"* 或 *"fire the research subagents"* 时，这个插件就是执行层：它启动真正的 pi 子代理——blocking 用分离子进程，后台 research 用进程内第二会话（ADR 0013）——阻塞等待（后台场景则不等待），然后把结果交回给你。
+一个 pi 插件，负责把 [Matt Pocock 的 skills](https://github.com/mattpocock) 里「spawn sub-agents」这类指令变成真实可跑的动作。当某个 skill 写着 *"spawn sub-agents in parallel"* 或 *"fire the research subagents"* 时，这个插件就是执行层：它启动真正的 pi 子代理——blocking 用独立子进程，后台 research 用进程内第二会话（ADR 0013）——阻塞等待（后台场景则不等待），然后把结果交回给你。
 
 这个插件本身就是 dogfooding 的产物：上游 skills 有子代理需求，插件才存在。它的两个工具与这些 skill 描述的子代理模式一一对应。
 
