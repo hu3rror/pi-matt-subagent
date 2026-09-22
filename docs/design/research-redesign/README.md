@@ -10,6 +10,5 @@ Proposed rewrites of the two mattpocock-fork skills affected by the research red
 ## Apply (implementation time)
 
 1. Pull the latest mattpocock upstream sync of the skills.
-2. Replace `research/SKILL.md` with `research-skill.md` (full-file replacement).
-3. Apply the step-5 edit in `wayfinder/SKILL.md` (anchor: the exact "Fire the research subagents" step).
-4. Re-run the token benchmark baseline and the surface-contract tests — the `research` tool's description and schema change with the redesign.
+2. Run `node scripts/apply-skill-patch.ts` — it re-applies both patches (the `research/SKILL.md` full replacement and the `wayfinder/SKILL.md` step-5 edit) straight from these files, idempotently. `--dry-run` previews; `--skills-dir <path>` targets a custom skills dir; a missing target (sync never ran) reports and exits nonzero. Run it again after every future sync — a sync restores the upstream texts, which is exactly what makes the script fire.
+3. Re-run the token benchmark baseline and the surface-contract tests — the `research` tool's description and schema change with the redesign.
