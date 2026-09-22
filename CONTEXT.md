@@ -20,6 +20,10 @@ _Avoid_: synchronous, wait, join
 工具立即返回、subagent 在后台运行、到达终态时结果经 push（推送交付）进主会话上下文、主会话无需轮询的语义。
 _Avoid_: async, fire-and-forget, detached
 
+**child session（子会话）**:
+执行一次后台 research run 的进程内会话（ADR 0013 的 in-process second session，`createAgentSession` + `SessionManager.inMemory()`），承载 role=researcher 的 subagent 实例——subagent 是「委托执行」，子会话是「在哪执行、输出怎么送回来」。`push` 边界引用的「输出流先于 done 结束」契约即其传输属性；生命周期会话作用域，`session_shutdown` 时 dispose。与主会话相对。
+_Avoid_: 子进程, worker, in-process 第二会话
+
 **push（推送交付）**:
 后台 subagent 到达任一终态（succeeded / failed / terminated / aborted）时，扩展经 `pi.sendMessage`（`deliverAs: "followUp"` + `triggerTurn: true`）把结果摘要与 findings 路径推进主会话上下文的语义——主会话空闲时立即触发新回合，正在回合中则排队到当前回合工具调用结束。推送内容成为被触发回合的 prompt，须措辞为「读取 findings 文件」的指令；另由消息渲染器（`pi.registerMessageRenderer`）负责转录显示。手动 kill（aborted）同样推送，告知主 agent 研究已被停止。
 两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，抛出的工具错误（ADR 0010）即模型可见信号；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。
