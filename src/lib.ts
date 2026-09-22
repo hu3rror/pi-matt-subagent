@@ -54,6 +54,16 @@ export function scopeAllowsProject(scope: AgentScope): boolean {
 
 export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 60 * 60 * 1000;
 
+/**
+ * Bounded window the abort paths (wall-clock kill, manual kill) give the tee
+ * to drain the child's final output into the per-run log before onExit fires
+ * anyway. The real child factory flushes on end, so the normal case drains
+ * well within it; the bound only ever fires when abort() cannot end the
+ * stream (a model call that ignores the abort) — the terminated/aborted push
+ * must still arrive (ADR 0013: every terminal state is pushed).
+ */
+const TEE_DRAIN_BOUND_MS = 500;
+
 // ---------------------------------------------------------------------------
 // Tool parameter schemas and the `input` escape hatch (ADR 0011)
 //   Single source of truth for both tools' model-facing parameter schemas,
@@ -622,6 +632,9 @@ export function emptyUsage(): UsageStats {
 
 export const DEFAULT_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "bash", "write"];
 
+/** This extension's own tool names — never handed to a research child (ADR 0013: no recursive extension re-entry). */
+const EXTENSION_TOOL_NAMES = new Set(TOOL_CONTRACTS.map((c) => c.name));
+
 export interface ResearchRunOptions {
   task: string;
   findingsPath: string;
@@ -754,7 +767,9 @@ export function runBackgroundResearch(
 
   const maxWallClockMs = opts.maxWallClockMs ?? DEFAULT_RESEARCH_WALL_CLOCK_MS;
   const systemPrompt = buildResearchPrompt(agent, opts.task, opts.findingsPath, maxWallClockMs);
-  const tools = resolveTools(opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS, opts.availableToolNames);
+  const tools = resolveTools(opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS, opts.availableToolNames)?.filter(
+    (t) => !EXTENSION_TOOL_NAMES.has(t),
+  );
 
   const child = createChildSession({
     cwd: opts.cwd,
@@ -789,15 +804,52 @@ export function runBackgroundResearch(
 
   let terminal = false;
   let timer: unknown | undefined;
-  const settle = (status: ResearchExitInfo["status"], extra: { errorMessage?: string } = {}) => {
+  // Abort paths (wall-clock kill, manual kill) bound the tee drain: abort()
+  // may not end the child's stream (a model call that ignores the abort), and
+  // the push must still arrive (ADR 0013: every terminal state is pushed).
+  // The status is resolved synchronously here, so a later done-rejection
+  // cannot override it; only the onExit delivery waits for the drain (or the
+  // bounded window).
+  const drainTeeWithBound = (): Promise<void> => {
+    let bound: unknown | undefined;
+    return new Promise<void>((resolve) => {
+      bound = setTimer(() => {
+        // The stream is stuck: close the log fd so a stuck run does not leak
+        // it for the rest of the session. Any chunk that lands after the
+        // close fails harmlessly (the tee rejection is swallowed below).
+        try {
+          fs.closeSync(logFd);
+        } catch {
+          /* already closed by the tee drain */
+        }
+        resolve();
+      }, TEE_DRAIN_BOUND_MS);
+      (bound as { unref?: () => void } | undefined)?.unref?.();
+      void tee
+        .finally(() => {
+          if (bound !== undefined) clearTimer(bound);
+          resolve();
+        })
+        .catch(() => {});
+    });
+  };
+  const settle = (
+    status: ResearchExitInfo["status"],
+    extra: { errorMessage?: string } = {},
+    wait: "tee" | "tee-bounded" = "tee",
+  ) => {
     if (terminal) return;
     terminal = true;
     if (timer !== undefined) clearTimer(timer);
-    // Fire onExit only after the tee has drained the child's output into the
-    // log: onExit readers (the push's lastOutput tail) must never see a
-    // half-flushed log. The flush-fix in the real child factory guarantees the
-    // stream always terminates once ended (ADR 0013).
-    void tee.finally(() => opts.onExit?.({ status, ...extra }));
+    // Fire onExit once the log is drained — naturally (the tee end closes the
+    // fd, see above) or at the bound for a stuck stream — so the push's
+    // lastOutput tail never sees a half-flushed log, and is never lost to a
+    // stream that never ends.
+    const drained = wait === "tee-bounded" ? drainTeeWithBound() : tee.finally(() => {});
+    void drained.then(
+      () => opts.onExit?.({ status, ...extra }),
+      () => opts.onExit?.({ status, ...extra }),
+    );
   };
 
   timer = setTimer(() => {
@@ -805,7 +857,7 @@ export function runBackgroundResearch(
     // The marker lands before onExit so a standalone reader can tell a
     // wall-clock cut from a complete run without the push's context.
     appendResearchTerminatedMarker(opts.findingsPath, new Date(nowFn()).toISOString());
-    settle("terminated");
+    settle("terminated", {}, "tee-bounded");
   }, maxWallClockMs);
   const asTimeout = timer as { unref?: () => void } | undefined;
   asTimeout?.unref?.();
@@ -818,7 +870,7 @@ export function runBackgroundResearch(
   if (opts.abortSignal) {
     const onAbort = () => {
       child.abort();
-      settle("aborted");
+      settle("aborted", {}, "tee-bounded");
     };
     if (opts.abortSignal.aborted) {
       // A pre-aborted signal settles on a microtask, not synchronously: onExit

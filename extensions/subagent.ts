@@ -1275,43 +1275,61 @@ export default function (pi: ExtensionAPI) {
       researchAborts.set(runId, abortController);
       updateSubagentFooter(ctx, subagentRuns);
 
-      const handle = runBackgroundResearch(
-        {
-          cwd: merged.cwd ?? ctx.cwd,
-          model: childModel,
-          thinkingLevel: thinking,
-          tools: merged.tools,
-          task: merged.task,
-          findingsPath,
-          maxWallClockMs: merged.maxWallClockMs,
-          availableToolNames,
-          agents,
-          abortSignal: abortController.signal,
-          // Fires exactly once at a terminal state: settle the registry entry
-          // and push the outcome into the main context — content worded as an
-          // instruction to read the findings file (ADR 0013).
-          onExit: (info) => {
-            researchAborts.delete(runId);
-            const lastOutput = readLogTail(handle.logPath);
-            try {
-              subagentRuns.update(runId, { status: info.status, lastOutput: lastOutput || undefined });
-            } catch {
-              /* run already terminal (frozen elsewhere) — the first terminal wins */
-            }
-            updateSubagentFooter(ctx, subagentRuns);
-            pi.sendMessage(
-              {
-                customType: RESEARCH_STATUS_CUSTOM_TYPE,
-                content: researchStatusContent(info.status, findingsPath, handle.logPath),
-                display: true,
-                details: { status: info.status, findingsPath, logPath: handle.logPath, lastOutput },
-              },
-              { deliverAs: "followUp", triggerTurn: true },
-            );
+      let handle: ResearchHandle;
+      try {
+        handle = runBackgroundResearch(
+          {
+            cwd: merged.cwd ?? ctx.cwd,
+            model: childModel,
+            thinkingLevel: thinking,
+            tools: merged.tools,
+            task: merged.task,
+            findingsPath,
+            maxWallClockMs: merged.maxWallClockMs,
+            availableToolNames,
+            agents,
+            abortSignal: abortController.signal,
+            // Fires exactly once at a terminal state: settle the registry entry
+            // and push the outcome into the main context — content worded as an
+            // instruction to read the findings file (ADR 0013).
+            onExit: (info) => {
+              researchAborts.delete(runId);
+              const lastOutput = readLogTail(handle.logPath);
+              try {
+                subagentRuns.update(runId, { status: info.status, lastOutput: lastOutput || undefined });
+              } catch {
+                /* run already terminal (frozen elsewhere) — the first terminal wins */
+              }
+              updateSubagentFooter(ctx, subagentRuns);
+              pi.sendMessage(
+                {
+                  customType: RESEARCH_STATUS_CUSTOM_TYPE,
+                  content: researchStatusContent(info.status, findingsPath, handle.logPath),
+                  display: true,
+                  details: { status: info.status, findingsPath, logPath: handle.logPath, lastOutput },
+                },
+                { deliverAs: "followUp", triggerTurn: true },
+              );
+            },
           },
-        },
-        (childOpts) => createResearchChildSession(childOpts),
-      );
+          (childOpts) => createResearchChildSession(childOpts),
+        );
+      } catch (err) {
+        // A runner-level failure after the run was registered (e.g. the tmp
+        // dir could not be created) must not leave a `running` registry entry
+        // or a leaked abort handle: settle the run failed and release the
+        // controller before the error escapes to the harness. No push here —
+        // the run never started, and the thrown tool error is the model's
+        // signal (ADR 0010).
+        researchAborts.delete(runId);
+        try {
+          subagentRuns.update(runId, { status: "failed" });
+        } catch {
+          /* already terminal elsewhere */
+        }
+        updateSubagentFooter(ctx, subagentRuns);
+        throw err;
+      }
       // logPath is only known after the runner allocates its tmp dir; the run
       // may already be terminal (a failed update must not surface as a tool error).
       try {

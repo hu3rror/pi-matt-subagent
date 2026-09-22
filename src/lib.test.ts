@@ -558,6 +558,147 @@ test("a pre-aborted signal settles on a microtask, never synchronously before th
   assert.ok(handleSeenInOnExit.seen, "onExit must run after the handle exists (async settle)");
 });
 
+// ADR 0013 push delivery — a wall-clock kill or manual kill must push its
+// terminal state even when abort() cannot end the child's output stream (a
+// model call that ignores the abort leaves the stream open forever). The
+// runner resolves the status synchronously at the kill and fires onExit after
+// a bounded drain window, so the push is never lost to a stuck stream.
+test("wall-clock kill pushes terminated even when the child stream never ends (bounded drain window)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  fs.writeFileSync(findingsPath, "# Findings\n\npartial\n");
+  const state = { abortCalls: 0 };
+  const child = fakeChild({
+    output: (async function* () {
+      // Never yields, never ends: the tee's for-await suspends forever.
+      await new Promise<void>(() => {});
+    })(),
+    abort: () => state.abortCalls++,
+  });
+  const exits: ResearchExitInfo[] = [];
+  const timers: Array<() => void> = [];
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      maxWallClockMs: 5 * 60 * 1000,
+      agents: [embeddedResearcher()],
+      watcherDeps: {
+        now: () => 1_700_000_000_000,
+        setTimeout: (fn: () => void) => {
+          timers.push(fn);
+          return { unref() {} } as never;
+        },
+        clearTimeout: () => {},
+      },
+      onExit: (info) => exits.push(info),
+    },
+    () => child,
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.equal(timers.length, 1, "initially only the wall-clock timer is scheduled");
+  timers[0]!();
+  assert.equal(state.abortCalls, 1, "the child must be aborted at the cap");
+  const text = fs.readFileSync(findingsPath, "utf8");
+  assert.ok(text.includes("<!-- research-terminated"), "the marker lands before the push");
+  assert.deepEqual(exits, [], "the push waits for the bounded drain (the stream is still open)");
+  assert.equal(timers.length, 2, "the drain bound is scheduled at settle");
+  timers[1]!();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "terminated" }], "the terminated push must arrive even on a stuck stream");
+});
+
+test("a manual kill pushes aborted even when the child stream never ends", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const state = { abortCalls: 0 };
+  const child = fakeChild({
+    output: (async function* () {
+      await new Promise<void>(() => {});
+    })(),
+    abort: () => state.abortCalls++,
+  });
+  const exits: ResearchExitInfo[] = [];
+  const timers: Array<() => void> = [];
+  const controller = new AbortController();
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      abortSignal: controller.signal,
+      watcherDeps: {
+        now: () => 1_700_000_000_000,
+        setTimeout: (fn: () => void) => {
+          timers.push(fn);
+          return { unref() {} } as never;
+        },
+        clearTimeout: () => {},
+      },
+      onExit: (info) => exits.push(info),
+    },
+    () => child,
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  controller.abort();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(state.abortCalls, 1, "a manual kill aborts the in-process child");
+  assert.deepEqual(exits, [], "the push waits for the bounded drain");
+  assert.equal(timers.length, 2, "the wall-clock timer plus the drain grace");
+  timers[1]!();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "aborted" }], "the aborted push must arrive even on a stuck stream");
+  assert.ok(!fs.existsSync(findingsPath), "a manual kill must not write the termination marker");
+});
+
+// ADR 0013 — the research child is restricted to built-in tools: the
+// extension's own tool names (subagent, research) must never reach its
+// allowlist, even though the main session's registry contains them.
+test("runBackgroundResearch never hands the extension's own tools to the child", () => {
+  const calls: Array<{ tools?: string[] }> = [];
+  runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      tools: ["subagent", "research", "read"],
+      availableToolNames: new Set(["subagent", "research", "read", "grep"]),
+      agents: [embeddedResearcher()],
+    },
+    (opts) => {
+      calls.push({ tools: opts.tools });
+      return fakeChild();
+    },
+  );
+  assert.deepEqual(calls[0]?.tools, ["read"], "subagent/research must never reach a research child allowlist");
+});
+
+test("runBackgroundResearch drops extension tools without a tool registry too", () => {
+  const calls: Array<{ tools?: string[] }> = [];
+  runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      tools: ["research", "subagent", "write"],
+      agents: [embeddedResearcher()],
+    },
+    (opts) => {
+      calls.push({ tools: opts.tools });
+      return fakeChild();
+    },
+  );
+  assert.deepEqual(calls[0]?.tools, ["write"]);
+});
+
 test("runBackgroundResearch unrefs the wall-clock timer so it never holds the host alive", (t) => {
   const { child } = pendingChild();
   let unrefCalls = 0;
