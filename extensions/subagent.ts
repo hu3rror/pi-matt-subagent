@@ -26,6 +26,7 @@ import * as path from "node:path";
 import type { AgentToolResult, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message, Model } from "@earendil-works/pi-ai";
 import {
+  type AgentSession,
   CONFIG_DIR_NAME,
   createAgentSession,
   DefaultResourceLoader,
@@ -33,6 +34,7 @@ import {
   getAgentDir,
   parseFrontmatter,
   SessionManager,
+  type ThemeColor,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
@@ -159,7 +161,7 @@ export function createResearchChildSession(opts: {
     }
   })();
 
-  let session: Disposable & { abort: () => Promise<void>; subscribe: (l: (e: { type: string; message?: AgentMessage }) => void) => () => void } | undefined;
+  let session: AgentSession | undefined;
   // Internal abort flag: `abort()` before the session exists (a manual kill or
   // a very tight wall-clock cap landing inside the async creation window) must
   // still stop the researcher — after creation resolves, the flag is checked
@@ -237,7 +239,7 @@ export const RESEARCH_STATUS_CUSTOM_TYPE = "research-status";
 // cannot drift from what the runner resolves. Theme colors stay renderer-side
 // — lib is pi-runtime-free — but the key set is the exact union, so the map
 // is total and needs no fallback.
-const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown", string> = {
+const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown", ThemeColor> = {
   succeeded: "success",
   failed: "error",
   terminated: "warning",

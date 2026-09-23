@@ -129,7 +129,8 @@ Measured with pi 0.87.0 on 2026-09-22 in a separate temporary process with an em
 ## Development
 
 ```sh
-npm test   # unit tests, no pi runtime needed — src/lib.ts stays runtime-free
+npm test          # unit tests, no pi runtime needed — src/lib.ts stays runtime-free
+npm run typecheck # extension + lib + scripts typecheck (tsconfig.json, requires installed pi packages)
 ```
 
 The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, background spawn with injectable seams, `input` merge/validation, the surface contract) are what the tests cover. `node scripts/benchmark-tools.ts` refreshes the token-benchmark numbers and the guard baseline when the registered surface changes.

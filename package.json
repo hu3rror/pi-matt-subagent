@@ -23,7 +23,8 @@
     "CONTEXT.md"
   ],
   "scripts": {
-    "test": "node --test src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts"
+    "test": "node --test src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -41,6 +42,7 @@
     ]
   },
   "devDependencies": {
-    "typebox": "^1.3.34"
+    "typebox": "^1.3.34",
+    "typescript": "^7.0.2"
   }
 }

@@ -10,7 +10,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Type, type TSchema } from "typebox";
+import { Type, type TObject, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 
 // ---------------------------------------------------------------------------
@@ -198,9 +198,9 @@ export interface ToolContract {
   name: string;
   description: string;
   /** The registered (public) parameter schema — what the model sees. */
-  parameters: TSchema;
+  parameters: TObject;
   /** The full dispatch contract (public + hidden), used to validate merged params. */
-  fullParameters: TSchema;
+  fullParameters: TObject;
   /** The hidden parameter names accepted through `input`. */
   hiddenKeys: readonly string[];
 }

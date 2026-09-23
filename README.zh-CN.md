@@ -127,7 +127,8 @@ CONTEXT.md               领域词汇表（subagent、role、blocking、backgrou
 ## 开发
 
 ```sh
-npm test   # 单元测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
+npm test          # 单元测试，不需要 pi 运行时——src/lib.ts 保持零运行时依赖
+npm run typecheck # 扩展 + lib + scripts 类型检查（tsconfig.json，需要已安装的 pi 包）
 ```
 
 扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入子会话工厂 seam 的后台 runner、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。

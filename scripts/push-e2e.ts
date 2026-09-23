@@ -16,7 +16,10 @@
  *      context via pi.sendMessage (deliverAs: "followUp", triggerTurn: true);
  *   3. crash isolation — a child built with a deliberately bogus model throws
  *      without taking the main session down;
- *   4. cleanup — session_shutdown disposes the tracked in-process children.
+ *   4. cleanup — session_shutdown aborts the tracked in-process children (the
+ *      wrapper exposes no `dispose` by design — the child self-disposes in
+ *      `done`'s finally; `abort` is the wrapper's live-run termination path,
+ *      shared with the manual kill).
  *
  * Run (a working model / API key is required):
  *   pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/push-e2e.ts "Count slowly from 1 to 25, one number per line, then say done"
@@ -38,16 +41,12 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createResearchChildSession, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
 
-interface Disposable {
-  dispose(): void;
-}
-
 export default function (pi: ExtensionAPI) {
   const logPath = path.join(os.tmpdir(), "push-e2e.log");
   fs.writeFileSync(logPath, "", { encoding: "utf-8" });
   const log = (msg: string) => fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`);
 
-  const children: Array<Disposable & { abort?: () => void }> = [];
+  const children: Array<{ abort(): void }> = [];
   let started = false;
 
   pi.on("session_start", (event, ctx) => {
@@ -148,10 +147,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", (event) => {
-    log(`session_shutdown reason=${event.reason}; disposing ${children.length} tracked child session(s)`);
+    log(`session_shutdown reason=${event.reason}; aborting ${children.length} tracked child session(s)`);
     for (const c of children) {
       try {
-        c.dispose();
+        c.abort();
       } catch {
         /* ignore */
       }
