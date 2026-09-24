@@ -42,6 +42,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import {
   blockingRunStatus,
   buildDispatchArgs,
+  buildSubagentEnv,
   createRunRegistry,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
@@ -440,6 +441,8 @@ interface DispatchDefaults {
   model?: string;
   thinkingLevel?: string;
   thinkingOverride?: string;
+  /** Parent session id threaded to the spawn env (subagent marker). */
+  parentSessionId?: string;
 }
 
 /**
@@ -546,6 +549,9 @@ async function runSingleAgent(
         cwd: cwd ?? defaultCwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        // Per-spawn injection, so nested subagents each name their immediate
+        // parent (buildSubagentEnv, lib.ts). Pure announcement.
+        env: buildSubagentEnv(process.env, dispatchDefaults.parentSessionId),
       });
       let buffer = "";
 
@@ -869,6 +875,7 @@ export default function (pi: ExtensionAPI) {
         // input.thinkingOverride is the canonical per-run override field; the
         // public `thinkingLevel` param maps to the same slot (ADR 0011).
         thinkingOverride: merged.thinkingOverride ?? merged.thinkingLevel,
+        parentSessionId: ctx.sessionManager.getSessionId(),
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
       const agents = discovery.agents;

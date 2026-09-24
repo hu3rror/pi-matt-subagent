@@ -697,6 +697,27 @@ export function buildDispatchArgs(opts: {
   return args;
 }
 
+/**
+ * The gotgenes out-of-process subagent marker (pure announcement): names the
+ * immediate parent session id in every blocking child's environment. This
+ * package never reads it; consumers (permission ask-forwarding, identity
+ * guards) read it. The legacy PI_SUBAGENT_CHILD / PI_SUBAGENT_NAME and the
+ * role hint PI_SUBAGENT_ROLE are deliberately not set.
+ */
+export const SUBAGENT_PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
+
+/**
+ * Builds the environment for a blocking subagent spawn: a full copy of
+ * `base` (inheritance preserved), plus the subagent marker naming the parent
+ * session when an id is present. Without an id the copy is unchanged — a
+ * top-level run carries no marker. Pure announcement: the returned map is
+ * handed to the child process and never read here.
+ */
+export function buildSubagentEnv(base: NodeJS.ProcessEnv, parentSessionId?: string): NodeJS.ProcessEnv {
+  if (!parentSessionId) return { ...base };
+  return { ...base, [SUBAGENT_PARENT_SESSION_ENV]: parentSessionId };
+}
+
 export interface ResearchHandle {
   researchId: string;
   findingsPath: string;

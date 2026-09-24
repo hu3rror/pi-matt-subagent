@@ -7,6 +7,7 @@ import {
   appendResearchTerminatedMarker,
   blockingRunStatus,
   buildResearchPrompt,
+  buildSubagentEnv,
   createRunRegistry,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
@@ -31,6 +32,7 @@ import {
   scopeAllowsProject,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_INPUT_KEYS,
+  SUBAGENT_PARENT_SESSION_ENV,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
   TERMINAL_RUN_STATUSES,
@@ -1397,4 +1399,40 @@ test("model-facing tool surface stays within baseline × 1.2 (token regression g
         `(baseline ${TOKEN_BASELINE[contract.name]} × ${TOKEN_GUARD_MULTIPLIER})`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// S23 — buildSubagentEnv: the pure env builder for blocking spawns. The base
+// environment is fully preserved (inheritance), the marker is present exactly
+// when a parent session id is given, and absent otherwise (a manual top-level
+// run carries none). The env-var name is the frozen gotgenes out-of-process
+// convention; the function itself never reads the marker back.
+// ---------------------------------------------------------------------------
+
+test("buildSubagentEnv preserves the base environment and adds the marker with an id", () => {
+  const base = { HOME: "/home/u", PATH: "/usr/bin", EMPTY: "" };
+  const env = buildSubagentEnv(base, "session-123");
+  assert.ok(env !== base, "returns a fresh map, not the caller's object");
+  // every base key/value survives
+  assert.equal(env.HOME, "/home/u");
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.EMPTY, "");
+  // the marker names the parent session
+  assert.equal(env[SUBAGENT_PARENT_SESSION_ENV], "session-123");
+});
+
+test("buildSubagentEnv omits the marker when no id is given", () => {
+  const base: NodeJS.ProcessEnv = { HOME: "/home", ALREADY: "set" };
+  const env = buildSubagentEnv(base);
+  assert.deepEqual(env, base, "an unchanged copy of the base");
+  assert.ok(env !== base, "still a copy, not the caller's object");
+  assert.equal(env[SUBAGENT_PARENT_SESSION_ENV], undefined);
+});
+
+test("buildSubagentEnv never mutates the caller's base", () => {
+  const base = { HOME: "/home" };
+  const snapshot = { ...base };
+  buildSubagentEnv(base, "sess");
+  buildSubagentEnv(base);
+  assert.deepEqual(base, snapshot, "the caller's object is untouched");
 });
