@@ -836,9 +836,20 @@ export function runBackgroundResearch(
   // JSON object per line, written through the child factory's optional
   // `onToolCall` hook). Both fds are opened eagerly and closed through the
   // same single exit path below — or on a synchronous factory throw — so a
-  // stuck run cannot leak either.
+  // stuck run cannot leak either. If the second open fails, the first fd is
+  // closed before rethrowing: the pair must never leak mid-open.
   const logFd = fs.openSync(logPath, "a");
-  const toolCallsFd = fs.openSync(toolCallsPath, "a");
+  let toolCallsFd: number;
+  try {
+    toolCallsFd = fs.openSync(toolCallsPath, "a");
+  } catch (err) {
+    try {
+      fs.closeSync(logFd);
+    } catch {
+      /* already closed */
+    }
+    throw err;
+  }
   const closeFds = () => {
     try {
       fs.closeSync(logFd);
