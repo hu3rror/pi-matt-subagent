@@ -45,6 +45,7 @@ import {
   type ResearchChildSession,
   type ResearchExitInfo,
   type RunEntry,
+  type ToolCallEvent,
 } from "./lib.ts";
 import { embeddedResearcher, fakeChild } from "./test-helpers.ts";
 
@@ -725,6 +726,113 @@ test("runBackgroundResearch drops extension tools without a tool registry too", 
     },
   );
   assert.deepEqual(calls[0]?.tools, ["write"]);
+});
+
+// Issue #26 — the toolCall audit seam: the runner appends one JSON object per
+// line to `toolcalls.jsonl` beside `research.log`, driven through the child
+// factory's optional synchronous `onToolCall` hook (the `tool_execution_start`
+// event source). Start events only, no results, no truncation; a zero-call
+// run leaves an empty file; the output log and UI stream are untouched.
+
+test("runBackgroundResearch appends one JSONL line per tool call through the injected hook", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  let hook: ((call: ToolCallEvent) => void) | undefined;
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      watcherDeps: { now: () => 1_700_000_000_000 },
+    },
+    (opts) => {
+      hook = opts.onToolCall;
+      return fakeChild({ done: Promise.resolve() });
+    },
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
+  assert.equal(typeof hook, "function", "the runner must hand the child factory an onToolCall hook");
+  // a zero-call run leaves an empty (but existing) file
+  assert.ok(fs.existsSync(toolCallsPath), "the audit file is created eagerly beside the log");
+  assert.equal(fs.readFileSync(toolCallsPath, "utf8"), "");
+
+  hook!({ toolCallId: "call-1", toolName: "bash", args: { command: "echo hi", timeout: 1000 } });
+  hook!({ toolCallId: "call-2", toolName: "read", args: { path: "/tmp/x" } });
+  const lines = fs
+    .readFileSync(toolCallsPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.deepEqual(lines, [
+    { ts: 1_700_000_000_000, toolCallId: "call-1", toolName: "bash", args: { command: "echo hi", timeout: 1000 } },
+    { ts: 1_700_000_000_000, toolCallId: "call-2", toolName: "read", args: { path: "/tmp/x" } },
+  ]);
+});
+
+test("the toolCall audit writes only to toolcalls.jsonl, never the output log", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const output = (async function* () {
+    yield "assistant text\n";
+  })();
+  let hook: ((call: ToolCallEvent) => void) | undefined;
+  const handle = runBackgroundResearch(
+    { cwd: dir, task: "T", findingsPath, agents: [embeddedResearcher()] },
+    (opts) => {
+      hook = opts.onToolCall;
+      return fakeChild({ output });
+    },
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  hook!({ toolCallId: "c", toolName: "bash", args: { command: "ls" } });
+  await new Promise((r) => setTimeout(r, 20));
+  // the output log is a 1:1 tee of the child's output stream (the UI
+  // stream), so an untouched log also proves the stream is untouched — the
+  // audit writes only to its own file
+  assert.equal(fs.readFileSync(handle.logPath, "utf8"), "assistant text\n");
+  const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
+  const line = JSON.parse(fs.readFileSync(toolCallsPath, "utf8").trim());
+  assert.equal(line.toolName, "bash");
+  assert.equal(line.args.command, "ls");
+});
+
+test("a toolCall audit serialization failure is swallowed and writes no line", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const exits: ResearchExitInfo[] = [];
+  let hook: ((call: ToolCallEvent) => void) | undefined;
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      onExit: (info) => exits.push(info),
+    },
+    (opts) => {
+      hook = opts.onToolCall;
+      return fakeChild({ done: Promise.resolve() });
+    },
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(exits, [{ status: "succeeded" }], "the run settles normally");
+  // an unserializable arg (BigInt) must not throw out of the hook and must
+  // write no line — a debug artifact can never kill a research run
+  const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
+  assert.doesNotThrow(() => hook!({ toolCallId: "c", toolName: "bash", args: { n: 1n } }));
+  assert.equal(fs.readFileSync(toolCallsPath, "utf8"), "");
 });
 
 test("runBackgroundResearch unrefs the wall-clock timer so it never holds the host alive", (t) => {

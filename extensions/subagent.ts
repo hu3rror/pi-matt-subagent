@@ -79,6 +79,7 @@ import {
   type RunPatch,
   type RunRegistry,
   type ThinkingLevel,
+  type ToolCallEvent,
   type UsageStats,
 } from "../src/lib.ts";
 
@@ -133,6 +134,8 @@ export function createResearchChildSession(opts: {
   systemPrompt: string;
   task: string;
   findingsPath: string;
+  /** Optional synchronous audit hook (toolCall audit): invoked once per executed tool call. */
+  onToolCall?: (call: ToolCallEvent) => void;
 }): ResearchChildSession {
   // A tiny async queue serving the runner's `for await` tee over `output`.
   const chunks: string[] = [];
@@ -200,6 +203,12 @@ export function createResearchChildSession(opts: {
         if (event.type === "message_end" && event.message) {
           const text = assistantTextOf(event.message);
           if (text) pushChunk(`${text}\n`);
+        } else if (event.type === "tool_execution_start") {
+          // ToolCall audit seam: every executed tool call is dispatched through
+          // the optional onToolCall hook with its final arguments — start
+          // events only, no results. The runner owns the file; nothing here
+          // touches the output stream or the UI.
+          opts.onToolCall?.({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
         }
       });
       try {

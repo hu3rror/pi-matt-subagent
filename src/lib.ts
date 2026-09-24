@@ -749,6 +749,18 @@ export interface ResearchChildSession {
   abort(): void;
 }
 
+/**
+ * One executed tool call, as reported by the child session's
+ * `tool_execution_start` event — the audit hook's payload. Start events only:
+ * no results, no truncation; `args` carries the final, post-mutation call
+ * arguments.
+ */
+export interface ToolCallEvent {
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+}
+
 export type CreateChildSession = (opts: {
   cwd: string;
   model?: unknown;
@@ -757,6 +769,13 @@ export type CreateChildSession = (opts: {
   systemPrompt: string;
   task: string;
   findingsPath: string;
+  /**
+   * Optional synchronous hook invoked once per executed tool call (the child
+   * session's `tool_execution_start` event). The runner uses it to append the
+   * per-run toolCall audit; tests capture it through the same seam. Optional
+   * so the existing fakes and the dev-only script compile unchanged.
+   */
+  onToolCall?: (call: ToolCallEvent) => void;
 }) => ResearchChildSession;
 
 /**
@@ -798,7 +817,13 @@ export function runBackgroundResearch(
   if (!agent) throw new Error('No "researcher" role available');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-research-"));
   const logPath = path.join(tmpDir, "research.log");
+  const toolCallsPath = path.join(tmpDir, "toolcalls.jsonl");
   const researchId = path.basename(tmpDir);
+
+  const deps = opts.watcherDeps ?? {};
+  const nowFn = deps.now ?? Date.now;
+  const setTimer = deps.setTimeout ?? ((fn: () => void, ms?: number) => setTimeout(fn, ms));
+  const clearTimer = deps.clearTimeout ?? ((id?: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>));
 
   const maxWallClockMs = opts.maxWallClockMs ?? DEFAULT_RESEARCH_WALL_CLOCK_MS;
   const systemPrompt = buildResearchPrompt(agent, opts.task, opts.findingsPath, maxWallClockMs);
@@ -806,36 +831,64 @@ export function runBackgroundResearch(
     (t) => !EXTENSION_TOOL_NAMES.has(t),
   );
 
-  const child = createChildSession({
-    cwd: opts.cwd,
-    model: opts.model,
-    thinkingLevel: opts.thinkingLevel,
-    tools,
-    systemPrompt,
-    task: opts.task,
-    findingsPath: opts.findingsPath,
-  });
-
-  // The runner owns the per-run log: every child output chunk is appended,
-  // serving `/subagents tail` and post-mortem inspection (ADR 0013).
+  // The runner owns the per-run artifacts: the output log (every child output
+  // chunk appended, serving `/subagents tail`) and the toolCall audit (one
+  // JSON object per line, written through the child factory's optional
+  // `onToolCall` hook). Both fds are opened eagerly and closed through the
+  // same single exit path below — or on a synchronous factory throw — so a
+  // stuck run cannot leak either.
   const logFd = fs.openSync(logPath, "a");
-  const closeLogFd = () => {
+  const toolCallsFd = fs.openSync(toolCallsPath, "a");
+  const closeFds = () => {
     try {
       fs.closeSync(logFd);
     } catch {
       /* already closed */
     }
+    try {
+      fs.closeSync(toolCallsFd);
+    } catch {
+      /* already closed */
+    }
   };
+  // The audit line schema: start events only — `{ts, toolCallId, toolName,
+  // args}`, no results, no truncation. Write failures are swallowed: a debug
+  // artifact must never kill a research run.
+  const onToolCall = (call: ToolCallEvent) => {
+    try {
+      fs.writeSync(
+        toolCallsFd,
+        `${JSON.stringify({ ts: nowFn(), toolCallId: call.toolCallId, toolName: call.toolName, args: call.args })}\n`,
+      );
+    } catch {
+      /* audit write failures are swallowed */
+    }
+  };
+
+  let child: ResearchChildSession;
+  try {
+    child = createChildSession({
+      cwd: opts.cwd,
+      model: opts.model,
+      thinkingLevel: opts.thinkingLevel,
+      tools,
+      systemPrompt,
+      task: opts.task,
+      findingsPath: opts.findingsPath,
+      onToolCall,
+    });
+  } catch (err) {
+    // A synchronous factory throw (the seam is test-injectable) must not leak
+    // the eagerly-opened fds: close both and rethrow.
+    closeFds();
+    throw err;
+  }
+
   const tee = (async () => {
     for await (const chunk of child.output) {
       fs.writeSync(logFd, chunk);
     }
   })();
-
-  const deps = opts.watcherDeps ?? {};
-  const nowFn = deps.now ?? Date.now;
-  const setTimer = deps.setTimeout ?? ((fn: () => void, ms?: number) => setTimeout(fn, ms));
-  const clearTimer = deps.clearTimeout ?? ((id?: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>));
 
   let terminal = false;
   let timer: unknown | undefined;
@@ -852,24 +905,24 @@ export function runBackgroundResearch(
     if (!bounded) {
       return tee
         .finally(() => {
-          closeLogFd();
+          closeFds();
         })
         .catch(() => {});
     }
     let bound: unknown | undefined;
     return new Promise<void>((resolve) => {
       bound = setTimer(() => {
-        // The stream is stuck: close the log fd so a stuck run does not leak
-        // it for the rest of the session. Any chunk that lands after the
+        // The stream is stuck: close both fds so a stuck run does not leak
+        // them for the rest of the session. Any write that lands after the
         // close fails harmlessly (the tee rejection is swallowed below).
-        closeLogFd();
+        closeFds();
         resolve();
       }, TEE_DRAIN_BOUND_MS);
       (bound as { unref?: () => void } | undefined)?.unref?.();
       void tee
         .finally(() => {
           if (bound !== undefined) clearTimer(bound);
-          closeLogFd();
+          closeFds();
           resolve();
         })
         .catch(() => {});
