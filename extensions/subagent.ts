@@ -540,6 +540,12 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.on("session_shutdown", () => {
+    // Drop the cached tool context first: the footer hook it feeds lives on a
+    // UI that may already be tearing down, and a throw from its onChange
+    // callback inside clear() would skip the child-session disposal below.
+    // At teardown there is no footer left to keep in sync (story 7's
+    // convergence only applies to a live session).
+    footerUi = undefined;
     subagentRuns.clear();
     researchAborts.clear();
     // Session-scoped research lifetime (ADR 0013): dispose every in-process
