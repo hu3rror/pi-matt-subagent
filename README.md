@@ -100,7 +100,7 @@ src/lib.ts               pure logic — role definitions, tool schemas (single s
                          research runner (child-session factory seam); zero pi-runtime
                          imports, tested with node --test
 src/lib.test.ts          unit tests
-scripts/                 token benchmark (Seam E) + measurement extension + push-e2e script (dev-only)
+scripts/                 token benchmark (Seam E) + measurement extension + push-e2e / blocking-e2e scripts (dev-only)
 prompts/                 the four slash-command templates
 docs/adr/                decisions: dual channel, tool-name resolution, research redesign (push
                          delivery, wall-clock cap), run registry + management, input escape
@@ -134,6 +134,17 @@ npm run typecheck # extension + lib + scripts typecheck (tsconfig.json, requires
 ```
 
 The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, background spawn with injectable seams, `input` merge/validation, the surface contract) are what the tests cover. `node scripts/benchmark-tools.ts` refreshes the token-benchmark numbers and the guard baseline when the registered surface changes.
+
+### Real-pi e2e scripts (dev-only, need a working model/API key)
+
+```sh
+pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/push-e2e.ts \
+  "Count slowly from 1 to 25, one number per line, then say done"   # research wiring: spawn, push, crash isolation, shutdown cleanup
+pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/blocking-e2e.ts \
+  "Count slowly from 1 to 25, one number per line, then say done"   # blocking spawn rewiring: protocol + usage, dispose-on-close
+```
+
+Each appends its gates to `push-e2e.log` / `blocking-e2e.log` in the OS temp dir; look for `PUSH-E2E OK` / `BLOCKING-E2E OK` per gate. Not part of `npm test` (Path-1 stance: the pure seams are covered by `node --test`; real-pi wiring regressions are caught by these scripts instead of a fake-pi harness).
 
 ### Re-applying the skill patches after an upstream sync
 

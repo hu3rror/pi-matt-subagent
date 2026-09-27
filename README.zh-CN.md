@@ -99,7 +99,7 @@ src/lib.ts               纯逻辑——角色定义、工具 schema（单一事
                          工具名解析、派发参数、research runner（子会话工厂 seam）；零 pi
                          运行时依赖，用 node --test 测
 src/lib.test.ts          单元测试
-scripts/                 token 基准（Seam E）+ 测量扩展 + push-e2e 脚本（仅开发用）
+scripts/                 token 基准（Seam E）+ 测量扩展 + push-e2e / blocking-e2e 脚本（仅开发用）
 prompts/                 四个 slash command 模板
 docs/adr/                决策记录：双通道、工具名归一化、research 重构（推送交付、墙钟上限）、
                          运行注册表 + 运行管理、input 逃生舱、共存立场
@@ -132,6 +132,17 @@ npm run typecheck # 扩展 + lib + scripts 类型检查（tsconfig.json，需要
 ```
 
 扩展只是 `src/lib.ts` 的薄消费者；纯函数（派发参数装配、工具解析、带可注入子会话工厂 seam 的后台 runner、`input` 合并/校验、契约面）就是测试覆盖的对象。注册表面变化时用 `node scripts/benchmark-tools.ts` 刷新 token 基准数字与守卫基线。
+
+### 真实 pi 的 e2e 脚本（仅开发用，需要可用的模型/API key）
+
+```sh
+pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/push-e2e.ts \
+  "Count slowly from 1 to 25, one number per line, then say done"   # research 接线：spawn、push、crash 隔离、shutdown 清理
+pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/blocking-e2e.ts \
+  "Count slowly from 1 to 25, one number per line, then say done"   # blocking spawn 重接：协议 + usage、dispose-on-close
+```
+
+各脚本把 gate 结果追加到系统临时目录的 `push-e2e.log` / `blocking-e2e.log`；每个 gate 看 `PUSH-E2E OK` / `BLOCKING-E2E OK`。不进 `npm test`（Path-1 立场：纯接缝由 `node --test` 覆盖；真实 pi 接线回归由这些脚本捕获，不用 fake-pi harness）。
 
 ### 上游同步后重打 skill 补丁
 
