@@ -275,6 +275,35 @@ test("parallel mode marks every still-active run aborted when the runner aborts"
   assert.ok(runs.every((r) => r.status === "aborted"), "no zombie queued or running entries survive the abort");
 });
 
+test("a worker resolving after an abort sweep keeps the run aborted (no frozen-update throw)", async () => {
+  const registry = createRunRegistry();
+  let first = true;
+  const runner: RunnerSeam = {
+    async runTask(t) {
+      if (first) {
+        first = false;
+        throw new Error("Subagent was aborted");
+      }
+      // Resolve after the sweep has already terminalized this run's entry.
+      await new Promise((r) => setTimeout(r, 10));
+      return okResult(t.agentName, "late");
+    },
+  };
+  await assert.rejects(
+    runBlockingPlan({
+      plan: { mode: "parallel", tasks: [{ agent: "a", task: "1" }, { agent: "b", task: "2" }] },
+      runner,
+      registry,
+      agents: noAgents,
+    }),
+    /Subagent was aborted/,
+  );
+  await new Promise((r) => setTimeout(r, 30));
+  const runs = registry.snapshot();
+  assert.equal(runs.length, 2);
+  assert.ok(runs.every((r) => r.status === "aborted"), "the sweep's aborted status wins over a late success");
+});
+
 test("parallel mode rejects more than 8 tasks without registering or running", async () => {
   const registry = createRunRegistry();
   let called = 0;

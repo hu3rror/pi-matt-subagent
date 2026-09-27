@@ -462,18 +462,22 @@ async function runSingleAgent(
       });
 
       proc.on("error", () => {
+        // Spawn failure: Node emits error then close; finish is idempotent so
+        // the second call is a no-op.
         accumulated = acc.finish();
         resolve(1);
       });
 
       if (signal) {
-        const kill = escalateKill(proc);
+        const escalation = escalateKill(proc);
         const onAbort = () => {
           wasAborted = true;
-          kill();
+          escalation.send();
         };
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
+        // Exit within grace cancels the SIGKILL backstop.
+        proc.on("close", () => escalation.dispose());
       }
     });
 
@@ -790,7 +794,7 @@ export default function (pi: ExtensionAPI) {
             dispatchDefaults,
             agents,
             { agentName: task.agentName, task: task.task, cwd: task.cwd, step: task.step },
-            signal,
+            opts.signal,
             opts.onProgress,
             availableToolNames,
           );

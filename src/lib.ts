@@ -1445,12 +1445,17 @@ export interface AssistantMessageLike {
   content?: unknown;
 }
 
+/** The text parts of one message (non-array content and non-text parts are tolerated). */
+function textPartsOfMessage(msg: AssistantMessageLike): Array<{ type?: string; text?: string }> {
+  return Array.isArray(msg.content)
+    ? (msg.content as Array<{ type?: string; text?: string }>).filter((p) => p.type === "text" && typeof p.text === "string")
+    : [];
+}
+
 /** All text parts of one assistant message, joined (the research tee input). */
 export function assistantTextOfMessage(msg: AssistantMessageLike): string {
   if (msg.role !== "assistant") return "";
-  const content = Array.isArray(msg.content) ? (msg.content as Array<{ type?: string; text?: string }>) : [];
-  return content
-    .filter((p) => p.type === "text" && typeof p.text === "string")
+  return textPartsOfMessage(msg)
     .map((p) => p.text as string)
     .join("");
 }
@@ -1460,8 +1465,7 @@ export function lastAssistantText(messages: readonly AssistantMessageLike[]): st
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    const content = Array.isArray(msg.content) ? (msg.content as Array<{ type?: string; text?: string }>) : [];
-    const parts = content.filter((p) => p.type === "text" && typeof p.text === "string");
+    const parts = textPartsOfMessage(msg);
     if (parts.length > 0) return parts[0].text as string;
   }
   return "";

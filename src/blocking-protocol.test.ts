@@ -156,41 +156,59 @@ interface FakeTimer {
   fired?: () => void;
 }
 
-function fakeTimerDeps(): { setTimer: (fn: () => void) => { unref: () => void }; timer: FakeTimer } {
+function fakeTimerDeps(): {
+  setTimer: (fn: () => void) => { unref: () => void };
+  clearTimer: (id: unknown) => void;
+  timer: FakeTimer;
+} {
   const timer: FakeTimer = {};
   const setTimer = (fn: () => void) => {
     timer.fired = fn;
     return { unref: () => {} };
   };
-  return { setTimer, timer };
+  const clearTimer = () => {
+    timer.fired = undefined;
+  };
+  return { setTimer, clearTimer, timer };
 }
 
-test("escalateKill sends SIGTERM on invocation, then SIGKILL after grace when the target survives", () => {
+test("escalateKill sends SIGTERM on send and fires the SIGKILL backstop at grace", () => {
   const calls: string[] = [];
-  const target = { killed: false, kill: (s: string) => (calls.push(s), true) };
+  const target = { kill: (s: string) => (calls.push(s), true) };
   const { setTimer, timer } = fakeTimerDeps();
-  const kill = escalateKill(target, { graceMs: 50, setTimeout: setTimer });
+  const esc = escalateKill(target, { graceMs: 50, setTimeout: setTimer });
   assert.deepEqual(calls, [], "creation does not kill");
-  kill();
+  esc.send();
   assert.deepEqual(calls, ["SIGTERM"]);
   timer.fired?.();
-  assert.deepEqual(calls, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(calls, ["SIGTERM", "SIGKILL"], "a live child that ignores SIGTERM is SIGKILLed after grace");
 });
 
-test("escalateKill skips SIGKILL when the target is already dead at grace time", () => {
+test("dispose cancels the SIGKILL backstop (the process exited within grace)", () => {
   const calls: string[] = [];
-  const target = { killed: true, kill: (s: string) => (calls.push(s), true) };
-  const { setTimer, timer } = fakeTimerDeps();
-  const kill = escalateKill(target, { graceMs: 50, setTimeout: setTimer });
-  kill();
+  const target = { kill: (s: string) => (calls.push(s), true) };
+  const { setTimer, clearTimer, timer } = fakeTimerDeps();
+  const esc = escalateKill(target, { graceMs: 50, setTimeout: setTimer, clearTimeout: clearTimer });
+  esc.send();
+  esc.dispose();
   timer.fired?.();
+  assert.deepEqual(calls, ["SIGTERM"], "no SIGKILL after dispose");
+});
+
+test("send is idempotent", () => {
+  const calls: string[] = [];
+  const target = { kill: (s: string) => (calls.push(s), true) };
+  const { setTimer } = fakeTimerDeps();
+  const esc = escalateKill(target, { graceMs: 50, setTimeout: setTimer });
+  esc.send();
+  esc.send();
   assert.deepEqual(calls, ["SIGTERM"]);
 });
 
 test("escalateKill defaults to a 5000ms grace window with the real timer", () => {
   const calls: string[] = [];
-  const target = { killed: false, kill: (s: string) => (calls.push(s), true) };
-  const kill = escalateKill(target);
-  kill();
+  const target = { kill: (s: string) => (calls.push(s), true) };
+  const esc = escalateKill(target);
+  esc.send();
   assert.deepEqual(calls, ["SIGTERM"], "real-timer path fires SIGTERM immediately");
 });

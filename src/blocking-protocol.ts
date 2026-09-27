@@ -11,7 +11,7 @@
  */
 
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentSource, UsageStats } from "./lib.ts";
+import { emptyUsage, type AgentSource, type UsageStats } from "./lib.ts";
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -66,7 +66,7 @@ export function createResultAccumulator(opts: {
     exitCode: 0,
     messages: [],
     stderr: "",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    usage: emptyUsage(),
     model: opts.model,
     step: opts.step,
   };
@@ -119,6 +119,9 @@ export function createResultAccumulator(opts: {
     },
     finish() {
       if (buffer.trim()) processLine(buffer);
+      // Idempotent: the adapter may call finish twice (spawn error then close),
+      // and a pending line must never be dispatched twice.
+      buffer = "";
       return result;
     },
   };
@@ -131,28 +134,45 @@ export function createResultAccumulator(opts: {
 /** The minimal process surface the kill path needs (structural; real spawn passes a ChildProcess). */
 export interface KillTarget {
   kill(signal: NodeJS.Signals): boolean;
-  killed?: boolean;
 }
 
 export interface EscalateKillDeps {
   setTimeout?: (fn: () => void, ms?: number) => { unref?: () => void };
+  clearTimeout?: (id: unknown) => void;
   graceMs?: number;
 }
 
 /**
- * The abort path for a spawned blocking child: SIGTERM immediately, then
- * SIGKILL after the grace window unless the target reports itself dead.
- * Injectable target + timer for tests; the real adapter passes the spawned
- * process and the real timer.
+ * The abort path for a spawned blocking child: `send()` fires SIGTERM and
+ * arms a SIGKILL backstop; `dispose()` cancels the backstop (the adapter calls
+ * it on the child's `close`). The backstop is keyed off disposal, never off
+ * `ChildProcess.killed` — that flag only means kill() was called, so a live
+ * child that ignores SIGTERM must still be SIGKILLed after grace.
  */
-export function escalateKill(target: KillTarget, deps?: EscalateKillDeps): () => void {
+export interface EscalationHandle {
+  send(): void;
+  dispose(): void;
+}
+
+export function escalateKill(target: KillTarget, deps?: EscalateKillDeps): EscalationHandle {
   const setTimer = deps?.setTimeout ?? ((fn: () => void, ms?: number) => setTimeout(fn, ms));
+  const clearTimer = deps?.clearTimeout ?? ((id?: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>));
   const graceMs = deps?.graceMs ?? 5000;
-  return () => {
-    target.kill("SIGTERM");
-    const timer = setTimer(() => {
-      if (!target.killed) target.kill("SIGKILL");
-    }, graceMs);
-    (timer as { unref?: () => void } | undefined)?.unref?.();
+  let timer: { unref?: () => void } | undefined;
+  let sent = false;
+  return {
+    send() {
+      if (sent) return;
+      sent = true;
+      target.kill("SIGTERM");
+      timer = setTimer(() => {
+        target.kill("SIGKILL");
+      }, graceMs);
+      (timer as { unref?: () => void } | undefined)?.unref?.();
+    },
+    dispose() {
+      if (timer !== undefined) clearTimer(timer);
+      timer = undefined;
+    },
   };
 }

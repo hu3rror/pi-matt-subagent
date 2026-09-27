@@ -165,11 +165,18 @@ export async function runBlockingPlan(opts: {
           opts.onPartial?.(partial);
         },
       });
-      registry.update(runId, {
-        status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
-        usage: result.usage,
-      });
+      // The terminal patch is guarded like the abort mark: a parallel abort
+      // sweep that already terminalized this run wins, and the frozen-update
+      // throw it would otherwise raise is never created (the result is
+      // discarded by the throwing plan either way).
+      const current = registry.get(runId);
+      if (current && isActiveRunStatus(current.status)) {
+        registry.update(runId, {
+          status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
+          lastOutput: lastOutputLine(lastAssistantText(result.messages)),
+          usage: result.usage,
+        });
+      }
       return result;
     } catch (err) {
       const r = registry.get(runId);
