@@ -11,7 +11,11 @@ import {
   blockingRunStatus,
   emptyUsage,
   formatBlockingToolError,
+  getResultOutput,
   isActiveRunStatus,
+  isToolError,
+  lastAssistantText,
+  lastOutputLine,
   resolveRole,
   type AgentConfig,
   type AgentSource,
@@ -68,35 +72,12 @@ const DEFAULT_LIMITS: Required<BlockingPlanLimits> = {
 };
 
 // ---------------------------------------------------------------------------
-// Result semantics helpers (moved from the extension; consolidated in the
-// semantics pass, the behaviors here are the frozen surface)
+// Result semantics helpers
+//   The failure/status/output-semantics cluster lives in lib.ts (isToolError,
+//   blockingRunStatus, getResultOutput, lastAssistantText, lastOutputLine);
+//   the orchestrator consumes it. truncateParallelOutput stays here because it
+//   is parallel-summary display, not shared semantics.
 // ---------------------------------------------------------------------------
-
-/** Last assistant text part, walking messages from the newest backwards. */
-export function getFinalOutput(messages: SingleResult["messages"]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "assistant") {
-      for (const part of msg.content) {
-        if (part.type === "text") return part.text;
-      }
-    }
-  }
-  return "";
-}
-
-/** Failure decision for display and tool-error purposes (abort folds in). */
-export function isFailedResult(result: { exitCode: number; stopReason?: string }): boolean {
-  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-}
-
-/** The text a consumer sees for one result (error surfaces the failure detail). */
-export function getResultOutput(result: SingleResult): string {
-  if (isFailedResult(result)) {
-    return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-  }
-  return getFinalOutput(result.messages) || "(no output)";
-}
 
 /** Byte-cap one task's summary output, dropping the tail of a partial multibyte char. */
 export function truncateParallelOutput(output: string, cap = DEFAULT_LIMITS.perTaskOutputCap): string {
@@ -105,15 +86,6 @@ export function truncateParallelOutput(output: string, cap = DEFAULT_LIMITS.perT
   let truncated = output.slice(0, cap);
   while (Buffer.byteLength(truncated, "utf8") > cap) truncated = truncated.slice(0, -1);
   return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
-}
-
-/** Last non-empty trimmed line of a text block (a run's live progress line). */
-export function lastLine(text: string): string | undefined {
-  const lines = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return lines.length > 0 ? lines[lines.length - 1] : undefined;
 }
 
 /** Runs fn over items with at most `concurrency` in flight, preserving order. */
@@ -180,8 +152,8 @@ export async function runBlockingPlan(opts: {
       result = await runner.runTask({ agentName: plan.agent, task: plan.task, cwd: plan.cwd }, {
         signal,
         onProgress: (partial) => {
-          const out = getFinalOutput(partial.messages);
-          if (out) registry.update(runId, { lastOutput: lastLine(out), usage: partial.usage });
+          const out = lastAssistantText(partial.messages);
+          if (out) registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
           opts.onToolUpdate?.(out || "(running...)", makeDetails([partial]));
         },
       });
@@ -191,15 +163,15 @@ export async function runBlockingPlan(opts: {
     }
     registry.update(runId, {
       status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-      lastOutput: lastLine(getFinalOutput(result.messages)),
+      lastOutput: lastOutputLine(lastAssistantText(result.messages)),
       usage: result.usage,
     });
-    if (isFailedResult(result)) {
+    if (isToolError(result)) {
       throw new Error(
         formatBlockingToolError("single", { stopReason: result.stopReason, output: getResultOutput(result) }),
       );
     }
-    return { text: getFinalOutput(result.messages) || "(no output)", details: makeDetails([result]) };
+    return { text: lastAssistantText(result.messages) || "(no output)", details: makeDetails([result]) };
   }
 
   if (plan.mode === "chain") {
@@ -220,8 +192,8 @@ export async function runBlockingPlan(opts: {
         result = await runner.runTask({ agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 }, {
           signal,
           onProgress: (partial) => {
-            const out = getFinalOutput(partial.messages);
-            if (out) registry.update(runId, { lastOutput: lastLine(out), usage: partial.usage });
+            const out = lastAssistantText(partial.messages);
+            if (out) registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
             opts.onToolUpdate?.(out || "(running...)", makeDetails([...results, partial]));
           },
         });
@@ -232,18 +204,18 @@ export async function runBlockingPlan(opts: {
       results.push(result);
       registry.update(runId, {
         status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-        lastOutput: lastLine(getFinalOutput(result.messages)),
+        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
         usage: result.usage,
       });
-      if (isFailedResult(result)) {
+      if (isToolError(result)) {
         throw new Error(
           formatBlockingToolError("chain", { agent: step.agent, step: i + 1, output: getResultOutput(result) }),
         );
       }
-      previousOutput = getFinalOutput(result.messages);
+      previousOutput = lastAssistantText(result.messages);
     }
     return {
-      text: getFinalOutput(results[results.length - 1].messages) || "(no output)",
+      text: lastAssistantText(results[results.length - 1].messages) || "(no output)",
       details: makeDetails(results),
     };
   }
@@ -292,8 +264,8 @@ export async function runBlockingPlan(opts: {
           signal,
           onProgress: (partial) => {
             allResults[index] = partial;
-            const out = getFinalOutput(partial.messages);
-            if (out) registry.update(runIds[index], { lastOutput: lastLine(out), usage: partial.usage });
+            const out = lastAssistantText(partial.messages);
+            if (out) registry.update(runIds[index], { lastOutput: lastOutputLine(out), usage: partial.usage });
             emitParallelUpdate();
           },
         });
@@ -304,7 +276,7 @@ export async function runBlockingPlan(opts: {
       allResults[index] = result;
       registry.update(runIds[index], {
         status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-        lastOutput: lastLine(getFinalOutput(result.messages)),
+        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
         usage: result.usage,
       });
       emitParallelUpdate();
@@ -321,10 +293,10 @@ export async function runBlockingPlan(opts: {
     throw err;
   }
 
-  const successCount = results.filter((r) => !isFailedResult(r)).length;
+  const successCount = results.filter((r) => !isToolError(r)).length;
   const summaries = results.map((r) => {
     const output = truncateParallelOutput(getResultOutput(r), limits.perTaskOutputCap);
-    const status = isFailedResult(r)
+    const status = isToolError(r)
       ? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
       : "completed";
     return `### [${r.agent}] ${status}\n\n${output}`;

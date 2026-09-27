@@ -1278,15 +1278,26 @@ function formatStartTime(startedAt: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-/** Human-readable usage line for one blocking run. */
-export function formatRunUsage(usage: UsageStats): string {
+/**
+ * Human-readable usage line for one run (registry rows and tool-result
+ * renderers share it). Turns pluralize properly; context tokens and the model
+ * are opt-in display fields the tool-result renderer asks for.
+ */
+export function formatUsageLine(
+  usage: UsageStats,
+  opts: { model?: string; showContext?: boolean } = {},
+): string {
   const parts: string[] = [];
-  if (usage.turns) parts.push(`${usage.turns} turns`);
+  if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
   if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
   if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
   if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
   if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
   if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+  if (opts.showContext && usage.contextTokens && usage.contextTokens > 0) {
+    parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
+  }
+  if (opts.model) parts.push(opts.model);
   return parts.join(" ");
 }
 
@@ -1316,7 +1327,7 @@ function formatRunRow(run: RunEntry, now: number): string[] {
     lines.push(`  last: ${oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine}`);
   }
   if (run.usage) {
-    const u = formatRunUsage(run.usage);
+    const u = formatUsageLine(run.usage);
     if (u) lines.push(`  usage: ${u}`);
   }
   if (run.findingsPath) lines.push(`  findings: ${run.findingsPath}`);
@@ -1396,9 +1407,10 @@ export function readLogTail(logPath: string, maxBytes = 4096, fsImpl: LogTailFs 
 }
 
 /**
- * Maps a blocking single-result to its run status. Mirrors isFailedResult
- * semantics (nonzero exit / error stop reason) plus the abort flag the
- * runner sets when the user cancels.
+ * The registry-status axis: where a blocking single-result lands in the run
+ * registry. Abort stays a distinct status (aborted) — the error axis
+ * (isToolError) separately decides whether it is a tool error for the throw
+ * path.
  */
 export function blockingRunStatus(result: {
   exitCode: number;
@@ -1409,6 +1421,73 @@ export function blockingRunStatus(result: {
   if (result.stopReason === "aborted") return "aborted";
   if (result.exitCode !== 0 || result.stopReason === "error") return "failed";
   return "succeeded";
+}
+
+/**
+ * The tool-error axis: whether a blocking result counts as a failure for the
+ * throw path (single/chain) and for failure display. Abort is an error here
+ * even though it is its own registry status (ADR 0010: blocking aborts throw).
+ */
+export function isToolError(result: { exitCode: number; stopReason?: string }): boolean {
+  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+// ---------------------------------------------------------------------------
+// Result output extraction
+//   One structural message shape shared by the blocking protocol and the
+//   research child session (the two pi message types are structurally
+//   identical over the parts we read), so both channels agree on what "the
+//   final output" is.
+// ---------------------------------------------------------------------------
+
+export interface AssistantMessageLike {
+  role?: string;
+  content?: unknown;
+}
+
+/** All text parts of one assistant message, joined (the research tee input). */
+export function assistantTextOfMessage(msg: AssistantMessageLike): string {
+  if (msg.role !== "assistant") return "";
+  const content = Array.isArray(msg.content) ? (msg.content as Array<{ type?: string; text?: string }>) : [];
+  return content
+    .filter((p) => p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text as string)
+    .join("");
+}
+
+/** The first text part of the newest assistant message (the blocking result output). */
+export function lastAssistantText(messages: readonly AssistantMessageLike[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const content = Array.isArray(msg.content) ? (msg.content as Array<{ type?: string; text?: string }>) : [];
+    const parts = content.filter((p) => p.type === "text" && typeof p.text === "string");
+    if (parts.length > 0) return parts[0].text as string;
+  }
+  return "";
+}
+
+/** The last non-empty trimmed line of a text block (a run's live progress line). */
+export function lastOutputLine(text: string): string | undefined {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] : undefined;
+}
+
+/** The text a consumer sees for one blocking result (error surfaces the failure detail). */
+export function getResultOutput(result: {
+  exitCode: number;
+  stopReason?: string;
+  errorMessage?: string;
+  stderr: string;
+  messages: readonly AssistantMessageLike[];
+}): string {
+  if (isToolError(result)) {
+    return result.errorMessage || result.stderr || lastAssistantText(result.messages) || "(no output)";
+  }
+  return lastAssistantText(result.messages) || "(no output)";
 }
 
 /**

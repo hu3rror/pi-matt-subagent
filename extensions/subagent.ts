@@ -23,7 +23,6 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -47,7 +46,6 @@ import {
   discoverAgents,
   emptyUsage,
   formatRunSnapshot,
-  formatTokens,
   getPiInvocation,
   isActiveRunStatus,
   isTerminalRunStatus,
@@ -88,9 +86,14 @@ import {
 } from "../src/blocking-protocol.ts";
 
 import {
+  assistantTextOfMessage,
+  formatUsageLine,
   getResultOutput,
-  isFailedResult,
-  lastLine,
+  isToolError,
+  lastOutputLine,
+} from "../src/lib.ts";
+
+import {
   runBlockingPlan,
   type BlockingPlan,
   type RunnerSeam,
@@ -116,15 +119,6 @@ interface Disposable {
 
 /** Every live in-process research session; disposed on session_shutdown. */
 const researchChildren = new Set<Disposable>();
-
-/** Extracts the assistant text parts of a message_end event (the tee input). */
-function assistantTextOf(msg: AgentMessage): string {
-  if (msg.role !== "assistant") return "";
-  return (msg.content as Array<{ type: string; text?: string }>)
-    .filter((p) => p.type === "text" && p.text)
-    .map((p) => p.text as string)
-    .join("");
-}
 
 /**
  * The real child-session factory (ADR 0013): creates the in-process research
@@ -211,7 +205,7 @@ export function createResearchChildSession(opts: {
       researchChildren.add(session);
       const unsubscribe = session.subscribe((event) => {
         if (event.type === "message_end" && event.message) {
-          const text = assistantTextOf(event.message);
+          const text = assistantTextOfMessage(event.message);
           if (text) pushChunk(`${text}\n`);
         } else if (event.type === "tool_execution_start") {
           // ToolCall audit seam: every executed tool call is dispatched through
@@ -251,7 +245,9 @@ export function createResearchChildSession(opts: {
   };
 }
 
-/** The `customType` of the push card that renders research terminal states. */
+/**
+ * The customType of the push card that renders research terminal states.
+ */
 export const RESEARCH_STATUS_CUSTOM_TYPE = "research-status";
 
 // Status → theme color for the push card, keyed on the frozen terminal
@@ -270,30 +266,6 @@ const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown"
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
-
-function formatUsageStats(
-  usage: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    cost: number;
-    contextTokens?: number;
-    turns?: number;
-  },
-  model?: string,
-): string {
-  const parts: string[] = [];
-  if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-  if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-  if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-  if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-  if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-  if (usage.contextTokens && usage.contextTokens > 0) parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
-  if (model) parts.push(model);
-  return parts.join(" ");
-}
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
@@ -621,7 +593,7 @@ export default function (pi: ExtensionAPI) {
   const showSnapshot = (ctx: SubagentsUi) => {
     const runs = subagentRuns.snapshot().map((r) => {
       if (r.channel === "background" && !r.lastOutput && r.logPath) {
-        const tail = lastLine(readLogTail(r.logPath));
+        const tail = lastOutputLine(readLogTail(r.logPath));
         return tail ? { ...r, lastOutput: tail } : r;
       }
       return r;
@@ -859,7 +831,7 @@ export default function (pi: ExtensionAPI) {
 
       const lines: string[] = [];
       for (const r of details.results) {
-        const icon = r.running ? "⏳" : isFailedResult(r) ? "✗" : "✓";
+        const icon = r.running ? "⏳" : isToolError(r) ? "✗" : "✓";
         lines.push(`${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`);
         const out = getResultOutput(r);
         if (r.running) {
@@ -867,7 +839,7 @@ export default function (pi: ExtensionAPI) {
         } else if (out && out !== "(no output)") {
           lines.push(out.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n"));
         }
-        const u = formatUsageStats(r.usage, r.model);
+        const u = formatUsageLine(r.usage, { model: r.model, showContext: true });
         if (u) lines.push(`  ${theme.fg("dim", u)}`);
       }
 

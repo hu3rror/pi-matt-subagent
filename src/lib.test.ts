@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   appendResearchTerminatedMarker,
+  assistantTextOfMessage,
   blockingRunStatus,
   buildDispatchArgs,
   buildResearchPrompt,
@@ -17,7 +18,12 @@ import {
   estimateToolSurfaceTokens,
   formatBlockingToolError,
   formatRunSnapshot,
+  formatUsageLine,
   getPiInvocation,
+  getResultOutput,
+  isToolError,
+  lastAssistantText,
+  lastOutputLine,
   mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
@@ -1240,9 +1246,9 @@ test("readLogTail honors an injected fs surface", () => {
   assert.deepEqual(calls, ["stat", "open", "read", "close"], "fs calls go through the injected surface");
 });
 
-// S19 — outcome mapping (D3). blockingRunStatus mirrors isFailedResult
-// semantics + the abort flag. The background status resolution moved into the
-// runner itself (ADR 0013): onExit delivers the resolved terminal status.
+// S19 — outcome mapping (D3). Two explicit axes: the registry-status axis
+// (blockingRunStatus keeps abort distinct) and the tool-error axis
+// (isToolError folds abort in for the throw path, per ADR 0010).
 test("blockingRunStatus maps a single result to a run status", () => {
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "end" }), "succeeded");
   assert.equal(blockingRunStatus({ exitCode: 0 }), "succeeded");
@@ -1250,6 +1256,16 @@ test("blockingRunStatus maps a single result to a run status", () => {
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "error" }), "failed");
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "aborted" }), "aborted");
   assert.equal(blockingRunStatus({ exitCode: 1, aborted: true }), "aborted", "abort wins over exit code");
+});
+
+test("isToolError treats abort as an error while blockingRunStatus keeps it distinct", () => {
+  assert.equal(isToolError({ exitCode: 1 }), true);
+  assert.equal(isToolError({ exitCode: 0, stopReason: "error" }), true);
+  assert.equal(isToolError({ exitCode: 0, stopReason: "aborted" }), true, "abort throws as a tool error");
+  assert.equal(isToolError({ exitCode: 0, stopReason: "end" }), false);
+  assert.equal(isToolError({ exitCode: 0 }), false);
+  // the two axes disagree on abort by design: aborted in the registry, error in the throw path
+  assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "aborted" }), "aborted");
 });
 
 test("formatBlockingToolError formats a failed single run as the tool error", () => {
@@ -1266,6 +1282,55 @@ test("formatBlockingToolError formats a failed chain step as the tool error", ()
     formatBlockingToolError("chain", { agent: "researcher", step: 2, output: "boom" }),
     "Chain stopped at step 2 (researcher): boom",
   );
+});
+
+// S20 — result output extraction and usage display (semantics cluster).
+
+test("assistantTextOfMessage joins all text parts of one assistant message, empty for others", () => {
+  assert.equal(assistantTextOfMessage({ role: "assistant", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }), "ab");
+  assert.equal(assistantTextOfMessage({ role: "user", content: [{ type: "text", text: "x" }] }), "");
+  assert.equal(assistantTextOfMessage({ role: "assistant", content: [{ type: "image", image: "img" }] }), "");
+  assert.equal(assistantTextOfMessage({ role: "assistant", content: "string-content" }), "", "non-array content is tolerated");
+});
+
+test("lastAssistantText returns the first text part of the newest assistant message", () => {
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    { role: "assistant", content: [{ type: "text", text: "first" }, { type: "text", text: " part" }] },
+    { role: "toolResult", content: [{ type: "text", text: "42" }] },
+    { role: "assistant", content: [{ type: "text", text: "final" }] },
+  ];
+  assert.equal(lastAssistantText(messages), "final");
+  assert.equal(lastAssistantText([{ role: "user", content: [{ type: "text", text: "q" }] }]), "");
+});
+
+test("lastOutputLine returns the last non-empty trimmed line", () => {
+  assert.equal(lastOutputLine("line1\n  line2 \n\n"), "line2");
+  assert.equal(lastOutputLine("   \n"), undefined);
+  assert.equal(lastOutputLine("only"), "only");
+});
+
+test("getResultOutput surfaces failure detail on error and final output otherwise", () => {
+  const ok = { exitCode: 0, stderr: "", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }] };
+  assert.equal(getResultOutput(ok), "done");
+  const err = { exitCode: 1, stopReason: "error", errorMessage: "model boom", stderr: "stderr", messages: [] };
+  assert.equal(getResultOutput(err), "model boom", "errorMessage wins over stderr");
+  const errNoMsg = { exitCode: 1, stderr: "stderr", messages: [] };
+  assert.equal(getResultOutput(errNoMsg), "stderr");
+  assert.equal(getResultOutput({ exitCode: 1, stderr: "", messages: [] }), "(no output)");
+});
+
+test("formatUsageLine pluralizes turns and adds context/model only on request", () => {
+  const usage = { input: 1200, output: 800, cacheRead: 0, cacheWrite: 0, cost: 0.0012, contextTokens: 2000, turns: 3 };
+  assert.equal(formatUsageLine(usage), "3 turns ↑1.2k ↓800 $0.0012");
+  const single = { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
+  assert.equal(formatUsageLine(single), "1 turn ↑10", "singular turn without ctx or model");
+  assert.equal(
+    formatUsageLine(usage, { model: "prov/m", showContext: true }),
+    "3 turns ↑1.2k ↓800 $0.0012 ctx:2.0k prov/m",
+  );
+  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+  assert.equal(formatUsageLine(zero), "", "an all-zero usage line is empty");
 });
 
 // S20 — run management (D6): prune/remove, args. Kill moved from pid/OS-signal
