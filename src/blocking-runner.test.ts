@@ -347,6 +347,47 @@ test("parallel mode honors the concurrency limit", async () => {
 // Registry change hook (footer convergence by construction)
 // ---------------------------------------------------------------------------
 
+test("a late progress event after an abort sweep is dropped, not a frozen-update throw (race contained at the blocking boundary)", async () => {
+  const registry = createRunRegistry();
+  let first = true;
+  let progressThrow: string | null = null;
+  const runner: RunnerSeam = {
+    async runTask(t, opts) {
+      if (first) {
+        first = false;
+        throw new Error("Subagent was aborted");
+      }
+      // The real runner emits progress from a child-process stdout data
+      // handler, where a throw would escape into the event loop. The abort
+      // sweep terminalizes this run's entry before this late event arrives.
+      await new Promise((r) => setTimeout(r, 10));
+      try {
+        opts.onProgress(okResult("b", "late progress"));
+      } catch (err) {
+        progressThrow = (err as Error).message;
+      }
+      return okResult("b", "late");
+    },
+  };
+  await assert.rejects(
+    runBlockingPlan({
+      plan: { mode: "parallel", tasks: [{ agent: "a", task: "1" }, { agent: "b", task: "2" }] },
+      runner,
+      registry,
+      agents: noAgents,
+    }),
+    /Subagent was aborted/,
+  );
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(
+    progressThrow,
+    null,
+    "a progress event for an already-aborted run must not raise a frozen-update error",
+  );
+  const runs = registry.snapshot();
+  assert.ok(runs.every((r) => r.status === "aborted"), "the sweep's aborted status wins over a late progress event");
+});
+
 test("registry onChange fires after each successful mutation and not on a frozen update", () => {
   let count = 0;
   const reg = createRunRegistry(Date.now, () => count++);

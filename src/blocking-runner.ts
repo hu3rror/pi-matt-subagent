@@ -143,9 +143,12 @@ export async function runBlockingPlan(opts: {
    * One delegated execution's registry flow, shared by single / chain steps /
    * parallel tasks: register (or flip a pre-registered queued run to running),
    * run through the runner seam, patch the terminal state, and mark aborted on
-   * a runner throw. The abort mark is guarded by an active-status check so a
-   * parallel abort sweep that already terminalized the run cannot produce a
-   * frozen-update throw inside a settled promise.
+   * a runner throw. Both the live-progress update and the terminal patch are
+   * guarded by an active-status check so a parallel abort sweep that already
+   * terminalized the run cannot produce a frozen-update throw — the progress
+   * one inside the runner's stdout data handler (where a throw would escape
+   * into the event loop), the patch one inside a settled promise. The abort
+   * mark is guarded the same way for the same reason.
    */
   const runStep = async (
     task: RunnerTask,
@@ -161,7 +164,17 @@ export async function runBlockingPlan(opts: {
         signal,
         onProgress: (partial) => {
           const out = lastAssistantText(partial.messages);
-          if (out) registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
+          if (out) {
+            // The abort sweep may have terminalized this run while the worker
+            // was still streaming progress; drop the update like the terminal
+            // patch does rather than raise a frozen-update throw out of the
+            // runner's data handler (story 9: tolerated race contained here,
+            // at the channel boundary — no tolerant-update API).
+            const current = registry.get(runId);
+            if (current && isActiveRunStatus(current.status)) {
+              registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
+            }
+          }
           opts.onPartial?.(partial);
         },
       });
