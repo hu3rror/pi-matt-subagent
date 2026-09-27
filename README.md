@@ -146,6 +146,8 @@ pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/blocking
 
 Each appends its gates to `push-e2e.log` / `blocking-e2e.log` in the OS temp dir; look for `PUSH-E2E OK` / `BLOCKING-E2E OK` per gate. Not part of `npm test` (Path-1 stance: the pure seams are covered by `node --test`; real-pi wiring regressions are caught by these scripts instead of a fake-pi harness).
 
+`blocking-e2e.ts` is the blocking channel's counterpart to `push-e2e.ts`: the unit tests pin the pure semantics (protocol accumulation rules, SIGTERM→SIGKILL backstop timing) with fake runners and fake timers, while this script pins the real-process wiring those tests cannot reach — the exact spawn seams `runSingleAgent` uses. Gate 1 spawns a real pi child and drives the full `getPiInvocation → spawn → accumulator → result` path, asserting exitCode 0, parsed messages, and usage > 0. Gate 2 SIGTERMs a long-running child mid-flight via `escalateKill` (the Esc-abort path minus the TUI) and asserts it closes within the grace window — i.e. by SIGTERM, not the SIGKILL backstop — then verifies close→dispose cancels the backstop. Windows caveat: a process cannot trap SIGTERM (TerminateProcess), so on Windows gate 2 proves the dispose-on-close path with real signals and timers; the "backstop fires on a SIGTERM-ignoring process" semantics is pinned by the fake-timer unit tests instead.
+
 ### Re-applying the skill patches after an upstream sync
 
 The installed skills track mattpocock upstream, and a sync overwrites the ADR 0013 patch texts in `research/SKILL.md` and `wayfinder/SKILL.md` (the texts live in `docs/design/research-redesign/`). After each sync run:

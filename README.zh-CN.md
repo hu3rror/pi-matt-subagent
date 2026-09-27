@@ -144,6 +144,8 @@ pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/blocking
 
 各脚本把 gate 结果追加到系统临时目录的 `push-e2e.log` / `blocking-e2e.log`；每个 gate 看 `PUSH-E2E OK` / `BLOCKING-E2E OK`。不进 `npm test`（Path-1 立场：纯接缝由 `node --test` 覆盖；真实 pi 接线回归由这些脚本捕获，不用 fake-pi harness）。
 
+`blocking-e2e.ts` 是 `push-e2e.ts` 在 blocking 通道的对应物：单元测试用假 runner 和假计时器钉住纯语义（协议累积规则、SIGTERM→SIGKILL 兜底时序），本脚本钉住这些测试够不到的真实进程接线——`runSingleAgent` 用到的那些 spawn 接缝。Gate 1 拉起真实 pi 子进程，走完整条 `getPiInvocation → spawn → accumulator → result` 路径，断言 exitCode 0、消息解析、usage > 0。Gate 2 用 `escalateKill` 对运行中的长任务子进程发 SIGTERM（Esc 中止路径去掉 TUI），断言其在宽限窗口内关闭——即死于 SIGTERM 而非 SIGKILL 兜底——再验证 close→dispose 取消兜底。Windows 限制：进程无法捕获 SIGTERM（TerminateProcess），故 Windows 上 gate 2 只证明真实信号/计时器下的 dispose-on-close 路径；「兜底对无视 SIGTERM 的进程触发」的语义由假计时器单元测试钉住。
+
 ### 上游同步后重打 skill 补丁
 
 已安装的 skills 跟随 mattpocock 上游，一次 sync 会覆盖 `research/SKILL.md` 和 `wayfinder/SKILL.md` 里的 ADR 0013 补丁文本（补丁文本保存在 `docs/design/research-redesign/`）。每次 sync 后运行：
