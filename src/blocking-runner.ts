@@ -139,32 +139,49 @@ export async function runBlockingPlan(opts: {
   const sourceOf = (name: string): AgentSource => resolveRole(agents, name)?.source ?? "unknown";
   const makeDetails = (results: SingleResult[]): SubagentDetails => ({ mode: plan.mode, results });
 
-  if (plan.mode === "single") {
-    const runId = registry.register({
-      role: plan.agent,
-      source: sourceOf(plan.agent),
-      channel: "blocking",
-      status: "running",
-      startedAt: now(),
-    });
-    let result: SingleResult;
+  /**
+   * One delegated execution's registry flow, shared by single / chain steps /
+   * parallel tasks: register (or flip a pre-registered queued run to running),
+   * run through the runner seam, patch the terminal state, and mark aborted on
+   * a runner throw. The abort mark is guarded by an active-status check so a
+   * parallel abort sweep that already terminalized the run cannot produce a
+   * frozen-update throw inside a settled promise.
+   */
+  const runStep = async (
+    task: RunnerTask,
+    role: string,
+    opts: { preRegisteredId?: string; onPartial?: (partial: SingleResult) => void } = {},
+  ): Promise<SingleResult> => {
+    const runId =
+      opts.preRegisteredId ??
+      registry.register({ role, source: sourceOf(role), channel: "blocking", status: "running", startedAt: now() });
+    if (opts.preRegisteredId) registry.update(runId, { status: "running" });
     try {
-      result = await runner.runTask({ agentName: plan.agent, task: plan.task, cwd: plan.cwd }, {
+      const result = await runner.runTask(task, {
         signal,
         onProgress: (partial) => {
           const out = lastAssistantText(partial.messages);
           if (out) registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
-          opts.onToolUpdate?.(out || "(running...)", makeDetails([partial]));
+          opts.onPartial?.(partial);
         },
       });
+      registry.update(runId, {
+        status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
+        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
+        usage: result.usage,
+      });
+      return result;
     } catch (err) {
-      registry.update(runId, { status: "aborted" });
+      const r = registry.get(runId);
+      if (r && isActiveRunStatus(r.status)) registry.update(runId, { status: "aborted" });
       throw err;
     }
-    registry.update(runId, {
-      status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-      lastOutput: lastOutputLine(lastAssistantText(result.messages)),
-      usage: result.usage,
+  };
+
+  if (plan.mode === "single") {
+    const result = await runStep({ agentName: plan.agent, task: plan.task, cwd: plan.cwd }, plan.agent, {
+      onPartial: (partial) =>
+        opts.onToolUpdate?.(lastAssistantText(partial.messages) || "(running...)", makeDetails([partial])),
     });
     if (isToolError(result)) {
       throw new Error(
@@ -180,33 +197,15 @@ export async function runBlockingPlan(opts: {
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
-      const runId = registry.register({
-        role: step.agent,
-        source: sourceOf(step.agent),
-        channel: "blocking",
-        status: "running",
-        startedAt: now(),
-      });
-      let result: SingleResult;
-      try {
-        result = await runner.runTask({ agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 }, {
-          signal,
-          onProgress: (partial) => {
-            const out = lastAssistantText(partial.messages);
-            if (out) registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
-            opts.onToolUpdate?.(out || "(running...)", makeDetails([...results, partial]));
-          },
-        });
-      } catch (err) {
-        registry.update(runId, { status: "aborted" });
-        throw err;
-      }
+      const result = await runStep(
+        { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
+        step.agent,
+        {
+          onPartial: (partial) =>
+            opts.onToolUpdate?.(lastAssistantText(partial.messages) || "(running...)", makeDetails([...results, partial])),
+        },
+      );
       results.push(result);
-      registry.update(runId, {
-        status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
-        usage: result.usage,
-      });
       if (isToolError(result)) {
         throw new Error(
           formatBlockingToolError("chain", { agent: step.agent, step: i + 1, output: getResultOutput(result) }),
@@ -257,28 +256,14 @@ export async function runBlockingPlan(opts: {
   let results: SingleResult[];
   try {
     results = await mapWithConcurrencyLimit(plan.tasks, limits.maxConcurrency, async (t, index) => {
-      registry.update(runIds[index], { status: "running" });
-      let result: SingleResult;
-      try {
-        result = await runner.runTask({ agentName: t.agent, task: t.task, cwd: t.cwd }, {
-          signal,
-          onProgress: (partial) => {
-            allResults[index] = partial;
-            const out = lastAssistantText(partial.messages);
-            if (out) registry.update(runIds[index], { lastOutput: lastOutputLine(out), usage: partial.usage });
-            emitParallelUpdate();
-          },
-        });
-      } catch (err) {
-        registry.update(runIds[index], { status: "aborted" });
-        throw err;
-      }
-      allResults[index] = result;
-      registry.update(runIds[index], {
-        status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-        lastOutput: lastOutputLine(lastAssistantText(result.messages)),
-        usage: result.usage,
+      const result = await runStep({ agentName: t.agent, task: t.task, cwd: t.cwd }, t.agent, {
+        preRegisteredId: runIds[index],
+        onPartial: (partial) => {
+          allResults[index] = partial;
+          emitParallelUpdate();
+        },
       });
+      allResults[index] = result;
       emitParallelUpdate();
       return result;
     });

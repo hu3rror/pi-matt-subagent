@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Message } from "@earendil-works/pi-ai";
 import { createRunRegistry, isActiveRunStatus, type AgentConfig } from "./lib.ts";
-import { runBlockingPlan, type RunnerSeam, type SingleResult } from "./blocking-runner.ts";
+import { runBlockingPlan, truncateParallelOutput, type RunnerSeam, type SingleResult } from "./blocking-runner.ts";
 
 const noAgents: AgentConfig[] = [];
 
@@ -339,4 +339,27 @@ test("an active-count subscriber converges to zero without callers remembering t
   const runner: RunnerSeam = { async runTask() { return okResult("a", "x"); } };
   await runBlockingPlan({ plan: { mode: "single", agent: "a", task: "t" }, runner, registry, agents: noAgents });
   assert.equal(activeCounts.at(-1), 0, "the subscriber sees the run finish without any explicit sync call");
+});
+
+// ---------------------------------------------------------------------------
+// Parallel summary truncation
+// ---------------------------------------------------------------------------
+
+test("truncateParallelOutput byte-caps a task's summary output and notes the omission", () => {
+  const out = truncateParallelOutput("x".repeat(10_000), 100);
+  const [head, note] = out.split("\n\n");
+  assert.equal(head, "x".repeat(100));
+  assert.equal(Buffer.byteLength(head, "utf8"), 100);
+  assert.match(note, /^\[Output truncated: \d+ bytes omitted\. Full output preserved in tool details\.\]$/);
+});
+
+test("truncateParallelOutput drops the tail of a partial multibyte char", () => {
+  const out = truncateParallelOutput("汉".repeat(5000), 100);
+  const head = out.split("\n\n")[0];
+  assert.ok(Buffer.byteLength(head, "utf8") <= 100, "never exceeds the byte cap");
+  assert.equal(head.length * 3, Buffer.byteLength(head, "utf8"), "no broken UTF-8: whole chars only");
+});
+
+test("truncateParallelOutput returns output unchanged under the cap", () => {
+  assert.equal(truncateParallelOutput("short", 100), "short");
 });
