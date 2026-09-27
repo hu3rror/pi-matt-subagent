@@ -45,6 +45,10 @@ _Avoid_: brainstorming, options
 预编码一次编排（single/parallel/chain）的 prompt 模板。
 _Avoid_: command, recipe
 
+**chain step（链式步骤）**:
+一次 chain 执行中的单步委托执行。chain 的每一步在 run registry 中登记为一条独立的 blocking run（与 single「一次调用一条 run」同通道、不同粒度），失败时该步由 tool error 逐字节标识（ADR 0010 的 chain 形态）。
+_Avoid_: step, 链上任务
+
 **tool-name resolution**:
 把 role 声明的工具名归一化到子代理进程实际可用的名字：环境没有的名字回退到内置替代名（如 `ffgrep`→`grep`），替代名也不存在则从派发清单剔除。方向恒为「增强名→内置名」，绝不反向（内置名在任何环境下都可用）。
 _Avoid_: tool fallback, alias mapping, tool renaming
