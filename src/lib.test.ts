@@ -1653,9 +1653,21 @@ test("buildDispatchArgs resolves tool names through resolveTools before assembly
     availableToolNames: new Set(["grep", "bash"]),
     task: "T",
   });
-  assert.ok(args.includes("grep"), "ffgrep degrades to grep in the allowlist");
-  assert.ok(!args.includes("ffgrep"));
-  assert.ok(!args.includes("powershell"), "not on win32 here; bash stays bash");
+  // buildDispatchArgs comma-joins the resolved names into one --tools argv
+  // element, so assert on its members, not on argv element equality (a bare
+  // args.includes("grep") only passed on win32 by accident, where bash drops
+  // out and the element happens to be "grep" alone).
+  const toolsEntry = args[args.indexOf("--tools") + 1] ?? "";
+  const tools = toolsEntry.split(",").filter(Boolean);
+  assert.ok(tools.includes("grep"), "ffgrep degrades to grep in the allowlist");
+  assert.ok(!tools.includes("ffgrep"));
+  // bash maps to powershell on win32 and is dropped when powershell is missing
+  // from the allowlist; on other platforms it stays bash.
+  if (process.platform === "win32") {
+    assert.ok(!tools.includes("bash"));
+  } else {
+    assert.ok(tools.includes("bash"), "not on win32 here; bash stays bash");
+  }
 });
 
 test("buildDispatchArgs drops a task with no tools flag when the allowlist has none", () => {
