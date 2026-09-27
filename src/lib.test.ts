@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   appendResearchTerminatedMarker,
   blockingRunStatus,
+  buildDispatchArgs,
   buildResearchPrompt,
   buildSubagentEnv,
   createRunRegistry,
@@ -15,6 +17,7 @@ import {
   estimateToolSurfaceTokens,
   formatBlockingToolError,
   formatRunSnapshot,
+  getPiInvocation,
   mergeToolParams,
   parseSubagentsArgs,
   readLogTail,
@@ -1543,4 +1546,93 @@ test("buildSubagentEnv never mutates the caller's base", () => {
   buildSubagentEnv(base, "sess");
   buildSubagentEnv(base);
   assert.deepEqual(base, snapshot, "the caller's object is untouched");
+});
+
+// ---------------------------------------------------------------------------
+// Blocking invocation helpers (buildDispatchArgs / getPiInvocation)
+// ---------------------------------------------------------------------------
+
+test("buildDispatchArgs puts fixed flags first, then optional flags, then the task", () => {
+  const args = buildDispatchArgs({
+    model: "prov/m",
+    thinking: "high",
+    tools: ["read", "grep"],
+    promptPath: "/tmp/prompt.md",
+    task: "Do the thing",
+  });
+  assert.deepEqual(args, [
+    "--mode",
+    "json",
+    "-p",
+    "--no-session",
+    "--model",
+    "prov/m",
+    "--thinking",
+    "high",
+    "--tools",
+    "read,grep",
+    "--append-system-prompt",
+    "/tmp/prompt.md",
+    "Task: Do the thing",
+  ]);
+});
+
+test("buildDispatchArgs omits optional flags when absent", () => {
+  const args = buildDispatchArgs({ task: "T" });
+  assert.deepEqual(args, ["--mode", "json", "-p", "--no-session", "Task: T"]);
+});
+
+test("buildDispatchArgs resolves tool names through resolveTools before assembly", () => {
+  const args = buildDispatchArgs({
+    tools: ["ffgrep", "bash"],
+    availableToolNames: new Set(["grep", "bash"]),
+    task: "T",
+  });
+  assert.ok(args.includes("grep"), "ffgrep degrades to grep in the allowlist");
+  assert.ok(!args.includes("ffgrep"));
+  assert.ok(!args.includes("powershell"), "not on win32 here; bash stays bash");
+});
+
+test("buildDispatchArgs drops a task with no tools flag when the allowlist has none", () => {
+  const args = buildDispatchArgs({
+    tools: ["ffgrep"],
+    availableToolNames: new Set(["read"]),
+    task: "T",
+  });
+  assert.ok(!args.includes("--tools"), "an empty resolved list omits the --tools flag");
+});
+
+test("getPiInvocation reuses the current script when it exists on disk", () => {
+  const saved = process.argv[1];
+  try {
+    // The test file itself exists, so the current-script branch is reachable.
+    process.argv[1] = fileURLToPath(import.meta.url);
+    const { command, args } = getPiInvocation(["-p", "task"]);
+    assert.equal(command, process.execPath);
+    assert.deepEqual(args, [fileURLToPath(import.meta.url), "-p", "task"]);
+  } finally {
+    process.argv[1] = saved;
+  }
+});
+
+test("getPiInvocation falls back to pi on PATH for a bun-virtual script under a generic runtime", () => {
+  const saved = process.argv[1];
+  try {
+    process.argv[1] = "/$bunfs/root/node_modules/pi/entry.js";
+    const { command } = getPiInvocation([]);
+    assert.equal(command, "pi");
+  } finally {
+    process.argv[1] = saved;
+  }
+});
+
+test("getPiInvocation falls back to pi on PATH when no current script exists", () => {
+  const saved = process.argv[1];
+  try {
+    process.argv[1] = "/definitely/not/a/real/script.ts";
+    const { command } = getPiInvocation([]);
+    assert.equal(command, "pi");
+  } finally {
+    process.argv[1] = saved;
+  }
 });

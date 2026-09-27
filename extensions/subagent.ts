@@ -83,6 +83,12 @@ import {
   type UsageStats,
 } from "../src/lib.ts";
 
+import {
+  createResultAccumulator,
+  escalateKill,
+  type SingleResult,
+} from "../src/blocking-protocol.ts";
+
 const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
 
 const MAX_TASKS_PER_CALL = 8;
@@ -424,21 +430,6 @@ async function confirmProjectAgents(
 // Result types
 // ---------------------------------------------------------------------------
 
-interface SingleResult {
-  agent: string;
-  agentSource: AgentSource;
-  task: string;
-  exitCode: number;
-  running?: boolean;
-  messages: Message[];
-  stderr: string;
-  usage: UsageStats;
-  model?: string;
-  stopReason?: string;
-  errorMessage?: string;
-  step?: number;
-}
-
 interface SubagentDetails {
   mode: "single" | "parallel" | "chain";
   results: SingleResult[];
@@ -515,27 +506,6 @@ async function runSingleAgent(
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
 
-  const currentResult: SingleResult = {
-    agent: agentName,
-    agentSource: agent.source,
-    task,
-    exitCode: 0,
-    messages: [],
-    stderr: "",
-    usage: emptyUsage(),
-    model,
-    step,
-  };
-
-  const emitUpdate = () => {
-    if (onUpdate) {
-      onUpdate({
-        content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-        details: makeDetails([currentResult]),
-      });
-    }
-  };
-
   try {
     if (agent.systemPrompt.trim()) {
       const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
@@ -551,8 +521,27 @@ async function runSingleAgent(
       task,
     });
     let wasAborted = false;
+    let accumulated: SingleResult | undefined;
 
+    // The protocol accumulator (src/blocking-protocol.ts) owns the child's
+    // JSON-lines protocol and usage accounting; this adapter owns only the
+    // process lifecycle: spawn, stdio wiring, abort escalation, exitCode patch.
     const exitCode = await new Promise<number>((resolve) => {
+      const acc = createResultAccumulator({
+        agent: agentName,
+        agentSource: agent.source,
+        task,
+        step,
+        model,
+        onProgress: (partial) => {
+          if (onUpdate) {
+            onUpdate({
+              content: [{ type: "text", text: getFinalOutput(partial.messages) || "(running...)" }],
+              details: makeDetails([partial]),
+            });
+          }
+        },
+      });
       const invocation = getPiInvocation(args);
       const proc = spawn(invocation.command, invocation.args, {
         cwd: cwd ?? defaultCwd,
@@ -562,77 +551,34 @@ async function runSingleAgent(
         // parent (buildSubagentEnv, lib.ts). Pure announcement.
         env: buildSubagentEnv(process.env, dispatchDefaults.parentSessionId),
       });
-      let buffer = "";
 
-      const processLine = (line: string) => {
-        if (!line.trim()) return;
-        let event: any;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          return;
-        }
-
-        if (event.type === "message_end" && event.message) {
-          const msg = event.message as Message;
-          currentResult.messages.push(msg);
-          if (msg.role === "assistant") {
-            currentResult.usage.turns++;
-            const usage = msg.usage;
-            if (usage) {
-              currentResult.usage.input += usage.input || 0;
-              currentResult.usage.output += usage.output || 0;
-              currentResult.usage.cacheRead += usage.cacheRead || 0;
-              currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-              currentResult.usage.cost += usage.cost?.total || 0;
-              currentResult.usage.contextTokens = usage.totalTokens || 0;
-            }
-            if (!currentResult.model && msg.model) currentResult.model = msg.model;
-            if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-            if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-          }
-          emitUpdate();
-        }
-
-        if (event.type === "tool_result_end" && event.message) {
-          currentResult.messages.push(event.message as Message);
-          emitUpdate();
-        }
-      };
-
-      proc.stdout.on("data", (data) => {
-        buffer += data.toString();
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) processLine(line);
-      });
-
-      proc.stderr.on("data", (data) => {
-        currentResult.stderr += data.toString();
-      });
+      proc.stdout.on("data", (data) => acc.onStdout(data.toString()));
+      proc.stderr.on("data", (data) => acc.onStderr(data.toString()));
 
       proc.on("close", (code) => {
-        if (buffer.trim()) processLine(buffer);
+        // The close handler flushes any pending partial line, like the old
+        // inline buffer.
+        accumulated = acc.finish();
         resolve(code ?? 0);
       });
 
       proc.on("error", () => {
+        accumulated = acc.finish();
         resolve(1);
       });
 
       if (signal) {
-        const killProc = () => {
+        const kill = escalateKill(proc);
+        const onAbort = () => {
           wasAborted = true;
-          proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (!proc.killed) proc.kill("SIGKILL");
-          }, 5000);
+          kill();
         };
-        if (signal.aborted) killProc();
-        else signal.addEventListener("abort", killProc, { once: true });
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
       }
     });
 
+    const currentResult = accumulated as SingleResult;
     currentResult.exitCode = exitCode;
     if (wasAborted) throw new Error("Subagent was aborted");
     return currentResult;
