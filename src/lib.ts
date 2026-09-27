@@ -1198,14 +1198,18 @@ export interface RunRegistry {
  * In-process registry of subagent runs. Terminal runs are frozen: any further
  * update throws, and illegal transitions throw without mutating. `snapshot`
  * returns a detached, startedAt-ascending copy for display.
+ * `onChange` fires after every successful mutation (register / update / remove
+ * / clear), so UI subscribers (the footer counter) converge by construction
+ * instead of relying on every caller remembering to sync.
  */
-export function createRunRegistry(now: () => number = Date.now): RunRegistry {
+export function createRunRegistry(now: () => number = Date.now, onChange?: () => void): RunRegistry {
   const runs = new Map<string, RunEntry>();
   let nextId = 1;
 
   const register = (entry: Omit<RunEntry, "id" | "status"> & { status?: RunStatus }): string => {
     const id = `run-${nextId++}`;
     runs.set(id, { ...entry, id, status: entry.status ?? "queued" });
+    onChange?.();
     return id;
   };
 
@@ -1225,6 +1229,7 @@ export function createRunRegistry(now: () => number = Date.now): RunRegistry {
       status: next,
       endedAt: isTerminalRunStatus(next) ? now() : undefined,
     });
+    onChange?.();
   };
 
   const snapshot = (): RunEntry[] =>
@@ -1238,10 +1243,14 @@ export function createRunRegistry(now: () => number = Date.now): RunRegistry {
     get: (id) => runs.get(id),
     remove: (id) => {
       runs.delete(id);
+      onChange?.();
     },
     list: () => Array.from(runs.values()),
     snapshot,
-    clear: () => runs.clear(),
+    clear: () => {
+      runs.clear();
+      onChange?.();
+    },
   };
 }
 

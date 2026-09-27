@@ -23,8 +23,8 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message, Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
   CONFIG_DIR_NAME,
@@ -40,14 +40,12 @@ import {
 import { Box, Text } from "@earendil-works/pi-tui";
 
 import {
-  blockingRunStatus,
   buildDispatchArgs,
   buildSubagentEnv,
   createRunRegistry,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
   emptyUsage,
-  formatBlockingToolError,
   formatRunSnapshot,
   formatTokens,
   getPiInvocation,
@@ -89,11 +87,17 @@ import {
   type SingleResult,
 } from "../src/blocking-protocol.ts";
 
-const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
+import {
+  getResultOutput,
+  isFailedResult,
+  lastLine,
+  runBlockingPlan,
+  type BlockingPlan,
+  type RunnerSeam,
+  type SubagentDetails,
+} from "../src/blocking-runner.ts";
 
-const MAX_TASKS_PER_CALL = 8;
-const MAX_CONCURRENCY = 4;
-const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
 
 // ---------------------------------------------------------------------------
 // In-process research child (ADR 0013)
@@ -291,57 +295,6 @@ function formatUsageStats(
   return parts.join(" ");
 }
 
-function getFinalOutput(messages: Message[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "assistant") {
-      for (const part of msg.content) {
-        if (part.type === "text") return part.text;
-      }
-    }
-  }
-  return "";
-}
-
-function isFailedResult(result: SingleResult): boolean {
-  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-}
-
-function getResultOutput(result: SingleResult): string {
-  if (isFailedResult(result)) {
-    return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-  }
-  return getFinalOutput(result.messages) || "(no output)";
-}
-
-function truncateParallelOutput(output: string): string {
-  const byteLength = Buffer.byteLength(output, "utf8");
-  if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
-  let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
-  while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) truncated = truncated.slice(0, -1);
-  return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
-}
-
-async function mapWithConcurrencyLimit<TIn, TOut>(
-  items: TIn[],
-  concurrency: number,
-  fn: (item: TIn, index: number) => Promise<TOut>,
-): Promise<TOut[]> {
-  if (items.length === 0) return [];
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results: TOut[] = new Array(items.length);
-  let nextIndex = 0;
-  const workers = new Array(limit).fill(null).map(async () => {
-    while (true) {
-      const current = nextIndex++;
-      if (current >= items.length) return;
-      results[current] = await fn(items[current], current);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
   const safeName = agentName.replace(/[^\w.-]+/g, "_");
@@ -354,17 +307,6 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 
 function formatAgentList(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
-}
-
-/**
- * Last non-empty line of a text block (used for a run's live progress line).
- */
-function lastLine(text: string): string | undefined {
-  const lines = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return lines.length > 0 ? lines[lines.length - 1] : undefined;
 }
 
 /**
@@ -430,13 +372,6 @@ async function confirmProjectAgents(
 // Result types
 // ---------------------------------------------------------------------------
 
-interface SubagentDetails {
-  mode: "single" | "parallel" | "chain";
-  results: SingleResult[];
-}
-
-type OnUpdate = (partial: AgentToolResult<SubagentDetails>) => void;
-
 interface DispatchDefaults {
   model?: string;
   thinkingLevel?: string;
@@ -479,8 +414,7 @@ async function runSingleAgent(
   agents: AgentConfig[],
   agentTask: AgentTask,
   signal: AbortSignal | undefined,
-  onUpdate: OnUpdate | undefined,
-  makeDetails: (results: SingleResult[]) => SubagentDetails,
+  onProgress: (partial: SingleResult) => void,
   availableToolNames?: ReadonlySet<string>,
 ): Promise<SingleResult> {
   const { agentName, task, cwd, step } = agentTask;
@@ -533,14 +467,7 @@ async function runSingleAgent(
         task,
         step,
         model,
-        onProgress: (partial) => {
-          if (onUpdate) {
-            onUpdate({
-              content: [{ type: "text", text: getFinalOutput(partial.messages) || "(running...)" }],
-              details: makeDetails([partial]),
-            });
-          }
-        },
+        onProgress,
       });
       const invocation = getPiInvocation(args);
       const proc = spawn(invocation.command, invocation.args, {
@@ -614,7 +541,13 @@ export default function (pi: ExtensionAPI) {
   // D3 — in-session registry of every tracked subagent run (blocking +
   // background). Cleared on session teardown so no stale state survives into
   // a new session.
-  const subagentRuns = createRunRegistry();
+  // Footer sync rides the registry's onChange hook: every mutation re-counts
+  // active runs, so no caller has to remember to refresh the footer (this
+  // replaced the 16 scattered updateSubagentFooter call sites).
+  let footerUi: SubagentsUi | undefined;
+  const subagentRuns = createRunRegistry(Date.now, () => {
+    if (footerUi?.hasUI) updateSubagentFooter(footerUi, subagentRuns);
+  });
   // ADR 0013 — per-run AbortController backing /subagents kill: aborting it
   // aborts the in-process child session; the runner resolves the run `aborted`
   // and pushes the outcome (no OS signals, no pid reuse hazard).
@@ -754,7 +687,6 @@ export default function (pi: ExtensionAPI) {
       subagentRuns.remove(r.id);
       researchAborts.delete(r.id);
     }
-    updateSubagentFooter(ctx, subagentRuns);
     ctx.ui.notify(`Cleared ${terminal.length} finished run(s).`, "info");
   };
 
@@ -794,6 +726,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "List and manage tracked subagent runs: no args opens the menu; snapshot, kill <id>, tail <id>, prune run directly",
     handler: async (args, ctx) => {
+      footerUi = ctx as SubagentsUi;
       const argText = args ?? "";
       if (!argText.trim()) {
         // non-TUI modes have no menu: fall back to the snapshot
@@ -816,6 +749,7 @@ export default function (pi: ExtensionAPI) {
     parameters: SUBAGENT_TOOL_PARAMS,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      footerUi = ctx as SubagentsUi;
       const { input, ...directParams } = params;
       const merged = mergeToolParams<typeof directParams, { model?: string; thinkingOverride?: ThinkingLevel }>({
         direct: directParams,
@@ -841,15 +775,13 @@ export default function (pi: ExtensionAPI) {
       const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
       const mode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
 
-      const makeDetails = (results: SingleResult[]): SubagentDetails => ({ mode, results });
-
       if (modeCount !== 1) {
         const available = formatAgentList(agents);
         return {
           content: [
             { type: "text", text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}` },
           ],
-          details: makeDetails([]),
+          details: { mode, results: [] },
         };
       }
 
@@ -869,262 +801,41 @@ export default function (pi: ExtensionAPI) {
       if (!approved) {
         return {
           content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-          details: makeDetails([]),
+          details: { mode, results: [] },
         };
       }
 
-      if (hasChain && merged.chain) {
-        const results: SingleResult[] = [];
-        let previousOutput = "";
+      const plan: BlockingPlan = hasChain
+        ? { mode: "chain", steps: merged.chain! }
+        : hasTasks
+          ? { mode: "parallel", tasks: merged.tasks! }
+          : { mode: "single", agent: merged.agent!, task: merged.task!, cwd: merged.cwd };
 
-        for (let i = 0; i < merged.chain.length; i++) {
-          const step = merged.chain[i];
-          const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
-          const runId = subagentRuns.register({
-            role: step.agent,
-            source: agents.find((a) => a.name === step.agent)?.source ?? "unknown",
-            channel: "blocking",
-            status: "running",
-            startedAt: Date.now(),
-          });
-          updateSubagentFooter(ctx, subagentRuns);
-
-          const chainUpdate: OnUpdate | undefined = onUpdate
-            ? (partial) => {
-                const current = partial.details?.results[0];
-                if (current) {
-                  const out = getFinalOutput(current.messages);
-                  if (out) subagentRuns.update(runId, { lastOutput: lastLine(out), usage: current.usage });
-                  onUpdate({
-                    content: partial.content,
-                    details: makeDetails([...results, current]),
-                  });
-                }
-              }
-            : undefined;
-
-          let result: SingleResult;
-          try {
-            result = await runSingleAgent(
-              ctx.cwd,
-              dispatchDefaults,
-              agents,
-              { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
-              signal,
-              chainUpdate,
-              makeDetails,
-              availableToolNames,
-            );
-          } catch (err) {
-            subagentRuns.update(runId, { status: "aborted" });
-            updateSubagentFooter(ctx, subagentRuns);
-            throw err;
-          }
-          results.push(result);
-          subagentRuns.update(runId, {
-            status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-            lastOutput: lastLine(getFinalOutput(result.messages)),
-            usage: result.usage,
-          });
-          updateSubagentFooter(ctx, subagentRuns);
-
-          if (isFailedResult(result)) {
-            throw new Error(
-              formatBlockingToolError("chain", { agent: step.agent, step: i + 1, output: getResultOutput(result) }),
-            );
-          }
-          previousOutput = getFinalOutput(result.messages);
-        }
-
-        return {
-          content: [
-            { type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" },
-          ],
-          details: makeDetails(results),
-        };
-      }
-
-      if (hasTasks && merged.tasks) {
-        if (merged.tasks.length > MAX_TASKS_PER_CALL) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Too many parallel tasks (${merged.tasks.length}). Max is ${MAX_TASKS_PER_CALL}.`,
-              },
-            ],
-            details: makeDetails([]),
-          };
-        }
-
-        const allResults: SingleResult[] = new Array(merged.tasks.length);
-        // D3: pre-register every task as queued; each flips to running when
-        // its concurrency slot actually opens (inside the map worker).
-        const runIds: string[] = merged.tasks.map((t) =>
-          subagentRuns.register({
-            role: t.agent,
-            source: agents.find((a) => a.name === t.agent)?.source ?? "unknown",
-            channel: "blocking",
-            status: "queued",
-            startedAt: Date.now(),
-          }),
-        );
-        updateSubagentFooter(ctx, subagentRuns);
-        for (let i = 0; i < merged.tasks.length; i++) {
-          allResults[i] = {
-            agent: merged.tasks[i].agent,
-            agentSource: "unknown",
-            task: merged.tasks[i].task,
-            exitCode: 0,
-            running: true,
-            messages: [],
-            stderr: "",
-            usage: emptyUsage(),
-          };
-        }
-
-        const emitParallelUpdate = () => {
-          if (onUpdate) {
-            const running = allResults.filter((r) => r.running).length;
-            const done = allResults.filter((r) => !r.running).length;
-            onUpdate({
-              content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
-              details: makeDetails([...allResults]),
-            });
-          }
-        };
-
-        let results: SingleResult[];
-        try {
-          results = await mapWithConcurrencyLimit(merged.tasks, MAX_CONCURRENCY, async (t, index) => {
-            subagentRuns.update(runIds[index], { status: "running" });
-            updateSubagentFooter(ctx, subagentRuns);
-            let result: SingleResult;
-            try {
-              result = await runSingleAgent(
-                ctx.cwd,
-                dispatchDefaults,
-                agents,
-                { agentName: t.agent, task: t.task, cwd: t.cwd },
-                signal,
-                (partial) => {
-                  if (partial.details?.results[0]) {
-                    const current = partial.details.results[0];
-                    allResults[index] = current;
-                    const out = getFinalOutput(current.messages);
-                    if (out) subagentRuns.update(runIds[index], { lastOutput: lastLine(out), usage: current.usage });
-                    emitParallelUpdate();
-                  }
-                },
-                makeDetails,
-                availableToolNames,
-              );
-            } catch (err) {
-              subagentRuns.update(runIds[index], { status: "aborted" });
-              updateSubagentFooter(ctx, subagentRuns);
-              throw err;
-            }
-            allResults[index] = result;
-            subagentRuns.update(runIds[index], {
-              status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-              lastOutput: lastLine(getFinalOutput(result.messages)),
-              usage: result.usage,
-            });
-            updateSubagentFooter(ctx, subagentRuns);
-            emitParallelUpdate();
-            return result;
-          });
-        } catch (err) {
-          // An abort surfaces here (user Esc). Leftover workers never started:
-          // their runs sit in queued (active). Mark every still-active run
-          // aborted so the footer stops counting them and /subagents shows the
-          // truth instead of zombie queued entries (spec: queued may be
-          // aborted directly — card cancelled before its slot opens).
-          for (const id of runIds) {
-            const r = subagentRuns.get(id);
-            if (r && isActiveRunStatus(r.status)) {
-              subagentRuns.update(id, { status: "aborted" });
-            }
-          }
-          updateSubagentFooter(ctx, subagentRuns);
-          throw err;
-        }
-
-        const successCount = results.filter((r) => !isFailedResult(r)).length;
-        const summaries = results.map((r) => {
-          const output = truncateParallelOutput(getResultOutput(r));
-          const status = isFailedResult(r)
-            ? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-            : "completed";
-          return `### [${r.agent}] ${status}\n\n${output}`;
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
-            },
-          ],
-          details: makeDetails(results),
-        };
-      }
-
-      if (hasSingle && merged.agent && merged.task) {
-        const runId = subagentRuns.register({
-          role: merged.agent,
-          source: agents.find((a) => a.name === merged.agent)?.source ?? "unknown",
-          channel: "blocking",
-          status: "running",
-          startedAt: Date.now(),
-        });
-        updateSubagentFooter(ctx, subagentRuns);
-        let result: SingleResult;
-        try {
-          result = await runSingleAgent(
+      const runner: RunnerSeam = {
+        runTask(task, opts) {
+          return runSingleAgent(
             ctx.cwd,
             dispatchDefaults,
             agents,
-            { agentName: merged.agent, task: merged.task, cwd: merged.cwd },
+            { agentName: task.agentName, task: task.task, cwd: task.cwd, step: task.step },
             signal,
-            (partial) => {
-              // live progress: keep the registry's last output current
-              const current = partial.details?.results[0];
-              if (current) {
-                const out = getFinalOutput(current.messages);
-                if (out) subagentRuns.update(runId, { lastOutput: lastLine(out), usage: current.usage });
-              }
-              onUpdate?.(partial);
-            },
-            makeDetails,
+            opts.onProgress,
             availableToolNames,
           );
-        } catch (err) {
-          subagentRuns.update(runId, { status: "aborted" });
-          updateSubagentFooter(ctx, subagentRuns);
-          throw err;
-        }
-        subagentRuns.update(runId, {
-          status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
-          lastOutput: lastLine(getFinalOutput(result.messages)),
-          usage: result.usage,
-        });
-        updateSubagentFooter(ctx, subagentRuns);
-        if (isFailedResult(result)) {
-          throw new Error(
-            formatBlockingToolError("single", { stopReason: result.stopReason, output: getResultOutput(result) }),
-          );
-        }
-        return {
-          content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
-          details: makeDetails([result]),
-        };
-      }
-
-      const available = formatAgentList(agents);
-      return {
-        content: [{ type: "text", text: `Invalid parameters. Available agents: ${available}` }],
-        details: makeDetails([]),
+        },
       };
+
+      const { text, details } = await runBlockingPlan({
+        plan,
+        runner,
+        registry: subagentRuns,
+        agents,
+        signal,
+        onToolUpdate: (text, details) => {
+          onUpdate?.({ content: [{ type: "text", text }], details });
+        },
+      });
+      return { content: [{ type: "text", text }], details };
     },
 
     renderCall(args, theme, _context) {
@@ -1175,6 +886,7 @@ export default function (pi: ExtensionAPI) {
     parameters: RESEARCH_TOOL_PARAMS,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      footerUi = ctx as SubagentsUi;
       const { input, ...directParams } = params;
       const merged = mergeToolParams<typeof directParams, { model?: string; maxWallClockMs?: number }>({
         direct: directParams,
@@ -1239,7 +951,6 @@ export default function (pi: ExtensionAPI) {
       // resolves the run `aborted` and the push below delivers the outcome.
       const abortController = new AbortController();
       researchAborts.set(runId, abortController);
-      updateSubagentFooter(ctx, subagentRuns);
 
       let handle: ResearchHandle;
       try {
@@ -1262,7 +973,6 @@ export default function (pi: ExtensionAPI) {
               researchAborts.delete(runId);
               const lastOutput = readLogTail(handle.logPath);
               updateRun(runId, { status: info.status, lastOutput: lastOutput || undefined });
-              updateSubagentFooter(ctx, subagentRuns);
               pi.sendMessage(
                 {
                   customType: RESEARCH_STATUS_CUSTOM_TYPE,
@@ -1290,14 +1000,12 @@ export default function (pi: ExtensionAPI) {
         // signal (ADR 0010).
         researchAborts.delete(runId);
         updateRun(runId, { status: "failed" });
-        updateSubagentFooter(ctx, subagentRuns);
         throw err;
       }
       // logPath is only known after the runner allocates its tmp dir; the run
       // may already be terminal, and a frozen-update error must not surface as
       // a tool error.
       updateRun(runId, { logPath: handle.logPath });
-      updateSubagentFooter(ctx, subagentRuns);
 
       return {
         content: [

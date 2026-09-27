@@ -23,7 +23,7 @@
     "CONTEXT.md"
   ],
   "scripts": {
-    "test": "node --test src/blocking-protocol.test.ts src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts",
+    "test": "node --test src/blocking-protocol.test.ts src/blocking-runner.test.ts src/lib.test.ts src/research-e2e.test.ts src/ext-check.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
