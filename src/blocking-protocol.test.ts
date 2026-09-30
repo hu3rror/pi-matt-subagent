@@ -86,6 +86,25 @@ test("accumulator captures model, stopReason, and errorMessage from assistant me
   assert.equal(r.errorMessage, "boom");
 });
 
+test("accumulator pre-sets the dispatch model and thinking level, and message models cannot override the pin", () => {
+  const acc = createResultAccumulator({
+    agent: "a",
+    agentSource: "embedded",
+    task: "t",
+    model: "sensenova/deepseek-flash",
+    thinkingLevel: "medium",
+  });
+  acc.onStdout(JSON.stringify(assistantEvent("hi", { model: "other/model" })) + "\n");
+  const r = acc.finish();
+  assert.equal(r.model, "sensenova/deepseek-flash", "the dispatch pin wins over the child's reported model");
+  assert.equal(r.thinkingLevel, "medium", "the adapter's resolved thinking level rides the result");
+});
+
+test("accumulator leaves thinkingLevel undefined when the run never pinned a level", () => {
+  const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
+  assert.equal(acc.finish().thinkingLevel, undefined, "undefined is the honest value; the display layer labels it default");
+});
+
 test("accumulator appends tool_result_end messages to the transcript", () => {
   const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
   acc.onStdout(JSON.stringify(assistantEvent("ask")) + "\n");

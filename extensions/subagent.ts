@@ -439,6 +439,7 @@ async function runSingleAgent(
         task,
         step,
         model,
+        thinkingLevel: thinking,
         onProgress,
       });
       const invocation = getPiInvocation(args);
@@ -849,7 +850,7 @@ export default function (pi: ExtensionAPI) {
         } else if (out && out !== "(no output)") {
           lines.push(out.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n"));
         }
-        const u = formatUsageLine(r.usage, { model: r.model, showContext: true });
+        const u = formatUsageLine(r.usage, { model: r.model, thinking: r.thinkingLevel, showContext: true });
         if (u) lines.push(`  ${theme.fg("dim", u)}`);
       }
 

@@ -164,16 +164,20 @@ export async function runBlockingPlan(opts: {
         signal,
         onProgress: (partial) => {
           const out = lastAssistantText(partial.messages);
-          if (out) {
-            // The abort sweep may have terminalized this run while the worker
-            // was still streaming progress; drop the update like the terminal
-            // patch does rather than raise a frozen-update throw out of the
-            // runner's data handler (story 9: tolerated race contained here,
-            // at the channel boundary — no tolerant-update API).
-            const current = registry.get(runId);
-            if (current && isActiveRunStatus(current.status)) {
-              registry.update(runId, { lastOutput: lastOutputLine(out), usage: partial.usage });
-            }
+          // The abort sweep may have terminalized this run while the worker
+          // was still streaming progress; drop the update like the terminal
+          // patch does rather than raise a frozen-update throw out of the
+          // runner's data handler (story 9: tolerated race contained here,
+          // at the channel boundary — no tolerant-update API).
+          const current = registry.get(runId);
+          if (current && isActiveRunStatus(current.status)) {
+            registry.update(runId, {
+              ...(out ? { lastOutput: lastOutputLine(out), usage: partial.usage } : {}),
+              // Model and thinking level are pre-set by the adapter, so they can
+              // land before the first assistant text does (usage cannot).
+              ...(partial.model ? { model: partial.model } : {}),
+              ...(partial.thinkingLevel ? { thinkingLevel: partial.thinkingLevel } : {}),
+            });
           }
           opts.onPartial?.(partial);
         },
@@ -188,6 +192,8 @@ export async function runBlockingPlan(opts: {
           status: blockingRunStatus({ exitCode: result.exitCode, stopReason: result.stopReason }),
           lastOutput: lastOutputLine(lastAssistantText(result.messages)),
           usage: result.usage,
+          model: result.model,
+          thinkingLevel: result.thinkingLevel,
         });
       }
       return result;

@@ -1176,6 +1176,10 @@ export interface RunEntry {
   endedAt?: number;
   lastOutput?: string;
   usage?: UsageStats;
+  /** Dispatched model ref (`provider/id`, or a bare id for a pinned role); display-only. */
+  model?: string;
+  /** Resolved dispatch thinking level; undefined when the run never pinned one (see ADR 0005). */
+  thinkingLevel?: string;
   findingsPath?: string;
   logPath?: string;
 }
@@ -1278,14 +1282,53 @@ function formatStartTime(startedAt: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
+/** Displayed for a run whose thinking level was never pinned (`undefined`). */
+export const THINKING_UNRESOLVED_LABEL = "default";
+
+/**
+ * Splits a dispatched model reference into provider and id. The dispatch
+ * default is `provider/id`; a role-pinned model may be a bare id, in which
+ * case there is no provider to show. A slash with an empty side carries no
+ * provider information, so `/id` and `prov/` degrade to a bare id (stray slash
+ * trimmed) instead of rendering a provider pair around nothing.
+ */
+export function splitModelRef(model: string): { provider?: string; id: string } {
+  const slash = model.indexOf("/");
+  if (slash < 0) return { id: model };
+  const provider = model.slice(0, slash);
+  const id = model.slice(slash + 1);
+  if (!provider) return { id };
+  if (!id) return { id: provider };
+  return { provider, id };
+}
+
+/**
+ * The model segment of a usage line, in pi's footer style —
+ * `(provider) id • level`. `off` keeps pi's `thinking off` wording in both
+ * positions; an unresolved level renders as `default`, because the child then
+ * picked its own tier (ADR 0005: a model-pinned role gets no `--thinking` flag,
+ * and the child stream does not report the effective level — ADR 0015).
+ * Without a model the level still shows, as a standalone `thinking:<level>`
+ * token (`thinking off` for `off`, the same wording as the attached form).
+ */
+export function formatModelSegment(model: string | undefined, thinking: string | undefined): string {
+  const level = thinking ?? THINKING_UNRESOLVED_LABEL;
+  const label = level === "off" ? "thinking off" : level;
+  if (!model) return level === "off" ? label : `thinking:${level}`;
+  const { provider, id } = splitModelRef(model);
+  return `${provider ? `(${provider}) ` : ""}${id} • ${label}`;
+}
+
 /**
  * Human-readable usage line for one run (registry rows and tool-result
- * renderers share it). Turns pluralize properly; context tokens and the model
- * are opt-in display fields the tool-result renderer asks for.
+ * renderers share it). Turns pluralize properly; context tokens, model, and
+ * thinking level are opt-in display fields the renderers ask for. The thinking
+ * level is the resolved dispatch intent, not the child's effective tier (ADR
+ * 0015); `undefined` displays as `default`.
  */
 export function formatUsageLine(
   usage: UsageStats,
-  opts: { model?: string; showContext?: boolean } = {},
+  opts: { model?: string; thinking?: string; showContext?: boolean } = {},
 ): string {
   const parts: string[] = [];
   if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
@@ -1297,7 +1340,7 @@ export function formatUsageLine(
   if (opts.showContext && usage.contextTokens && usage.contextTokens > 0) {
     parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
   }
-  if (opts.model) parts.push(opts.model);
+  if (opts.model || opts.thinking !== undefined) parts.push(formatModelSegment(opts.model, opts.thinking));
   return parts.join(" ");
 }
 
@@ -1327,7 +1370,7 @@ function formatRunRow(run: RunEntry, now: number): string[] {
     lines.push(`  last: ${oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine}`);
   }
   if (run.usage) {
-    const u = formatUsageLine(run.usage);
+    const u = formatUsageLine(run.usage, { model: run.model, thinking: run.thinkingLevel });
     if (u) lines.push(`  usage: ${u}`);
   }
   if (run.findingsPath) lines.push(`  findings: ${run.findingsPath}`);

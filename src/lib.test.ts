@@ -17,6 +17,7 @@ import {
   emptyUsage,
   estimateToolSurfaceTokens,
   formatBlockingToolError,
+  formatModelSegment,
   formatRunSnapshot,
   formatUsageLine,
   getPiInvocation,
@@ -39,12 +40,14 @@ import {
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
+  splitModelRef,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_PARENT_SESSION_ENV,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
   TERMINAL_RUN_STATUSES,
+  THINKING_UNRESOLVED_LABEL,
   TOKEN_GUARD_MULTIPLIER,
   TOOL_ALIASES,
   TOOL_CONTRACTS,
@@ -1171,6 +1174,43 @@ test("formatRunSnapshot renders last output, usage, and paths when present", () 
   assert.ok(text.includes("/tmp/research.log"), "log path");
 });
 
+// ADR 0015 — blocking snapshot rows now carry the dispatched model and thinking
+// level, so `/subagents` answers "which model, which tier" for a finished run.
+test("formatRunSnapshot shows the dispatched model and thinking level for blocking runs", () => {
+  const runs: RunEntry[] = [
+    {
+      id: "a",
+      role: "standards-reviewer",
+      source: "embedded",
+      channel: "blocking",
+      status: "succeeded",
+      startedAt: 0,
+      usage: { input: 1200, output: 800, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2000, turns: 3 },
+      model: "sensenova/deepseek-flash",
+      thinkingLevel: "medium",
+    },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  assert.ok(text.includes("(sensenova) deepseek-flash • medium"), "model + resolved thinking level");
+});
+
+test("formatRunSnapshot renders an unpinned thinking level as default", () => {
+  const runs: RunEntry[] = [
+    {
+      id: "a",
+      role: "researcher",
+      source: "embedded",
+      channel: "blocking",
+      status: "succeeded",
+      startedAt: 0,
+      usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+      model: "sensenova/deepseek-flash",
+    },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  assert.ok(text.includes("(sensenova) deepseek-flash • default"), "undefined level displays as default");
+});
+
 test("formatRunSnapshot collapses and truncates an over-long last output to one line", () => {
   const long = Array.from({ length: 200 }, (_, i) => `word${i}`).join(" ");
   const runs: RunEntry[] = [
@@ -1326,11 +1366,44 @@ test("formatUsageLine pluralizes turns and adds context/model only on request", 
   const single = { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
   assert.equal(formatUsageLine(single), "1 turn ↑10", "singular turn without ctx or model");
   assert.equal(
-    formatUsageLine(usage, { model: "prov/m", showContext: true }),
-    "3 turns ↑1.2k ↓800 $0.0012 ctx:2.0k prov/m",
+    formatUsageLine(usage, { model: "prov/m", thinking: "high", showContext: true }),
+    "3 turns ↑1.2k ↓800 $0.0012 ctx:2.0k (prov) m • high",
   );
   const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
   assert.equal(formatUsageLine(zero), "", "an all-zero usage line is empty");
+});
+
+// ADR 0015 — the usage line shows the resolved dispatch thinking level next to
+// the dispatched model, in pi's footer style. `undefined` (a model-pinned role
+// with no override) is labelled `default`, never invented.
+test("formatModelSegment renders pi's footer model style with the thinking level attached", () => {
+  assert.equal(formatModelSegment("sensenova/deepseek-flash", "high"), "(sensenova) deepseek-flash • high");
+  assert.equal(
+    formatModelSegment("deepseek-flash", "medium"),
+    "deepseek-flash • medium",
+    "a bare role-pinned id has no provider to show",
+  );
+  assert.equal(
+    formatModelSegment("sensenova/deepseek-flash", "off"),
+    "(sensenova) deepseek-flash • thinking off",
+    "pi's `thinking off` wording is preserved",
+  );
+  assert.equal(
+    formatModelSegment("sensenova/deepseek-flash", undefined),
+    `(sensenova) deepseek-flash • ${THINKING_UNRESOLVED_LABEL}`,
+    "a never-pinned level is `default`, not an invented tier",
+  );
+  assert.equal(formatModelSegment(undefined, "low"), "thinking:low", "no model still shows the level standalone");
+  assert.equal(
+    formatModelSegment(undefined, "off"),
+    "thinking off",
+    "the standalone token keeps pi's `off` wording instead of `thinking:off`",
+  );
+  assert.deepEqual(splitModelRef("prov"), { id: "prov" }, "no slash means no provider");
+  assert.deepEqual(splitModelRef("prov/id"), { provider: "prov", id: "id" }, "the first slash splits provider from id");
+  assert.deepEqual(splitModelRef("prov/"), { id: "prov" }, "an empty id side degrades to a bare id, not `prov/`");
+  assert.deepEqual(splitModelRef("/id"), { id: "id" }, "an empty provider side degrades to a bare id");
+  assert.equal(formatModelSegment("prov/", "high"), "prov • high", "a trailing slash never renders a broken segment");
 });
 
 // S20 — run management (D6): prune/remove, args. Kill moved from pid/OS-signal

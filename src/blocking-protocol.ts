@@ -28,6 +28,8 @@ export interface SingleResult {
   stderr: string;
   usage: UsageStats;
   model?: string;
+  /** Resolved dispatch thinking level the spawn adapter pre-set; undefined when never pinned. */
+  thinkingLevel?: string;
   stopReason?: string;
   errorMessage?: string;
   step?: number;
@@ -56,6 +58,13 @@ export function createResultAccumulator(opts: {
   step?: number;
   /** Pre-set model (agent pin or dispatch default); the first message model only fills an empty slot. */
   model?: string;
+  /**
+   * Pre-set dispatch thinking level (agent role tier or dispatch default). The
+   * child stream never reports its effective level, so this is the only source
+   * (ADR 0015); undefined means the run never pinned one and displays as
+   * `default`.
+   */
+  thinkingLevel?: string;
   /** Fired once per dispatched event (message_end / tool_result_end) with the partial result. */
   onProgress?: (partial: SingleResult) => void;
 }): BlockingResultAccumulator {
@@ -68,6 +77,7 @@ export function createResultAccumulator(opts: {
     stderr: "",
     usage: emptyUsage(),
     model: opts.model,
+    thinkingLevel: opts.thinkingLevel,
     step: opts.step,
   };
 

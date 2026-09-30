@@ -411,6 +411,29 @@ test("an active-count subscriber converges to zero without callers remembering t
   assert.equal(activeCounts.at(-1), 0, "the subscriber sees the run finish without any explicit sync call");
 });
 
+test("runStep patches the dispatched model and thinking level into the registry (live and terminal)", async () => {
+  const registry = createRunRegistry();
+  let live: { model?: string; thinkingLevel?: string } | undefined;
+  const runner: RunnerSeam = {
+    async runTask(_t, opts) {
+      const partial = { ...okResult("r1", "progress"), model: "sensenova/deepseek-flash", thinkingLevel: "medium" };
+      opts.onProgress(partial);
+      const run = registry.snapshot()[0];
+      live = run ? { model: run.model, thinkingLevel: run.thinkingLevel } : undefined;
+      return { ...okResult("r1", "hello"), model: "sensenova/deepseek-flash", thinkingLevel: "medium" };
+    },
+  };
+  await runBlockingPlan({ plan: { mode: "single", agent: "r1", task: "t" }, runner, registry, agents: noAgents });
+  const run = registry.snapshot()[0];
+  assert.equal(run.model, "sensenova/deepseek-flash", "the terminal patch records the dispatched model");
+  assert.equal(run.thinkingLevel, "medium", "the terminal patch records the resolved thinking level");
+  assert.deepEqual(
+    live,
+    { model: "sensenova/deepseek-flash", thinkingLevel: "medium" },
+    "the progress patch lands model + level while the run is still active",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Parallel summary truncation
 // ---------------------------------------------------------------------------
