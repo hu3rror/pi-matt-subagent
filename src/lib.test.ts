@@ -41,6 +41,7 @@ import {
   RUN_STATUSES,
   scopeAllowsProject,
   splitModelRef,
+  toolErrorDetails,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_PARENT_SESSION_ENV,
@@ -1322,6 +1323,94 @@ test("formatBlockingToolError formats a failed chain step as the tool error", ()
     formatBlockingToolError("chain", { agent: "researcher", step: 2, output: "boom" }),
     "Chain stopped at step 2 (researcher): boom",
   );
+});
+
+// S19b — tool-error details payload (ADR 0016, decided Q2=b): a converted
+// error result carries the failed run's terminal info, mapped by a pure
+// helper from the registry snapshot sliced at the call's base index — only
+// runs this call registered can be its failure. Empty delta / pre-call
+// failures yield no payload.
+
+test("toolErrorDetails returns undefined for an empty delta", () => {
+  const reg = createRunRegistry();
+  const snap = reg.snapshot();
+  assert.equal(toolErrorDetails(snap, snap.length), undefined);
+  assert.equal(toolErrorDetails(snap, 0), undefined, "an empty registry yields nothing at any base index");
+});
+
+test("toolErrorDetails ignores failures that predate the call's base index", () => {
+  const reg = createRunRegistry();
+  const prior = reg.register({ role: "old", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(prior, { status: "failed" });
+  const sinceIndex = reg.snapshot().length;
+  assert.equal(
+    toolErrorDetails(reg.snapshot(), sinceIndex),
+    undefined,
+    "a failed run registered before this call is not this call's failure",
+  );
+});
+
+test("toolErrorDetails maps the first failed run of the delta to an error payload", () => {
+  const reg = createRunRegistry();
+  const prior = reg.register({ role: "old", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(prior, { status: "succeeded" });
+  const sinceIndex = reg.snapshot().length;
+  const id = reg.register({ role: "researcher", source: "user", channel: "blocking", startedAt: 1000, status: "running" });
+  reg.update(id, {
+    status: "failed",
+    usage: { turns: 2, input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.25, contextTokens: 1500 },
+    model: "openai/gpt-4o",
+    thinkingLevel: "medium",
+  });
+  assert.deepEqual(toolErrorDetails(reg.snapshot(), sinceIndex), {
+    status: "failed",
+    agent: "researcher",
+    agentSource: "user",
+    usage: { turns: 2, input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.25, contextTokens: 1500 },
+    model: "openai/gpt-4o",
+    thinkingLevel: "medium",
+  });
+});
+
+test("toolErrorDetails returns the first failed run when the delta has several", () => {
+  const reg = createRunRegistry();
+  const sinceIndex = 0;
+  const a = reg.register({ role: "a", source: "user", channel: "blocking", startedAt: 100, status: "running" });
+  reg.update(a, { status: "failed" });
+  const b = reg.register({ role: "b", source: "project", channel: "blocking", startedAt: 200, status: "running" });
+  reg.update(b, { status: "aborted" });
+  assert.deepEqual(toolErrorDetails(reg.snapshot(), sinceIndex), {
+    status: "failed",
+    agent: "a",
+    agentSource: "user",
+    usage: undefined,
+    model: undefined,
+    thinkingLevel: undefined,
+  });
+});
+
+test("toolErrorDetails maps an aborted run to an aborted payload", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "analyst", source: "project", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(id, { status: "aborted" });
+  assert.deepEqual(toolErrorDetails(reg.snapshot(), 0), {
+    status: "aborted",
+    agent: "analyst",
+    agentSource: "project",
+    usage: undefined,
+    model: undefined,
+    thinkingLevel: undefined,
+  });
+});
+
+test("toolErrorDetails returns a detached usage copy", () => {
+  const reg = createRunRegistry();
+  const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0, status: "running" });
+  reg.update(id, { status: "failed", usage: emptyUsage() });
+  const error = toolErrorDetails(reg.snapshot(), 0);
+  assert.ok(error);
+  error.usage!.input = 999;
+  assert.equal(reg.get(id)?.usage?.input, 0, "mutating the payload must not leak into the registry");
 });
 
 // S20 — result output extraction and usage display (semantics cluster).

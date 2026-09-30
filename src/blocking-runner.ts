@@ -20,6 +20,7 @@ import {
   type AgentConfig,
   type AgentSource,
   type RunRegistry,
+  type SubagentRunError,
 } from "./lib.ts";
 import type { SingleResult } from "./blocking-protocol.ts";
 
@@ -32,6 +33,12 @@ export type { SingleResult } from "./blocking-protocol.ts";
 export interface SubagentDetails {
   mode: "single" | "parallel" | "chain";
   results: SingleResult[];
+  /**
+   * Present only on the error-marked conversion path (ADR 0016): the failed
+   * run's terminal info, shaped by the pure `toolErrorDetails` helper from the
+   * run registry. Success results and progress updates never carry it.
+   */
+  error?: SubagentRunError;
 }
 
 export type BlockingPlan =

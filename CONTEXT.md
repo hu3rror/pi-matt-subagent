@@ -30,7 +30,7 @@ _Avoid_: 子进程, worker, in-process 第二会话
 
 **push（推送交付）**:
 后台 subagent 到达任一终态（succeeded / failed / terminated / aborted）时，扩展经 `pi.sendMessage`（`deliverAs: "followUp"` + `triggerTurn: true`）把结果摘要与 findings 路径推进主会话上下文的语义——主会话空闲时立即触发新回合，正在回合中则排队到当前回合工具调用结束。推送内容成为被触发回合的 prompt，须措辞为「读取 findings 文件」的指令；另由消息渲染器（`pi.registerMessageRenderer`）负责转录显示。手动 kill（aborted）同样推送，告知主 agent 研究已被停止。
-两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，抛出的工具错误（ADR 0010）即模型可见信号；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。
+两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，工具错误信号即模型可见信号（见 tool error）；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。
 _Avoid_: notify, callback, poll
 
 **two-axis review**:
@@ -46,7 +46,7 @@ _Avoid_: brainstorming, options
 _Avoid_: command, recipe
 
 **chain step（链式步骤）**:
-一次 chain 执行中的单步委托执行。chain 的每一步在 run registry 中登记为一条独立的 blocking run（与 single「一次调用一条 run」同通道、不同粒度），失败时该步由 tool error 逐字节标识（ADR 0010 的 chain 形态）。
+一次 chain 执行中的单步委托执行。chain 的每一步在 run registry 中登记为一条独立的 blocking run（与 single「一次调用一条 run」同通道、不同粒度），失败时该步由 tool error 逐字节标识（ADR 0016 的 chain 形态）。
 _Avoid_: step, 链上任务
 
 **tool-name resolution**:
@@ -90,11 +90,11 @@ _Avoid_: status panel, 面板
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **tool error（工具错误信号）**:
-失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled 文本）不在此语义内；research 运行未启动即失败的 runner 级错误同样走 throw，不推送（见 push）。
-_Avoid_: isError 字段, 错误返回
+工具调用未完成时通过**返回** `isError: true` 显式报错（pi ≥0.99.1 起 harness 认可返回载体；此前只从 throw 派生，返回字段是死代码——ADR 0010 该版本前提已失效，被 ADR 0016 supersede）。覆盖规则：**调用完成 → 成功结果（声明处带结构化 receipt）；调用未完成 → `isError: true`，文案逐字不变**。subagent 的未完成分支：blocking 失败（single 失败 / chain 失败步 / 中止，`aborted` 与 runSingleAgent 的 abort throw 一致）、参数校验失败（含 Available agents 恢复文案）、project-agent 拒绝；转换点在工具边界（try/catch 包编排层，编排层与 `formatBlockingToolError` 仍 throw、测试钉死该契约），失败结果的 `details.error` 携带该 run 终态信息（status/agent/source/usage/model/thinking，由纯函数 `toolErrorDetails` 从 registry 本次调用增量映射，renderResult 渲染富错误行——Q2=b）。明文例外：parallel 聚合保持成功语义（部分失败是交付物）、input-JSON 解析保持 loud throw（ADR 0011）。research 的未完成分支（拒批 / 未知 model / 启动失败）随结构化 receipt 变更迁移到本规则（ADR 0017），此前仍走原信号。
+_Avoid_: throw 为载体, 假成功（未完成调用却成功标记）
 
 **input-JSON**:
-两个工具各带的可选 `input` 字段的契约（ADR 0011）：值必须是 JSON 对象字符串，携带公开 schema 未暴露但运行时已支持的参数（`subagent`: `model`/`thinkingOverride`；`research`: `model`/`maxWallClockMs`）。合并规则沿用轻量 subagents 门面的通用做法：直接字段覆盖 JSON 同名键（`{...parsed, ...direct}`）；缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0010 throw 契约）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
+两个工具各带的可选 `input` 字段的契约（ADR 0011）：值必须是 JSON 对象字符串，携带公开 schema 未暴露但运行时已支持的参数（`subagent`: `model`/`thinkingOverride`；`research`: `model`/`maxWallClockMs`）。合并规则沿用轻量 subagents 门面的通用做法：直接字段覆盖 JSON 同名键（`{...parsed, ...direct}`）；缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
 _Avoid_: input param, JSON escape hatch
 
 **token benchmark（token 基准）**:

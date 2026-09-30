@@ -1538,10 +1538,11 @@ export function getResultOutput(result: {
 }
 
 /**
- * The tool-error message for a failed blocking run (single or chain step),
- * thrown so the harness marks the result as an error (it derives isError only
- * from throws; a returned field is dead code). The text matches what the model
- * would otherwise receive in content.
+ * The tool-error message for a failed blocking run (single or chain step). The
+ * orchestrator keeps throwing it (its tests pin that contract); the tool
+ * boundary converts the throw into a returned error result whose content is
+ * this message verbatim (ADR 0016). The text matches what the model would
+ * otherwise receive in content.
  */
 export function formatBlockingToolError(
   mode: "single" | "chain",
@@ -1549,6 +1550,52 @@ export function formatBlockingToolError(
 ): string {
   if (mode === "chain") return `Chain stopped at step ${opts.step} (${opts.agent}): ${opts.output}`;
   return `Agent ${opts.stopReason || "failed"}: ${opts.output}`;
+}
+
+// ---------------------------------------------------------------------------
+// Tool-error details payload (ADR 0016)
+//   Since pi 0.99.1 a tool may return an error result (`isError: true`) instead
+//   of throwing. The `subagent` tool converts its orchestrator's throw at the
+//   tool boundary and shapes the failed run's terminal info from the registry
+//   (decided Q2=b): status, agent, source, usage, model, thinking level — the
+//   display fields that make a failure legible in the transcript. The coverage
+//   rule (3b) and the exceptions (parallel aggregate, input-JSON) are separate
+//   concerns documented in ADR 0016.
+// ---------------------------------------------------------------------------
+
+/** The terminal-run info an error-marked subagent result carries (ADR 0016). */
+export interface SubagentRunError {
+  status: "failed" | "aborted";
+  agent: string;
+  agentSource: AgentSource;
+  usage?: UsageStats;
+  model?: string;
+  thinkingLevel?: string;
+}
+
+/**
+ * Maps the failed run of one tool call onto an error payload. The caller
+ * records the registry snapshot length before the call and passes the full
+ * snapshot with that base index: only runs the call registered after the base
+ * are its own (blocking plans register serially per step / pre-register
+ * parallel tasks, so the delta isolates exactly this call's runs), and the
+ * first one that ended failed/aborted is the failure the thrown error
+ * reported. Returns undefined when the delta has no failed/aborted run — the
+ * throw was then not a run failure (no payload to show). The error payload
+ * carries a detached usage copy, so mutating it cannot leak into the registry.
+ */
+export function toolErrorDetails(snapshot: readonly RunEntry[], sinceIndex: number): SubagentRunError | undefined {
+  const delta = snapshot.slice(sinceIndex);
+  const failed = delta.find((r) => r.status === "failed" || r.status === "aborted");
+  if (!failed) return undefined;
+  return {
+    status: failed.status === "aborted" ? "aborted" : "failed",
+    agent: failed.role,
+    agentSource: failed.source,
+    usage: failed.usage ? { ...failed.usage } : undefined,
+    model: failed.model,
+    thinkingLevel: failed.thinkingLevel,
+  };
 }
 
 // ---------------------------------------------------------------------------

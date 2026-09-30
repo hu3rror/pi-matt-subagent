@@ -1,5 +1,7 @@
 # Tool error signaling: failed blocking subagent runs throw
 
+> **Superseded by ADR-0016**: failed subagent calls now *return* `isError: true` with the failed run's terminal info in `details` (pi ≥ 0.99.1 honors returned error results). The orchestrator still throws internally (the conversion happens at the tool boundary) and the parallel aggregate + input-JSON loud-throw exceptions live on. Read ADR-0016 for current semantics.
+
 A failed blocking subagent run (a chain step or a single run) used to return a successful tool result whose `isError: true` field was dead code: `AgentToolResult` has no `isError` member in either pi 0.85.1 or 0.86.0, and the harness derives error status only from throws — `executeToolCall` wraps `tool.execute` in a try/catch and converts a throw into an error result (`createErrorToolResult(message)` with `isError: true`, `details: undefined`). The model only ever saw the failure as text embedded in a success-marked result; the transcript likewise never marked the call as failed. We make the failure signal explicit: **the `subagent` tool throws for a failed blocking run**, with the thrown message carrying the exact text the failure branch previously put into `content`, so the model-visible copy stays byte-identical while the harness now marks the result as an error.
 
 Scope of the change, deliberately narrow:

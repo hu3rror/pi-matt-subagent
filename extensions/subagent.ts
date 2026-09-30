@@ -91,6 +91,7 @@ import {
   getResultOutput,
   isToolError,
   lastOutputLine,
+  toolErrorDetails,
 } from "../src/lib.ts";
 
 import {
@@ -279,6 +280,26 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 
 function formatAgentList(agents: AgentConfig[]): string {
   return agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
+}
+
+/**
+ * The icon + agent (source) header row shared by both renderResult branches.
+ * The theme shape is structural: the real pi Theme is an internal deep import
+ * the extension must not reach into, so the helper only needs the two styling
+ * methods both branches use identically.
+ */
+function renderAgentRow(
+  theme: { fg(color: ThemeColor, text: string): string; bold(text: string): string },
+  icon: string,
+  agent: string,
+  source: AgentSource,
+): string {
+  return `${icon} ${theme.fg("toolTitle", theme.bold(agent))}${theme.fg("muted", ` (${source})`)}`;
+}
+
+/** The indented, 10-line-capped body text shared by both renderResult branches. */
+function renderIndentedBody(text: string): string {
+  return text.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n");
 }
 
 /**
@@ -757,14 +778,20 @@ export default function (pi: ExtensionAPI) {
       const hasSingle = Boolean(merged.agent && merged.task);
       const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
       const mode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+      // The empty-details shape every not-completed branch returns (ADR 0016:
+      // an error result has no runs; a payload only when a run failed/aborted).
+      const noRunDetails: SubagentDetails = { mode, results: [] };
 
       if (modeCount !== 1) {
         const available = formatAgentList(agents);
+        // ADR 0016 (3b) — a call that did not complete is an error result, not
+        // a success-marked text reply; the recovery text stays byte-identical.
         return {
           content: [
             { type: "text", text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}` },
           ],
-          details: { mode, results: [] },
+          details: noRunDetails,
+          isError: true,
         };
       }
 
@@ -782,9 +809,12 @@ export default function (pi: ExtensionAPI) {
         "Run project-local agents?",
       );
       if (!approved) {
+        // ADR 0016 (3b) — a refused run is a not-completed call: error-marked,
+        // content unchanged (no registry entry exists, so no error payload).
         return {
           content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-          details: { mode, results: [] },
+          details: noRunDetails,
+          isError: true,
         };
       }
 
@@ -808,17 +838,37 @@ export default function (pi: ExtensionAPI) {
         },
       };
 
-      const { text, details } = await runBlockingPlan({
-        plan,
-        runner,
-        registry: subagentRuns,
-        agents,
-        signal,
-        onToolUpdate: (text, details) => {
-          onUpdate?.({ content: [{ type: "text", text }], details });
-        },
-      });
-      return { content: [{ type: "text", text }], details };
+      // ADR 0016 — the conversion point (decided Q1=A): the orchestrator
+      // keeps throwing its tool error internally (its tests pin that
+      // contract); this boundary converts any throw into an error-marked
+      // result whose content is the thrown message byte-identical. The
+      // details carry the failed run's terminal info from the registry — only
+      // runs this call registered (the snapshot base index isolates the delta)
+      // and that ended failed/aborted, via the pure toolErrorDetails helper.
+      // A throw that is not a run failure (e.g. an internal bug) yields no
+      // payload, exactly like the harness's old throw-derived error result.
+      const sinceIndex = subagentRuns.snapshot().length;
+      let blockingResult: { text: string; details: SubagentDetails };
+      try {
+        blockingResult = await runBlockingPlan({
+          plan,
+          runner,
+          registry: subagentRuns,
+          agents,
+          signal,
+          onToolUpdate: (text, details) => {
+            onUpdate?.({ content: [{ type: "text", text }], details });
+          },
+        });
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text }],
+          details: { ...noRunDetails, error: toolErrorDetails(subagentRuns.snapshot(), sinceIndex) },
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: blockingResult.text }], details: blockingResult.details };
     },
 
     renderCall(args, theme, _context) {
@@ -836,6 +886,26 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, _opts, theme, _context) {
       const details = result.details as SubagentDetails | undefined;
       const first = result.content?.[0];
+      if (details?.error) {
+        // ADR 0016 (decided Q2=b) — the error row: icon + agent (source) +
+        // the thrown message + usage/model/thinking, so a failed run is
+        // legible from the transcript without opening /subagents. Aborted
+        // keeps the registry's distinct iconography (⊘); a plain failure
+        // renders the tool-error ✗.
+        const lines: string[] = [];
+        const icon = details.error.status === "aborted" ? "⊘" : "✗";
+        lines.push(renderAgentRow(theme, icon, details.error.agent, details.error.agentSource));
+        if (first?.type === "text" && first.text) lines.push(renderIndentedBody(first.text));
+        if (details.error.usage) {
+          const u = formatUsageLine(details.error.usage, {
+            model: details.error.model,
+            thinking: details.error.thinkingLevel,
+            showContext: true,
+          });
+          if (u) lines.push(`  ${theme.fg("dim", u)}`);
+        }
+        return new Text(lines.join("\n"), 0, 0);
+      }
       if (!details || details.results.length === 0) {
         return new Text(first?.type === "text" ? first.text : "(no output)", 0, 0);
       }
@@ -843,12 +913,12 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [];
       for (const r of details.results) {
         const icon = r.running ? "⏳" : isToolError(r) ? "✗" : "✓";
-        lines.push(`${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`);
+        lines.push(renderAgentRow(theme, icon, r.agent, r.agentSource));
         const out = getResultOutput(r);
         if (r.running) {
           lines.push("  (running...)");
         } else if (out && out !== "(no output)") {
-          lines.push(out.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n"));
+          lines.push(renderIndentedBody(out));
         }
         const u = formatUsageLine(r.usage, { model: r.model, thinking: r.thinkingLevel, showContext: true });
         if (u) lines.push(`  ${theme.fg("dim", u)}`);
