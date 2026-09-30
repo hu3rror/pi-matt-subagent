@@ -70,7 +70,7 @@ researcher 的停止规则：信息足够回答问题时立即收尾写 findings
 _Avoid_: saturation, 信息饱和
 
 **run registry（运行注册表）**:
-进程内统一追踪每个 subagent 运行（blocking 的 single/parallel/chain 每任务一条 + background research 一条）的状态表：role、source、channel、status、startedAt、最后输出行、token 用量（blocking 侧）、findings/log 路径（background 侧，manual kill 的定位依据）。会话内概念，`session_shutdown` 时清空。驱动 footer 计数与 `/subagents` 命令两条可见性入口。
+进程内统一追踪每个 subagent 运行（blocking 的 single/parallel/chain 每任务一条 + background research 一条）的状态表：role、source、channel、status、startedAt、最后输出行、token 用量、派发模型与派发思考档位（后三项均 blocking 侧，模型/档位见 dispatch thinking level）、findings/log 路径（background 侧，manual kill 的定位依据）。会话内概念，`session_shutdown` 时清空。驱动 footer 计数与 `/subagents` 命令两条可见性入口。
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
@@ -82,8 +82,12 @@ _Avoid_: pending, blocked, 状态机
 _Avoid_: 管理面板, panel
 
 **subagent overview（运行总览）**:
-用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、路径）。blocking 期间命令不可达是输入排队机制的固有行为；`/subagents` 同时是 run management 的入口（无参菜单 / 带参直操作）。
+用户查看运行注册表的入口：footer 常驻计数（`⧗ N subagents running`，N 含 queued+running，blocking 期间也可见）+ `/subagents` 命令（空闲时读完整快照：状态分组、开始时间、时长、最后输出、用量、派发模型与思考档位、路径）。blocking 期间命令不可达是输入排队机制的固有行为；`/subagents` 同时是 run management 的入口（无参菜单 / 带参直操作）。
 _Avoid_: status panel, 面板
+
+**dispatch thinking level（派发思考档位）**:
+一次 subagent 运行在派发前解析出的档位意图，优先级同 ADR 0005：per-call override > role 声明 > 继承主会话。它回答「我们要求这个 run 用多大思考力度」，**不等于**子进程实际生效的档位——role 自带 model 且无 override 时本就不设档（undefined），由子进程自行取默认，而子进程的 JSON 流只在档位**变化**时上报，初始档位只写进它自己的 transcript，父进程观测不到（ADR 0015）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
+_Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **tool error（工具错误信号）**:
 失败 blocking subagent 运行通过 throw 向 harness 显式报错——harness 只从 throw 派生 isError（返回字段是死代码，见 ADR 0010）。覆盖 chain 失败步与 single 失败（含 `aborted`，与 runSingleAgent 的 abort throw 一致）；抛出的 Error message 即模型可见文案，与旧 content 逐字相同，由纯函数 `formatBlockingToolError`（lib.ts，node --test 覆盖）构造。parallel 的聚合语义与 research 工具的返回（handle / canceled 文本）不在此语义内；research 运行未启动即失败的 runner 级错误同样走 throw，不推送（见 push）。

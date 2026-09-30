@@ -36,7 +36,7 @@ Both tools accept an optional `input` field: a JSON object string carrying advan
 
 > **Coexistence**: this plugin registers a tool named `subagent`; similar subagents extensions do too. Avoid running this plugin alongside other subagents extensions — same tool names collide, so install one or the other, never both (ADR 0012).
 
-Every run shows in a footer counter (`⧗ N subagents running`), including blocking runs. `/subagents` lists the full snapshot and manages runs: with no args it opens a menu (view runs / stop run / clear finished / show log); with args it runs `kill <id>`, `tail <id>`, `prune`, or `snapshot` directly. Stopping a background research run aborts its in-process child session and records the run as `aborted` (the outcome is pushed like every terminal state), never `failed` or `terminated`. Each `research` run is bounded by a single wall-clock cap (default 60 minutes; tighten per call via hidden `maxWallClockMs`): findings are checkpointed before each search round, so a cap kill loses at most one round of work; a wall-clock kill appends a slim `research-terminated` marker to the findings file and records the run as `terminated`. Blocking runs can only be interrupted with Esc, which aborts the whole call; commands queue until it finishes.
+Every run shows in a footer counter (`⧗ N subagents running`), including blocking runs. `/subagents` lists the full snapshot and manages runs: with no args it opens a menu (view runs / stop run / clear finished / show log); with args it runs `kill <id>`, `tail <id>`, `prune`, or `snapshot` directly. Stopping a background research run aborts its in-process child session and records the run as `aborted` (the outcome is pushed like every terminal state), never `failed` or `terminated`. Each `research` run is bounded by a single wall-clock cap (default 60 minutes; tighten per call via hidden `maxWallClockMs`): findings are checkpointed before each search round, so a cap kill loses at most one round of work; a wall-clock kill appends a slim `research-terminated` marker to the findings file and records the run as `terminated`. Blocking runs can only be interrupted with Esc, which aborts the whole call; commands queue until it finishes. Every blocking usage line — inline in a `subagent` tool result and as the `usage:` line of a `/subagents` row — ends with the dispatched model and its thinking level in pi's footer style (`(sensenova) deepseek-flash • high`); `off` renders as `thinking off`, and a run that pinned no level renders as `default` (the value is the resolved dispatch intent, not the child's effective tier — ADR 0015).
 
 Four slash commands — the first three are direct entries into one upstream pattern each:
 
@@ -104,7 +104,7 @@ scripts/                 token benchmark (Seam E) + measurement extension + push
 prompts/                 the four slash-command templates
 docs/adr/                decisions: dual channel, tool-name resolution, research redesign (push
                          delivery, wall-clock cap), run registry + management, input escape
-                         hatch, coexistence stance
+                         hatch, coexistence stance, usage-line model + thinking level
 CONTEXT.md               domain glossary (subagent, role, blocking, background, push, ...)
 ```
 
@@ -114,6 +114,7 @@ Two decisions worth knowing about:
 - **Dual channel** (`docs/adr/0001`): blocking is the default mental model; only `research`/`wayfinder` use the background channel.
 - **Research redesign** (`docs/adr/0013`): the background researcher runs as an in-process second session; every terminal state is pushed into the main context; the budget machinery collapsed to one wall-clock cap + checkpointed findings.
 - **`input` escape hatch** (`docs/adr/0011`): advanced per-run parameters (`model`, `thinkingOverride`) go through the `input` JSON field — direct fields win over JSON keys, invalid input fails loudly, and the merged object is validated against the full contract before dispatch. The parameter schemas live in `src/lib.ts` as the single source of truth.
+- **Usage line model + thinking level** (`docs/adr/0015`): the per-run usage line ends with the dispatched model and its thinking tier in pi's footer style; the shown tier is the resolved dispatch intent (the child's effective level is not observable), and an unpinned run is labelled `default`.
 
 ## Token benchmark
 

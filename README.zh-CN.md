@@ -36,7 +36,7 @@ Matt Pocock 的 skills 到处都在要求子代理，却没说明 pi 里具体�
 
 > **共存声明**：本插件注册名为 `subagent` 的工具，类似的 subagents 扩展也会注册同名工具。请避免与本插件同时使用其他 subagents 扩展——同名工具会冲突，二选一安装，不要同时装（ADR 0012）。
 
-每条运行都会反映在 footer 计数器（`⧗ N subagents running`）上，blocking 运行期间也能看到。`/subagents` 列出完整快照并管理运行：无参弹菜单（查看运行 / 终止 run / 清理已结束 / 查看日志末尾），带参直接操作（`kill <id>` / `tail <id>` / `prune` / `snapshot`）。停止一条 background research 运行会中止其进程内子会话，并把运行记作 `aborted`（和每个终态一样推送结果），而不是 `failed` 或 `terminated`。每条 `research` 运行都由单一的墙钟上限约束（默认 60 分钟；可按次用隐藏 `maxWallClockMs` 收紧）：findings 在每轮搜索前检查点落盘，所以上限击杀最多损失一轮工作；墙钟击杀会在 findings 文件末尾追加精简的 `research-terminated` 标记，并把运行记作 `terminated`。blocking 运行期间命令排队，中途只能用 Esc 整体中止。
+每条运行都会反映在 footer 计数器（`⧗ N subagents running`）上，blocking 运行期间也能看到。`/subagents` 列出完整快照并管理运行：无参弹菜单（查看运行 / 终止 run / 清理已结束 / 查看日志末尾），带参直接操作（`kill <id>` / `tail <id>` / `prune` / `snapshot`）。停止一条 background research 运行会中止其进程内子会话，并把运行记作 `aborted`（和每个终态一样推送结果），而不是 `failed` 或 `terminated`。每条 `research` 运行都由单一的墙钟上限约束（默认 60 分钟；可按次用隐藏 `maxWallClockMs` 收紧）：findings 在每轮搜索前检查点落盘，所以上限击杀最多损失一轮工作；墙钟击杀会在 findings 文件末尾追加精简的 `research-terminated` 标记，并把运行记作 `terminated`。blocking 运行期间命令排队，中途只能用 Esc 整体中止。每条 blocking 用量行——`subagent` 工具结果里的行与 `/subagents` 快照行的 `usage:` 行——末尾都带派发模型及其思考档位，形态沿用 pi 主 footer（`(sensenova) deepseek-flash • high`）；`off` 写作 `thinking off`，未设档的运行写作 `default`（显示的是派发意图，不是子进程实际档位，见 ADR 0015）。
 
 四个 slash command——前三个各直通一个上游模式：
 
@@ -102,7 +102,7 @@ src/lib.test.ts          单元测试
 scripts/                 token 基准（Seam E）+ 测量扩展 + push-e2e / blocking-e2e 脚本（仅开发用）
 prompts/                 四个 slash command 模板
 docs/adr/                决策记录：双通道、工具名归一化、research 重构（推送交付、墙钟上限）、
-                         运行注册表 + 运行管理、input 逃生舱、共存立场
+                         运行注册表 + 运行管理、input 逃生舱、共存立场、用量行的模型与思考档位
 CONTEXT.md               领域词汇表（subagent、role、blocking、background、push、input-JSON……）
 ```
 
@@ -112,6 +112,7 @@ CONTEXT.md               领域词汇表（subagent、role、blocking、backgrou
 - **双通道**（`docs/adr/0001`）：blocking 是默认心智模型；只有 `research`/`wayfinder` 走后台通道。
 - **Research 重构**（`docs/adr/0013`）：后台研究者作为进程内第二会话运行；每个终态都经 push 推进主上下文；预算机制坍缩为单一墙钟上限 + 检查点 findings。
 - **`input` 逃生舱**（`docs/adr/0011`）：按次的高级参数（`model`、`thinkingOverride`）走 `input` JSON 字段——直接字段覆盖 JSON 键、非法输入大声失败、合并后按完整契约校验再派发。参数 schema 以 `src/lib.ts` 为单一事实源。
+- **用量行的模型与思考档位**（`docs/adr/0015`）：每次运行的用量行末尾按 pi 主 footer 形态带出派发模型与思考档位；显示的是派发意图（子进程实际档位不可观测），未设档的运行标为 `default`。
 
 ## Token benchmark（token 基准）
 
