@@ -191,6 +191,7 @@ export async function runBlockingPlan(opts: {
               // land before the first assistant text does (usage cannot).
               ...(partial.model ? { model: partial.model } : {}),
               ...(partial.thinkingLevel ? { thinkingLevel: partial.thinkingLevel } : {}),
+              ...(partial.requestedThinking ? { requestedThinking: partial.requestedThinking } : {}),
             });
           }
           opts.onPartial?.(partial);
@@ -208,6 +209,7 @@ export async function runBlockingPlan(opts: {
           usage: result.usage,
           model: result.model,
           thinkingLevel: result.thinkingLevel,
+          requestedThinking: result.requestedThinking,
         });
       }
       return result;

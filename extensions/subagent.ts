@@ -23,7 +23,8 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
   CONFIG_DIR_NAME,
@@ -61,6 +62,7 @@ import {
   parseConfigFile,
   parseConfigSetValue,
   parseSubagentsArgs,
+  planRunThinking,
   readLogTail,
   researchStatusContent,
   RESEARCH_RESULT_SCHEMA,
@@ -72,6 +74,7 @@ import {
   scopeAllowsProject,
   serializeConfig,
   setConfigValue,
+  splitModelRef,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
@@ -322,7 +325,7 @@ function renderIndentedBody(text: string): string {
 function renderUsageLine(
   theme: { fg(color: ThemeColor, text: string): string },
   usage: UsageStats,
-  opts: { model?: string; thinking?: string },
+  opts: { model?: string; thinking?: string; requestedThinking?: string },
 ): string | undefined {
   const u = formatUsageLine(usage, { ...opts, showContext: true });
   return u ? `  ${theme.fg("dim", u)}` : undefined;
@@ -402,10 +405,31 @@ interface DispatchDefaults {
 }
 
 /**
+ * Binds a resolved Model to pi's model-capability clamp; only ever called
+ * with a resolved model, so an unresolvable ref never fabricates an effective
+ * level (the run then stays on its requested value — ADR 0018).
+ */
+const clampForModel = (model: Model<any>) => (level: string): string =>
+  clampThinkingLevel(model, level as ModelThinkingLevel);
+
+/**
+ * Turns a model registry into the ref→Model resolver both tools share
+ * (blocking pre-clamp and the research child). A bare id has no provider
+ * side, so it resolves to undefined — the caller decides what that means:
+ * blocking skips the pre-clamp, research keeps its loud unknown-model error.
+ */
+const makeModelResolver =
+  (registry: { find: (provider: string, id: string) => Model<any> | undefined }) =>
+  (ref: string): Model<any> | undefined => {
+    const { provider, id } = splitModelRef(ref);
+    return provider && id ? registry.find(provider, id) : undefined;
+  };
+
+/**
  * Decides the thinking level for one subagent run, shared by the blocking
  * runner and the background researcher: per-call override > role level >
  * config default > the inherited main-session level; undefined when the agent
- * pins its own model.
+ * pins its own model and nothing explicit remains.
  */
 function resolveDispatchThinking(
   agent: AgentConfig | undefined,
@@ -439,6 +463,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onProgress: (partial: SingleResult) => void,
   availableToolNames?: ReadonlySet<string>,
+  resolveModel?: (ref: string) => Model<any> | undefined,
 ): Promise<SingleResult> {
   const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
@@ -458,7 +483,15 @@ async function runSingleAgent(
   }
 
   const model = agent.model ?? dispatchDefaults.model;
-  const thinking = resolveDispatchThinking(agent, dispatchDefaults);
+  const requested = resolveDispatchThinking(agent, dispatchDefaults);
+  const resolvedModel = model ? resolveModel?.(model) : undefined;
+  // Clamp transparency (ADR 0018): only a resolved model participates — an
+  // unresolvable ref (e.g. a bare role-pinned id) keeps the requested level
+  // and records nothing extra, so the record never fabricates an effective
+  // value the parent could not observe. No request stays untouched.
+  const planned = resolvedModel ? planRunThinking(requested, clampForModel(resolvedModel)) : undefined;
+  const thinking = planned?.actual ?? requested;
+  const requestedThinking = planned?.requested;
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -491,6 +524,7 @@ async function runSingleAgent(
         step,
         model,
         thinkingLevel: thinking,
+        requestedThinking,
         onProgress,
       });
       const invocation = getPiInvocation(args);
@@ -966,6 +1000,10 @@ export default function (pi: ExtensionAPI) {
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
+      // Model resolution for pre-clamp (ADR 0018): a provider/id string any
+      // source produced → Model object; unresolvable stays undefined so the
+      // child's existing loud unknown-model error is preserved untouched.
+      const resolveSubagentModel = makeModelResolver(ctx.modelRegistry);
       // Extension config (ADR 0018): read once per call, reused for this run.
       const config = readConfigStatus().effective;
       const dispatchDefaults: DispatchDefaults = {
@@ -1044,6 +1082,7 @@ export default function (pi: ExtensionAPI) {
             opts.signal,
             opts.onProgress,
             availableToolNames,
+            resolveSubagentModel,
           );
         },
       };
@@ -1111,6 +1150,7 @@ export default function (pi: ExtensionAPI) {
           const u = renderUsageLine(theme, details.error.usage, {
             model: details.error.model,
             thinking: details.error.thinkingLevel,
+            requestedThinking: details.error.requestedThinking,
           });
           if (u) lines.push(u);
         }
@@ -1130,7 +1170,11 @@ export default function (pi: ExtensionAPI) {
         } else if (out && out !== "(no output)") {
           lines.push(renderIndentedBody(out));
         }
-        const u = renderUsageLine(theme, r.usage, { model: r.model, thinking: r.thinkingLevel });
+        const u = renderUsageLine(theme, r.usage, {
+          model: r.model,
+          thinking: r.thinkingLevel,
+          requestedThinking: r.requestedThinking,
+        });
         if (u) lines.push(u);
       }
 
@@ -1198,14 +1242,11 @@ export default function (pi: ExtensionAPI) {
       // Precedence: per-call `model` override > role-declared researcher model >
       // config default > inherited main session model. An unresolvable override
       // (any source) fails loudly.
+      const resolveSubagentModel = makeModelResolver(ctx.modelRegistry);
       let childModel: Model<any> | undefined = ctx.model;
       const rawModel = merged.model ?? researcher?.model ?? config.dispatchDefaultModel;
       if (rawModel) {
-        const slash = rawModel.indexOf("/");
-        const found =
-          slash > 0
-            ? ctx.modelRegistry.find(rawModel.slice(0, slash), rawModel.slice(slash + 1))
-            : undefined;
+        const found = resolveSubagentModel(rawModel);
         if (!found) {
           // ADR 0016/0017 (3b) — an unresolvable model override is a
           // not-completed call: error-marked, content unchanged (no run is
@@ -1219,11 +1260,18 @@ export default function (pi: ExtensionAPI) {
         childModel = found;
       }
 
-      const thinking = resolveDispatchThinking(researcher, {
+      const requested = resolveDispatchThinking(researcher, {
         thinkingLevel: ctx.thinkingLevel,
         thinkingOverride: merged.thinkingLevel,
         configLevel: config.dispatchDefaultThinkingLevel,
       });
+      // Same clamp transparency as blocking (ADR 0018): pre-clamp with the
+      // resolved child model when one exists; otherwise keep the requested
+      // level and record nothing extra (no fabricated effective value). No
+      // request → nothing recorded (old path).
+      const planned = childModel ? planRunThinking(requested, clampForModel(childModel)) : undefined;
+      const thinking = planned?.actual ?? requested;
+      const requestedThinking = planned?.requested;
 
       const runId = subagentRuns.register({
         role: "researcher",
@@ -1231,6 +1279,9 @@ export default function (pi: ExtensionAPI) {
         channel: "background",
         status: "running",
         startedAt: Date.now(),
+        model: childModel ? `${childModel.provider}/${childModel.id}` : undefined,
+        thinkingLevel: thinking,
+        requestedThinking,
         findingsPath,
       });
       // ADR 0013 — per-run abort handle backing /subagents kill; the runner

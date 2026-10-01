@@ -86,8 +86,12 @@ _Avoid_: 管理面板, panel
 _Avoid_: status panel, 面板
 
 **dispatch thinking level（派发思考档位）**:
-一次 subagent 运行在派发前解析出的档位意图，优先级为 per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018 扩展）。它回答「我们要求这个 run 用多大思考力度」，**不等于**子进程实际生效的档位——role 自带 model 且无 override 时本就不设档（undefined），由子进程自行取默认，而子进程的 JSON 流只在档位**变化**时上报，初始档位只写进它自己的 transcript，父进程观测不到（ADR 0015）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
+一次 subagent 运行在派发前解析出的档位意图，优先级为 per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018 扩展）。`hasModel`（role 自带 model）的短路只跳过继承层，role/config 显式档位仍生效（ADR 0018）。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
 _Avoid_: 思考强度, reasoning effort, thinking intensity
+
+**clamp（档位钳制）**:
+按目标模型能力把请求的档位收敛到该模型支持的区间（不支持 reasoning 的模型只有 `off`；请求档越出能力则落到模型支持的档位）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。clamp 只压不抬——但语义是「模型能力上限」，不是「主会话档位减一」；档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
+_Avoid_: 降级为低一级（自动换算）, 模型无关档位
 
 **extension config（扩展配置）**:
 本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，七个 config knob，惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。

@@ -1299,8 +1299,28 @@ export function resolveThinkingLevel(opts: {
   configLevel?: string;
 }): string | undefined {
   if (opts.override) return opts.override;
-  if (opts.hasModel) return undefined;
+  // Explicit layers (role declaration, config knob) outrank a pinned model's
+  // built-in reasoning default; only the implicit inherited (main-session)
+  // layer is skipped, so a model-pinned agent with nothing explicit still runs
+  // un-touched (historical behavior) — the caller then passes no --thinking.
+  if (opts.hasModel) return opts.roleLevel ?? opts.configLevel ?? undefined;
   return opts.roleLevel ?? opts.configLevel ?? opts.inherited;
+}
+
+/**
+ * Plans the thinking level to dispatch for one run. Undefined when there is
+ * no request — the old path passes no `--thinking` and records nothing.
+ * Otherwise returns the requested level plus the effective level the clamp
+ * produced (the clamp is injected; the extension binds `clampThinkingLevel`
+ * to the resolved target model, so parent and child agree by construction —
+ * ADR 0018 clamp transparency).
+ */
+export function planRunThinking(
+  requested: string | undefined,
+  clampToModel: (level: string) => string,
+): { requested: string; actual: string } | undefined {
+  if (requested === undefined) return undefined;
+  return { requested, actual: clampToModel(requested) };
 }
 
 /**
@@ -1465,8 +1485,10 @@ export interface RunEntry {
   usage?: UsageStats;
   /** Dispatched model ref (`provider/id`, or a bare id for a pinned role); display-only. */
   model?: string;
-  /** Resolved dispatch thinking level; undefined when the run never pinned one (see ADR 0005). */
+  /** Effective dispatch thinking level; undefined when the run never pinned one (see ADR 0005). */
   thinkingLevel?: string;
+  /** Requested level before clamping; present whenever a level was requested (see ADR 0018). */
+  requestedThinking?: string;
   findingsPath?: string;
   logPath?: string;
 }
@@ -1597,11 +1619,19 @@ export function splitModelRef(model: string): { provider?: string; id: string } 
  * and the child stream does not report the effective level — ADR 0015).
  * Without a model the level still shows, as a standalone `thinking:<level>`
  * token (`thinking off` for `off`, the same wording as the attached form).
+ * When `requestedThinking` differs from the effective level, the clamp is
+ * annotated inline (`high (req: xhigh)`) — ADR 0018 clamp transparency.
  */
-export function formatModelSegment(model: string | undefined, thinking: string | undefined): string {
+export function formatModelSegment(
+  model: string | undefined,
+  thinking: string | undefined,
+  requestedThinking?: string,
+): string {
   const level = thinking ?? THINKING_UNRESOLVED_LABEL;
-  const label = level === "off" ? "thinking off" : level;
-  if (!model) return level === "off" ? label : `thinking:${level}`;
+  const annotated =
+    requestedThinking !== undefined && requestedThinking !== thinking ? `${level} (req: ${requestedThinking})` : level;
+  const label = annotated === "off" ? "thinking off" : annotated;
+  if (!model) return annotated === "off" ? label : `thinking:${annotated}`;
   const { provider, id } = splitModelRef(model);
   return `${provider ? `(${provider}) ` : ""}${id} • ${label}`;
 }
@@ -1615,7 +1645,7 @@ export function formatModelSegment(model: string | undefined, thinking: string |
  */
 export function formatUsageLine(
   usage: UsageStats,
-  opts: { model?: string; thinking?: string; showContext?: boolean } = {},
+  opts: { model?: string; thinking?: string; requestedThinking?: string; showContext?: boolean } = {},
 ): string {
   const parts: string[] = [];
   if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
@@ -1627,7 +1657,9 @@ export function formatUsageLine(
   if (opts.showContext && usage.contextTokens && usage.contextTokens > 0) {
     parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
   }
-  if (opts.model || opts.thinking !== undefined) parts.push(formatModelSegment(opts.model, opts.thinking));
+  if (opts.model || opts.thinking !== undefined) {
+    parts.push(formatModelSegment(opts.model, opts.thinking, opts.requestedThinking));
+  }
   return parts.join(" ");
 }
 
@@ -1657,8 +1689,17 @@ function formatRunRow(run: RunEntry, now: number): string[] {
     lines.push(`  last: ${oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine}`);
   }
   if (run.usage) {
-    const u = formatUsageLine(run.usage, { model: run.model, thinking: run.thinkingLevel });
+    const u = formatUsageLine(run.usage, {
+      model: run.model,
+      thinking: run.thinkingLevel,
+      requestedThinking: run.requestedThinking,
+    });
     if (u) lines.push(`  usage: ${u}`);
+  } else if (run.model || run.thinkingLevel !== undefined) {
+    // Background runs carry no usage; still surface the dispatched model and
+    // thinking level (with the clamp annotation) so the snapshot row stays
+    // legible next to blocking rows (ADR 0018).
+    lines.push(`  model: ${formatModelSegment(run.model, run.thinkingLevel, run.requestedThinking)}`);
   }
   if (run.findingsPath) lines.push(`  findings: ${run.findingsPath}`);
   if (run.logPath) lines.push(`  log: ${run.logPath}`);
@@ -1878,6 +1919,8 @@ export interface SubagentRunError {
   usage?: UsageStats;
   model?: string;
   thinkingLevel?: string;
+  /** Requested level before clamping, when a level was requested. */
+  requestedThinking?: string;
 }
 
 /**
@@ -1902,6 +1945,7 @@ export function toolErrorDetails(snapshot: readonly RunEntry[], sinceIndex: numb
     usage: failed.usage ? { ...failed.usage } : undefined,
     model: failed.model,
     thinkingLevel: failed.thinkingLevel,
+    ...(failed.requestedThinking !== undefined ? { requestedThinking: failed.requestedThinking } : {}),
   };
 }
 

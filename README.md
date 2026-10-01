@@ -106,7 +106,7 @@ The knobs and their built-in defaults:
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level when neither the call nor the role specifies one |
 
-Read `dispatchDefaultModel`/`dispatchDefaultThinkingLevel` show `(inherit)` — the main session's model/level — until overridden. Dispatch precedence is: per-call override > role declaration > config default > main-session inheritance.
+Read `dispatchDefaultModel`/`dispatchDefaultThinkingLevel` show `(inherit)` — the main session's model/level — until overridden. Dispatch precedence is: per-call override > role declaration > config default > main-session inheritance. A role that pins its own model is not exempt from *explicit* levels — for it only the inherited layer is skipped. Before dispatch, the requested level is pre-clamped to the target model's capability (same clamp the child applies); a run records both the requested and effective levels, and the usage line annotates the difference when they diverge (`high (req: xhigh)`).
 
 Drive it from the `/subagents` command (also under the menu's "Settings…" entry). The command argument-completes verbs, config keys, thinking levels, run ids, and — for `dispatchDefaultModel` — only the models from `~/.pi/agent/models.json` whose provider has working credentials; the menu's model picker lists the same registry instead of asking for free text:
 

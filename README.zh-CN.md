@@ -106,7 +106,7 @@ pi install <本仓库路径>
 | `dispatchDefaultModel` | (继承) | 当调用与角色都未指定时的默认 `provider/id` |
 | `dispatchDefaultThinkingLevel` | (继承) | 当调用与角色都未指定时的默认思考档位 |
 
-`dispatchDefaultModel`/`dispatchDefaultThinkingLevel` 显示 `(inherit)`（= 继承主会话的模型/档位）。派发优先级：per-call override > 角色声明 > 配置默认 > 主会话继承。
+`dispatchDefaultModel`/`dispatchDefaultThinkingLevel` 显示 `(inherit)`（= 继承主会话的模型/档位）。派发优先级：per-call override > 角色声明 > 配置默认 > 主会话继承。自带 model 的角色不受显式档位的豁免——对它跳过的只是继承层。派发前会把请求档位按目标模型能力预 clamp（与子进程同一套 clamp）；run 记录请求档位与生效档位双值，两者不一致时用量行标注 `high (req: xhigh)`。
 
 通过 `/subagents` 命令驱动（也在菜单的 "Settings…" 入口里）。该命令会为动词、config 子动词、config 键、思考档位、run id 以及 `dispatchDefaultModel` 的模型提供补全——模型只列出 `~/.pi/agent/models.json` 里已配 key/已登录的 provider；菜单的模型选择器同样取自这份列表（而非自由输入）：
 

@@ -30,6 +30,8 @@ export interface SingleResult {
   model?: string;
   /** Resolved dispatch thinking level the spawn adapter pre-set; undefined when never pinned. */
   thinkingLevel?: string;
+  /** Requested level before clamping, when a level was requested. */
+  requestedThinking?: string;
   stopReason?: string;
   errorMessage?: string;
   step?: number;
@@ -65,6 +67,8 @@ export function createResultAccumulator(opts: {
    * `default`.
    */
   thinkingLevel?: string;
+  /** Requested level before clamping, when a level was requested (ADR 0018). */
+  requestedThinking?: string;
   /** Fired once per dispatched event (message_end / tool_result_end) with the partial result. */
   onProgress?: (partial: SingleResult) => void;
 }): BlockingResultAccumulator {
@@ -78,6 +82,7 @@ export function createResultAccumulator(opts: {
     usage: emptyUsage(),
     model: opts.model,
     thinkingLevel: opts.thinkingLevel,
+    requestedThinking: opts.requestedThinking,
     step: opts.step,
   };
 

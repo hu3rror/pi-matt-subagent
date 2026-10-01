@@ -37,6 +37,7 @@ import {
   parseConfigFile,
   parseConfigSetValue,
   parseSubagentsArgs,
+  planRunThinking,
   readLogTail,
   researchStatusContent,
   RESEARCH_FULL_PARAMS,
@@ -889,8 +890,13 @@ test("runBackgroundResearch unrefs the wall-clock timer so it never holds the ho
 });
 
 // S8 — resolveThinkingLevel
-test("resolveThinkingLevel returns undefined when the agent pins its own model", () => {
-  assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), undefined);
+test("resolveThinkingLevel skips only the inherited layer for model-pinned agents", () => {
+  // explicit layers survive: role and config levels beat the model's default
+  assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low", inherited: "high" }), "low");
+  assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", configLevel: "low", inherited: "high" }), "medium");
+  // nothing explicit: the model-pinned shortcut still returns undefined
+  assert.equal(resolveThinkingLevel({ hasModel: true, inherited: "high" }), undefined);
   assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
 });
 
@@ -906,6 +912,7 @@ test("resolveThinkingLevel prefers a per-call override over role and inherited l
 
 test("resolveThinkingLevel falls back to the role level, then the inherited level", () => {
   assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
 });
@@ -1209,6 +1216,28 @@ test("formatRunSnapshot shows the dispatched model and thinking level for blocki
   assert.ok(text.includes("(sensenova) deepseek-flash • medium"), "model + resolved thinking level");
 });
 
+// ADR 0018 — background runs carry no usage; the snapshot still surfaces the
+// dispatched model + effective level, with the clamp annotation.
+test("formatRunSnapshot annotates a clamped background run without usage", () => {
+  const runs: RunEntry[] = [
+    {
+      id: "a",
+      role: "researcher",
+      source: "embedded",
+      channel: "background",
+      status: "succeeded",
+      startedAt: 0,
+      findingsPath: "/tmp/f.md",
+      model: "openai/gpt-x",
+      thinkingLevel: "high",
+      requestedThinking: "xhigh",
+    },
+  ];
+  const text = formatRunSnapshot(runs, 1000);
+  assert.ok(text.includes("model: (openai) gpt-x • high (req: xhigh)"), "model/thinking row with clamp annotation");
+  assert.ok(text.includes("/tmp/f.md"), "findings path still shown");
+});
+
 test("formatRunSnapshot renders an unpinned thinking level as default", () => {
   const runs: RunEntry[] = [
     {
@@ -1510,6 +1539,61 @@ test("formatModelSegment renders pi's footer model style with the thinking level
   assert.equal(formatModelSegment("prov/", "high"), "prov • high", "a trailing slash never renders a broken segment");
 });
 
+// ADR 0018 — clamp transparency: a run whose requested thinking level was
+// clamped by the model records both; the usage line annotates the clamp and
+// stays byte-identical when the level was not clamped (or never requested).
+test("planRunThinking returns undefined without a request (old no-\u002d-thinking path unchanged)", () => {
+  const neverCalled = () => {
+    throw new Error("clamp must not run without a request");
+  };
+  assert.equal(planRunThinking(undefined, neverCalled), undefined);
+});
+
+test("planRunThinking records the requested/effective pair through the clamp", () => {
+  const calls: string[] = [];
+  const clamp = (level: string) => {
+    calls.push(level);
+    return level === "xhigh" ? "high" : level;
+  };
+  assert.deepEqual(planRunThinking("xhigh", clamp), { requested: "xhigh", actual: "high" });
+  assert.deepEqual(planRunThinking("medium", clamp), { requested: "medium", actual: "medium" });
+  assert.deepEqual(calls, ["xhigh", "medium"], "the clamp runs exactly once per request");
+});
+
+test("formatModelSegment annotates a clamped level and stays clean otherwise", () => {
+  assert.equal(
+    formatModelSegment("openai/gpt-x", "high", "xhigh"),
+    "(openai) gpt-x • high (req: xhigh)",
+    "differing requested level is annotated",
+  );
+  assert.equal(
+    formatModelSegment("openai/gpt-x", "high", "high"),
+    "(openai) gpt-x • high",
+    "an accepted level has no suffix",
+  );
+  assert.equal(
+    formatModelSegment("openai/gpt-x", "medium"),
+    "(openai) gpt-x • medium",
+    "a run without a request has no suffix (old rendering byte-identical)",
+  );
+  assert.equal(
+    formatUsageLine(
+      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+      { model: "openai/gpt-x", thinking: "high", requestedThinking: "xhigh" },
+    ),
+    "1 turn (openai) gpt-x • high (req: xhigh)",
+    "formatUsageLine threads the annotation through",
+  );
+  assert.equal(
+    formatUsageLine(
+      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+      { model: "openai/gpt-x", thinking: "medium", requestedThinking: "medium" },
+    ),
+    "1 turn (openai) gpt-x • medium",
+    "formatUsageLine stays byte-identical when the level was accepted",
+  );
+});
+
 // S20 — run management (D6): prune/remove, args. Kill moved from pid/OS-signal
 // to aborting the in-process child (ADR 0013), so there is no pid plumbing to
 // assert here — the runner's abort-signal test covers the kill semantics.
@@ -1733,7 +1817,8 @@ test("resolveThinkingLevel inserts the config level between role and inherited",
   assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: undefined, configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: false, override: "off", configLevel: "low", inherited: "high" }), "off");
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", inherited: "high" }), "medium");
-  assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low" }), undefined, "model-pinned agent still not forced");
+  assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low" }), "low", "the config knob applies to model-pinned agents");
+  assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: undefined }), undefined, "nothing explicit stays unforced");
 });
 
 test("parseSubagentsArgs parses the config sub-verb forms", () => {
