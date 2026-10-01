@@ -10,7 +10,7 @@ The five canonical triage roles use the default labels: `needs-triage`, `needs-i
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 ## Releases (npm)
 

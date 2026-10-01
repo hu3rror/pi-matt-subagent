@@ -136,7 +136,7 @@ prompts/                 the four slash-command templates
 docs/adr/                decisions: dual channel, tool-name resolution, research redesign (push
                          delivery, wall-clock cap), run registry + management, input escape
                          hatch, coexistence stance, usage-line model + thinking level
-CONTEXT.md               domain glossary (subagent, role, blocking, background, push, ...)
+GLOSSARY.md             domain glossary (subagent, role, blocking, background, push, ...)
 ```
 
 Two decisions worth knowing about:

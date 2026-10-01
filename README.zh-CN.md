@@ -134,7 +134,7 @@ scripts/                 token 基准（Seam E）+ 测量扩展 + push-e2e / blo
 prompts/                 四个 slash command 模板
 docs/adr/                决策记录：双通道、工具名归一化、research 重构（推送交付、墙钟上限）、
                          运行注册表 + 运行管理、input 逃生舱、共存立场、用量行的模型与思考档位
-CONTEXT.md               领域词汇表（subagent、role、blocking、background、push、input-JSON……）
+GLOSSARY.md              领域词汇表（subagent、role、blocking、background、push、input-JSON……）
 ```
 
 两个值得知道的决策：

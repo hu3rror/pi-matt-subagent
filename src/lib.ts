@@ -680,7 +680,7 @@ Output:
 4. Dependency strategy and adapters.
 5. Trade-offs — where leverage is high, where it is thin.
 
-Name concepts using the brief's architecture vocabulary and the project's CONTEXT.md domain vocabulary.`,
+Name concepts using the brief's architecture vocabulary and the project's GLOSSARY.md domain vocabulary.`,
   },
 
   "architecture-scout": {
@@ -1026,7 +1026,7 @@ export interface ResearchChildSession {
    * full teed log, so a stream that outlives `done` would delay the push
    * indefinitely. Kill paths (wall-clock, manual) do not rely on this: the
    * runner bounds their drain, so the push arrives even on a stream that
-   * never ends (see `push` in CONTEXT.md).
+   * never ends (see `push` in GLOSSARY.md).
    */
   done: Promise<void>;
   /** Aborts the in-process child (wall-clock kill and manual kill share this path). */
