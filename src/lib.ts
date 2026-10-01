@@ -718,6 +718,21 @@ export function buildSubagentEnv(base: NodeJS.ProcessEnv, parentSessionId?: stri
   return { ...base, [SUBAGENT_PARENT_SESSION_ENV]: parentSessionId };
 }
 
+/**
+ * `research`'s registered output schema (ADR 0017): the machine-readable
+ * receipt returned as `structuredContent` on every successful call — exactly
+ * the three string fields of `ResearchHandle`, mirrored from the same object
+ * as `details`. Declared separately from the parameter schemas so the
+ * model-facing surface (`description` + `parameters`) is untouched: pi's
+ * provider layer never serializes `outputSchema`, so the token-regression
+ * guard (which measures only the parameter surface) is unaffected.
+ */
+export const RESEARCH_RESULT_SCHEMA = Type.Object({
+  researchId: Type.String({ description: "Unique id of the background research run." }),
+  findingsPath: Type.String({ description: "Absolute path where the researcher writes cited findings (Markdown)." }),
+  logPath: Type.String({ description: "Per-run log of the in-process research child session." }),
+});
+
 export interface ResearchHandle {
   researchId: string;
   findingsPath: string;
@@ -1469,7 +1484,9 @@ export function blockingRunStatus(result: {
 /**
  * The tool-error axis: whether a blocking result counts as a failure for the
  * throw path (single/chain) and for failure display. Abort is an error here
- * even though it is its own registry status (ADR 0010: blocking aborts throw).
+ * even though it is its own registry status (ADR 0016: blocking aborts
+ * throw at the orchestrator; the tool boundary converts them into returned
+ * error results).
  */
 export function isToolError(result: { exitCode: number; stopReason?: string }): boolean {
   return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";

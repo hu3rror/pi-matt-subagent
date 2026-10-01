@@ -44,7 +44,7 @@ Branches that now return `isError: true` instead of a success-marked result:
 - subagent invalid-parameters (no/conflicting mode) — success-marked text previously; the recovery text ("Available agents: …") is kept byte-identical;
 - subagent project-agent refusal ("Canceled: …") — success-marked text previously.
 
-Research's not-completed branches (project-agent refusal, unresolvable `model` override, runner-startup failure) migrate with the structured-receipt adoption (ADR 0017); until then they keep their current signaling.
+Research's not-completed branches (project-agent refusal, unresolvable `model` override, runner-startup failure) migrate with the structured-receipt adoption (ADR 0017): each now returns `isError: true` with byte-identical content; the startup-failure branch still settles the registry entry `failed` first and pushes nothing.
 
 ## Considered options
 

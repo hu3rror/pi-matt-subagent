@@ -54,6 +54,7 @@ import {
   readLogTail,
   researchStatusContent,
   RESEARCH_FULL_PARAMS,
+  RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
   resolveThinkingLevel,
@@ -937,6 +938,11 @@ export default function (pi: ExtensionAPI) {
     label: "Research",
     description: RESEARCH_TOOL_DESCRIPTION,
     parameters: RESEARCH_TOOL_PARAMS,
+    // ADR 0017 — the machine-readable receipt shape for successful calls:
+    // codemode scripts receive `structuredContent` instead of the text
+    // content; the provider layer never serializes this schema, so the
+    // model-facing token surface is unchanged.
+    outputSchema: RESEARCH_RESULT_SCHEMA,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       footerUi = ctx as SubagentsUi;
@@ -964,7 +970,14 @@ export default function (pi: ExtensionAPI) {
         "Run project-local researcher?",
       );
       if (!approved) {
-        return { content: [{ type: "text", text: "Canceled: project-local agents not approved." }], details: undefined };
+        // ADR 0016/0017 (3b) — a refused run is a not-completed call:
+        // error-marked, content unchanged (no run is registered, so the
+        // result carries no receipt and no details).
+        return {
+          content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+          details: undefined,
+          isError: true,
+        };
       }
 
       // The in-process child needs a Model object, not a provider/id string:
@@ -978,9 +991,13 @@ export default function (pi: ExtensionAPI) {
             ? ctx.modelRegistry.find(merged.model.slice(0, slash), merged.model.slice(slash + 1))
             : undefined;
         if (!found) {
+          // ADR 0016/0017 (3b) — an unresolvable model override is a
+          // not-completed call: error-marked, content unchanged (no run is
+          // registered, so no receipt and no details).
           return {
             content: [{ type: "text", text: `Unknown model override: ${merged.model}` }],
             details: undefined,
+            isError: true,
           };
         }
         childModel = found;
@@ -1048,12 +1065,17 @@ export default function (pi: ExtensionAPI) {
         // A runner-level failure after the run was registered (e.g. the tmp
         // dir could not be created) must not leave a `running` registry entry
         // or a leaked abort handle: settle the run failed and release the
-        // controller before the error escapes to the harness. No push here —
-        // the run never started, and the thrown tool error is the model's
-        // signal (ADR 0010).
+        // controller first. The run never started, so nothing is pushed (it
+        // has no log); the not-completed call returns an error-marked result
+        // whose content is the runner error's message — the same text the
+        // harness derived from the former throw (ADR 0016/0017).
         researchAborts.delete(runId);
         updateRun(runId, { status: "failed" });
-        throw err;
+        return {
+          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+          details: undefined,
+          isError: true,
+        };
       }
       // logPath is only known after the runner allocates its tmp dir; the run
       // may already be terminal, and a frozen-update error must not surface as
@@ -1072,6 +1094,11 @@ export default function (pi: ExtensionAPI) {
           },
         ],
         details: handle,
+        // ADR 0017 — the machine-readable receipt mirrors the handle exactly
+        // (the same object as `details`), so codemode consumers get a
+        // structured receipt without parsing the text. Error-marked branches
+        // never carry one.
+        structuredContent: { ...handle },
       };
     },
 

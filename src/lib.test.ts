@@ -31,6 +31,7 @@ import {
   researchStatusContent,
   RESEARCH_FULL_PARAMS,
   RESEARCH_INPUT_KEYS,
+  RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
   resolveRole,
@@ -1289,7 +1290,8 @@ test("readLogTail honors an injected fs surface", () => {
 
 // S19 — outcome mapping (D3). Two explicit axes: the registry-status axis
 // (blockingRunStatus keeps abort distinct) and the tool-error axis
-// (isToolError folds abort in for the throw path, per ADR 0010).
+// (isToolError folds abort in for the orchestrator throw path, per ADR 0016's
+// conversion point).
 test("blockingRunStatus maps a single result to a run status", () => {
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "end" }), "succeeded");
   assert.equal(blockingRunStatus({ exitCode: 0 }), "succeeded");
@@ -1695,6 +1697,23 @@ test("research schema keeps its public fields and gains the input field, budget 
     new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "input"]),
   );
   assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
+});
+
+test("research result schema is exactly the handle shape: three string fields, all required", () => {
+  const props = RESEARCH_RESULT_SCHEMA.properties ?? {};
+  assert.deepEqual(
+    new Set(Object.keys(props)),
+    new Set(["researchId", "findingsPath", "logPath"]),
+    "no field beyond the handle's three",
+  );
+  for (const prop of Object.values(props)) {
+    assert.equal((prop as { type?: unknown }).type, "string", "every field is a string");
+  }
+  assert.deepEqual(
+    new Set(RESEARCH_RESULT_SCHEMA.required ?? []),
+    new Set(["researchId", "findingsPath", "logPath"]),
+    "every field is required",
+  );
 });
 
 test("hidden parameters live only in the full schemas, never in the public ones", () => {

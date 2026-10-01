@@ -2,8 +2,9 @@
  * Pure blocking orchestration: single / parallel / chain plans driven over a
  * Runner seam against the real run registry. Zero pi-runtime imports — the
  * registry bookkeeping (register → status flips → terminal patch → abort
- * sweep), the failure exits (tool error throws per ADR 0010), and the
- * tool-result content assembly all live here, so every mode's observable
+ * sweep), the failure exits (tool error throws per ADR 0016's conversion
+ * point — the orchestrator keeps throwing, the tool boundary converts), and
+ * the tool-result content assembly all live here, so every mode's observable
  * behavior is pinned under `node --test` with a fake runner.
  */
 
@@ -124,10 +125,11 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
  * Runs one validated blocking plan over the runner seam, owning the registry
  * flow (register → live progress → terminal patch → abort sweep) and the
  * failure exits. Observable behavior matches the previous inline extension
- * code: single/chain failures throw the tool error (ADR 0010), parallel
- * aggregates failed tasks into the summary, and an abort marks the affected
- * runs aborted before rethrowing. `onToolUpdate` mirrors the tool's live
- * onUpdate events; the registry's onChange hook drives the footer.
+ * code: single/chain failures throw the tool error (ADR 0016 conversion
+ * point — the boundary converts the throw into a returned error result),
+ * parallel aggregates failed tasks into the summary, and an abort marks the
+ * affected runs aborted before rethrowing. `onToolUpdate` mirrors the tool's
+ * live onUpdate events; the registry's onChange hook drives the footer.
  */
 export async function runBlockingPlan(opts: {
   plan: BlockingPlan;

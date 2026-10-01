@@ -90,8 +90,12 @@ _Avoid_: status panel, 面板
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **tool error（工具错误信号）**:
-工具调用未完成时通过**返回** `isError: true` 显式报错（pi ≥0.99.1 起 harness 认可返回载体；此前只从 throw 派生，返回字段是死代码——ADR 0010 该版本前提已失效，被 ADR 0016 supersede）。覆盖规则：**调用完成 → 成功结果（声明处带结构化 receipt）；调用未完成 → `isError: true`，文案逐字不变**。subagent 的未完成分支：blocking 失败（single 失败 / chain 失败步 / 中止，`aborted` 与 runSingleAgent 的 abort throw 一致）、参数校验失败（含 Available agents 恢复文案）、project-agent 拒绝；转换点在工具边界（try/catch 包编排层，编排层与 `formatBlockingToolError` 仍 throw、测试钉死该契约），失败结果的 `details.error` 携带该 run 终态信息（status/agent/source/usage/model/thinking，由纯函数 `toolErrorDetails` 从 registry 本次调用增量映射，renderResult 渲染富错误行——Q2=b）。明文例外：parallel 聚合保持成功语义（部分失败是交付物）、input-JSON 解析保持 loud throw（ADR 0011）。research 的未完成分支（拒批 / 未知 model / 启动失败）随结构化 receipt 变更迁移到本规则（ADR 0017），此前仍走原信号。
+工具调用未完成时通过**返回** `isError: true` 显式报错（pi ≥0.99.1 起 harness 认可返回载体；此前只从 throw 派生，返回字段是死代码——ADR 0010 该版本前提已失效，被 ADR 0016 supersede）。覆盖规则：**调用完成 → 成功结果（声明处带结构化 receipt）；调用未完成 → `isError: true`，文案逐字不变**。subagent 的未完成分支：blocking 失败（single 失败 / chain 失败步 / 中止，`aborted` 与 runSingleAgent 的 abort throw 一致）、参数校验失败（含 Available agents 恢复文案）、project-agent 拒绝；转换点在工具边界（try/catch 包编排层，编排层与 `formatBlockingToolError` 仍 throw、测试钉死该契约），失败结果的 `details.error` 携带该 run 终态信息（status/agent/source/usage/model/thinking，由纯函数 `toolErrorDetails` 从 registry 本次调用增量映射，renderResult 渲染富错误行——Q2=b）。明文例外：parallel 聚合保持成功语义（部分失败是交付物）、input-JSON 解析保持 loud throw（ADR 0011）。research 的未完成分支（拒批 / 未知 model / 启动失败）已随结构化 receipt 一并迁移到本规则（ADR 0017）：同样返回 `isError: true`、文案逐字不变；启动失败先落 registry `failed`、不推送（run 从未启动、无 log）。成功调用声明 `outputSchema` 并返回 `structuredContent`（见 structuredContent 词条），错误分支不带 receipt。
 _Avoid_: throw 为载体, 假成功（未完成调用却成功标记）
+
+**structuredContent（结构化结果）**:
+声明 `outputSchema` 的工具在成功结果里返回的机器可读字段（pi ≥0.99.1，`AgentToolResult.structuredContent`）；codemode 脚本等程序化消费方直接拿结构化 receipt，无需解析文本。本扩展仅 research 声明（ADR 0017）：`RESEARCH_RESULT_SCHEMA` = TypeBox of `ResearchHandle`（`researchId` / `findingsPath` / `logPath`，全 string、全必填），成功分支 `structuredContent` 与 `details` 同源（同一对象内容）；未完成（错误标记）分支不带。`outputSchema` 不进 provider 层——模型面 token 不受影响（token benchmark 只量 description + parameters；内置 bash 亦声明）。subagent 不声明（无消费方，保 token 面）。
+_Avoid_: 无 schema 声明却返回结构化字段，声明后成功分支不带回
 
 **input-JSON**:
 两个工具各带的可选 `input` 字段的契约（ADR 0011）：值必须是 JSON 对象字符串，携带公开 schema 未暴露但运行时已支持的参数（`subagent`: `model`/`thinkingOverride`；`research`: `model`/`maxWallClockMs`）。合并规则沿用轻量 subagents 门面的通用做法：直接字段覆盖 JSON 同名键（`{...parsed, ...direct}`）；缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
