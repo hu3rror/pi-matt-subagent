@@ -26,6 +26,7 @@ import {
   formatRunSnapshot,
   formatUsageLine,
   getPiInvocation,
+  getConfigValue,
   getResultOutput,
   isToolError,
   lastAssistantText,
@@ -46,6 +47,7 @@ import {
   resolveTools,
   runBackgroundResearch,
   serializeConfig,
+  setConfigValue,
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
@@ -1681,6 +1683,17 @@ test("configToLimits maps the three blocking limits from the effective config", 
   assert.deepEqual(configToLimits(c), { maxTasksPerCall: 12, maxConcurrency: 3, perTaskOutputCap: 1000 });
 });
 
+test("setConfigValue replaces one knob immutably and getConfigValue reads it", () => {
+  const base = defaultConfig();
+  const next = setConfigValue(base, "maxConcurrency", 7);
+  assert.equal(next.maxConcurrency, 7);
+  assert.equal(base.maxConcurrency, 4, "the source config is untouched");
+  assert.equal(getConfigValue(next, "maxConcurrency"), 7);
+  assert.equal(getConfigValue(base, "dispatchDefaultThinkingLevel"), undefined);
+  const cleared = setConfigValue(next, "dispatchDefaultThinkingLevel", undefined);
+  assert.equal(getConfigValue(cleared, "dispatchDefaultThinkingLevel"), undefined);
+});
+
 test("buildResearchFullParams ties the maxWallClockMs maximum to the given ceiling", () => {
   const schema = buildResearchFullParams(120 * 60 * 1000);
   const direct = { task: "t", findingsPath: "f.md" };
@@ -1704,6 +1717,7 @@ test("resolveThinkingLevel inserts the config level between role and inherited",
 
 test("parseSubagentsArgs parses the config sub-verb forms", () => {
   assert.deepEqual(parseSubagentsArgs("config"), { action: "config", verb: "show" });
+  assert.deepEqual(parseSubagentsArgs("config show"), { action: "config", verb: "show" });
   assert.deepEqual(parseSubagentsArgs("config reset"), { action: "config", verb: "reset" });
   assert.deepEqual(parseSubagentsArgs("config set maxConcurrency 6"), {
     action: "config",

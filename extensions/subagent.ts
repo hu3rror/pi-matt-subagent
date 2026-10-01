@@ -69,6 +69,7 @@ import {
   RUN_STATUS_ICONS,
   scopeAllowsProject,
   serializeConfig,
+  setConfigValue,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
@@ -79,7 +80,6 @@ import {
   type AgentFrontmatter,
   type ConfigKey,
   type ConfigStatus,
-  type EffectiveConfig,
   type FrontmatterParser,
   type ResearchHandle,
   type ResearchChildSession,
@@ -775,9 +775,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(parsed.reason, "error");
       return;
     }
-    const next = { ...readConfigStatus().effective } as EffectiveConfig;
-    const target = next as unknown as Record<string, unknown>;
-    target[key] = parsed.value;
+    const next = setConfigValue(readConfigStatus().effective, key, parsed.value);
     await writeConfig(serializeConfig(next));
     ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key, readConfigStatus())}`, "info");
   };

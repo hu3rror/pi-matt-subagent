@@ -67,15 +67,11 @@ const TEE_DRAIN_BOUND_MS = 500;
 // ---------------------------------------------------------------------------
 // Extension config surface (ADR 0018)
 //   A user-level, lazily-created JSON (`~/.pi/agent/extensions/` +
-//   `CONFIG_FILE_NAME`) exposing seven tunable knobs. The file is never
-//   created by loading the extension (only `set`/`reset` writes it), and
-//   deleting it restores all defaults. The decode/validate/degrade lime lives
-//   here (runtime-free) so the whole surface is nailed with node --test and
-//   the extension stays a thin wiring shell. Reading is per-config-key
-//   structural validation (not one strict TypeBox object): unknown keys are
-//   ignored and a structurally-invalid known key falls back to that key's
-//   built-in default and is marked degraded (vs config explicit-null/typo
-//   being the user's own fault when "valid but extreme").
+//   `CONFIG_FILE_NAME`) exposing seven tunable knobs; the decode/validate/
+//   degrade and the optional-dispatch-knob handling live here (runtime-free)
+//   so the whole surface is pinned with node --test and the extension stays a
+//   thin wiring shell. Design rationale (per-key decode vs one strict object,
+//   the dispatch precedence layer, wall-clock ceiling) is in docs/adr/0018.
 // ---------------------------------------------------------------------------
 
 export const CONFIG_FILE_NAME = "matt-subagent.json";
@@ -164,8 +160,8 @@ function decodeConfigValue(key: ConfigKey, value: unknown): number | string | Th
 export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
   const present = new Set<ConfigKey>();
   const degraded = new Set<ConfigKey>();
-  const blank: ConfigStatus = { effective: defaultConfig(), present, degraded, parseError: false };
-  if (raw === undefined || raw === null || raw.trim() === "") return blank;
+  const noFileStatus: ConfigStatus = { effective: defaultConfig(), present, degraded, parseError: false };
+  if (raw === undefined || raw === null || raw.trim() === "") return noFileStatus;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -176,13 +172,12 @@ export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
     return { effective: defaultConfig(), present, degraded, parseError: true };
   }
   const obj = parsed as Record<string, unknown>;
-  const effective = defaultConfig();
+  let effective = defaultConfig();
   for (const key of CONFIG_KEYS) {
     if (!(key in obj)) continue;
     const decoded = decodeConfigValue(key, obj[key]);
-    const target = effective as unknown as Record<string, unknown>;
     if (decoded !== undefined) {
-      target[key] = decoded;
+      effective = setConfigValue(effective, key, decoded);
       present.add(key);
     } else if (key === "dispatchDefaultModel" || key === "dispatchDefaultThinkingLevel") {
       if (obj[key] === null) {
@@ -250,6 +245,20 @@ export interface ConfigBlockingLimits {
   perTaskOutputCap: number;
 }
 
+type ConfigValue = number | string | ThinkingLevel | undefined;
+
+/** Returns one knob's effective value off a config without indexing casts. */
+export function getConfigValue(cfg: EffectiveConfig, key: ConfigKey): ConfigValue {
+  return (cfg as unknown as Record<string, unknown>)[key] as ConfigValue;
+}
+
+/** Returns a NEW effective config with one knob replaced (call sites stay cast-free and immutable). */
+export function setConfigValue(cfg: EffectiveConfig, key: ConfigKey, value: ConfigValue): EffectiveConfig {
+  const out: EffectiveConfig = { ...cfg };
+  (out as unknown as Record<string, unknown>)[key] = value;
+  return out;
+}
+
 /** Maps the three effective blocking knobs onto the orchestration limits. */
 export function configToLimits(cfg: EffectiveConfig): ConfigBlockingLimits {
   return {
@@ -267,14 +276,14 @@ export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
       ? (status.effective.dispatchDefaultModel ?? "(inherit)")
       : key === "dispatchDefaultThinkingLevel"
         ? (status.effective.dispatchDefaultThinkingLevel ?? "(inherit)")
-        : String((status.effective as unknown as Record<string, unknown>)[key]);
+        : String(getConfigValue(status.effective, key));
   return `${key} = ${value} [${marker}]`;
 }
 
 /** The `/subagents config` show view (pure text; the command notifies it). */
 export function formatConfigOverview(status: ConfigStatus, configPath: string, exists: boolean): string {
   const lines: string[] = [
-    `Config file: ${configPath}${exists ? "" : " (not created — all defaults)"}`, // prettier
+    `Config file: ${configPath}${exists ? "" : " (not created — all defaults)"}`,
   ];
   if (status.parseError) lines.push("⚠ config JSON is unparseable — using all defaults. Fix or delete the file.");
   for (const key of CONFIG_KEYS) {
@@ -1904,7 +1913,7 @@ export function parseSubagentsArgs(args: string): SubagentsCommand {
     return { action: verb, id: rest[0] };
   }
   if (verb === "config") {
-    if (rest.length === 0) return { action: "config", verb: "show" };
+    if (rest.length === 0 || (rest[0] === "show" && rest.length === 1)) return { action: "config", verb: "show" };
     if (rest[0] === "reset" && rest.length === 1) return { action: "config", verb: "reset" };
     if (rest[0] === "set") {
       if (rest.length < 3) return { action: "invalid", reason: "config set requires a key and a value" };
