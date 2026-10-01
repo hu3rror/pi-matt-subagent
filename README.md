@@ -115,10 +115,11 @@ Drive it from the `/subagents` command (also under the menu's "Settings…" entr
 /subagents config set maxConcurrency 6
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set dispatchDefaultModel inherit
+/subagents config reset maxConcurrency
 /subagents config reset
 ```
 
-A `set` writes the effective values to the file; the two optional dispatch knobs are omitted (not `null`) when they're left to inherit the main session. Invalid entries — bad JSON, unknown keys, wrong types, `≤0` where a positive bound applies, an unknown thinking level, an empty model string — degrade that key to its default and are flagged `[degraded]` in the config view, so a typo can't stall a session. Deleting the file is a full reset.
+A `set` writes the effective values to the file; `reset` removes one key (`config reset <key>` — back to that knob's default or `(inherit)`) or the whole file (`config reset`). The two optional dispatch knobs are omitted (not `null`) when they're left to inherit the main session. Invalid entries — bad JSON, unknown keys, wrong types, `≤0` where a positive bound applies, an unknown thinking level, an empty model string — degrade that key to its default and are flagged `[degraded]` in the config view, so a typo can't stall a session. Deleting the file is a full reset.
 
 ## Project layout
 

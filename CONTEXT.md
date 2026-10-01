@@ -94,7 +94,7 @@ _Avoid_: 思考强度, reasoning effort, thinking intensity
 _Avoid_: 设置面板, 配置文件（笼统）
 
 **config knob（配置旋钮）**:
-extension config 暴露的单个可调项，v1 七个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话）。
+extension config 暴露的单个可调项，v1 七个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存），`config reset` 重建全默认。
 _Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:

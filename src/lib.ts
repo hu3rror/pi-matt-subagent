@@ -246,6 +246,25 @@ export function serializeConfig(cfg: EffectiveConfig): string {
   return JSON.stringify(out, null, 2);
 }
 
+/**
+ * Removes one key from existing config file text, canonicalized, preserving
+ * unknown keys (they may belong to a newer version). Returns undefined when
+ * the text does not parse as an object — the caller then leaves the file
+ * untouched; a broken file is rebuilt by a full `config reset`.
+ */
+export function omitConfigKey(raw: string, key: ConfigKey): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  delete obj[key];
+  return JSON.stringify(obj, null, 2);
+}
+
 /** The three blocking knobs as a named shape (part of the config surface). */
 export interface ConfigBlockingLimits {
   maxTasksPerCall: number;
@@ -1897,7 +1916,7 @@ export type SubagentsCommand =
   | { action: "prune" }
   | { action: "config"; verb: "show" }
   | { action: "config"; verb: "set"; key: ConfigKey; value: string }
-  | { action: "config"; verb: "reset" }
+  | { action: "config"; verb: "reset"; key?: ConfigKey }
   | { action: "invalid"; reason: string };
 
 /** Parses the /subagents argument string into a command the handler can dispatch. */
@@ -1920,7 +1939,16 @@ export function parseSubagentsArgs(args: string): SubagentsCommand {
   }
   if (verb === "config") {
     if (rest.length === 0 || (rest[0] === "show" && rest.length === 1)) return { action: "config", verb: "show" };
-    if (rest[0] === "reset" && rest.length === 1) return { action: "config", verb: "reset" };
+    if (rest[0] === "reset") {
+      if (rest.length === 1) return { action: "config", verb: "reset" };
+      if (rest.length === 2) {
+        if (!(CONFIG_KEYS as readonly string[]).includes(rest[1])) {
+          return { action: "invalid", reason: `unknown config key "${rest[1]}"` };
+        }
+        return { action: "config", verb: "reset", key: rest[1] as ConfigKey };
+      }
+      return { action: "invalid", reason: `unexpected extra arguments: ${rest.slice(2).join(" ")}` };
+    }
     if (rest[0] === "set") {
       if (rest.length < 3) return { action: "invalid", reason: "config set requires a key and a value" };
       const key = rest[1] as ConfigKey;

@@ -115,10 +115,11 @@ pi install <本仓库路径>
 /subagents config set maxConcurrency 6
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set dispatchDefaultModel inherit
+/subagents config reset maxConcurrency
 /subagents config reset
 ```
 
-`set` 会把生效值写入文件；两个可选 dispatch 键在保持继承主会话时被**省略**（绝不写 `null`）。非法项——坏 JSON、未知键、类型错、正数约束下 ≤0、未知思考档位、空 model 串——会把该键降级回默认并在配置视图标记 `[degraded]`，所以手误不会弄垮会话。删除文件即完全重置。
+`set` 会把生效值写入文件；`reset` 移除单个键（`config reset <key>`——回到该旋钮的默认或 `(inherit)`）或整个文件（`config reset`）。两个可选 dispatch 键在保持继承主会话时被**省略**（绝不写 `null`）。非法项——坏 JSON、未知键、类型错、正数约束下 ≤0、未知思考档位、空 model 串——会把该键降级回默认并在配置视图标记 `[degraded]`，所以手误不会弄垮会话。删除文件即完全重置。
 
 ## 项目结构
 

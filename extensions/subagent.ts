@@ -57,6 +57,7 @@ import {
   isActiveRunStatus,
   isTerminalRunStatus,
   mergeToolParams,
+  omitConfigKey,
   parseConfigFile,
   parseConfigSetValue,
   parseSubagentsArgs,
@@ -785,6 +786,24 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify("config reset: all values back to built-in defaults", "info");
     showConfig(ctx);
   };
+  // Per-key reset removes just that knob from the file (unknown keys from
+  // newer versions survive); the read-back falls to default/inherit, so the
+  // view labels it [default]. A missing file stays untouched (no write =
+  // no lazy creation).
+  const resetConfigKey = async (ctx: SubagentsUi, key: ConfigKey) => {
+    const p = configPath();
+    if (!configFileExists()) {
+      ctx.ui.notify(`config reset ${key}: already at default`, "info");
+      return;
+    }
+    const next = omitConfigKey(fs.readFileSync(p, "utf8"), key);
+    if (next === undefined) {
+      ctx.ui.notify("config file is not valid JSON; use `config reset` to rebuild it", "error");
+      return;
+    }
+    await writeConfig(next);
+    ctx.ui.notify(`config reset ${key} → ${configKeyLabel(key, readConfigStatus())}`, "info");
+  };
   const configMenu = async (ctx: SubagentsUi) => {
     const opts: string[] = CONFIG_KEYS.map((k) => configKeyLabel(k, readConfigStatus()));
     const MENU_CONFIG_RESET = "Reset all to defaults";
@@ -797,9 +816,15 @@ export default function (pi: ExtensionAPI) {
     }
     const key = CONFIG_KEYS.find((k) => choice.startsWith(`${k} =`));
     if (!key) return;
-    // The per-key spec drives the value input: level → enum select, model →
-    // the pi model registry picker (falling back to text when no model has
-    // credentials), number → free text.
+    // Per-key actions: setting enters the kind-driven input below; resetting
+    // drops just this knob back to default/inherit.
+    const MENU_CONFIG_SET = "Set value…";
+    const MENU_CONFIG_RESET_KEY = "Reset to default";
+    const action = await ctx.ui.select(`${key}`, [MENU_CONFIG_SET, MENU_CONFIG_RESET_KEY, MENU_CONFIG_BACK]);
+    if (!action || action === MENU_CONFIG_BACK) return;
+    if (action === MENU_CONFIG_RESET_KEY) return resetConfigKey(ctx, key);
+    // Set value…: the per-key spec drives the input — level → enum select,
+    // model → pi model registry picker (text fallback), number → free text.
     const spec = configKeySpec(key);
     if (spec?.kind === "level") {
       const sel = await ctx.ui.select(`${key}`, [...THINKING_LEVELS, "inherit (clear)"]);
@@ -863,6 +888,10 @@ export default function (pi: ExtensionAPI) {
         if (tokens.length === 1) {
           return match(["show", "set", "reset"]).map((v) => ({ value: `config ${v}`, label: v }));
         }
+        if (tokens[1] === "reset" && tokens.length === 2) {
+          const keys = match([...CONFIG_KEYS]);
+          return keys.map((k) => ({ value: `config reset ${k}`, label: k }));
+        }
         if (tokens[1] === "set") {
           if (tokens.length === 2) {
             const keys = match([...CONFIG_KEYS]);
@@ -914,7 +943,7 @@ export default function (pi: ExtensionAPI) {
       if (cmd.action === "kill") return killRun(cmd.id, ctx);
       if (cmd.action === "config") {
         if (cmd.verb === "show") return showConfig(ctx);
-        if (cmd.verb === "reset") return resetConfig(ctx);
+        if (cmd.verb === "reset") return cmd.key ? resetConfigKey(ctx, cmd.key) : resetConfig(ctx);
         return setConfig(ctx, cmd.key, cmd.value);
       }
       tailRun(cmd.id, ctx);

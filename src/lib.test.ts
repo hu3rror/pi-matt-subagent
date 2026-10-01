@@ -32,6 +32,7 @@ import {
   lastAssistantText,
   lastOutputLine,
   mergeToolParams,
+  omitConfigKey,
   parseConfigFile,
   parseConfigSetValue,
   parseSubagentsArgs,
@@ -1678,6 +1679,25 @@ test("serializeConfig(defaultConfig()) omits both dispatch knobs (no null anywhe
   assert.equal(s.effective.dispatchDefaultThinkingLevel, undefined);
 });
 
+test("omitConfigKey removes one knob from file text and preserves unknown keys", () => {
+  const text = JSON.stringify({ maxTasksPerCall: 9, dispatchDefaultModel: "openai/gpt-x", futureKey: 1 });
+  const out = omitConfigKey(text, "dispatchDefaultModel");
+  assert.ok(out);
+  const parsed = JSON.parse(out);
+  assert.ok(!("dispatchDefaultModel" in parsed));
+  assert.equal(parsed.maxTasksPerCall, 9);
+  assert.equal(parsed.futureKey, 1, "unknown (newer-version) keys survive");
+  const s = parseConfigFile(out);
+  assert.ok(!s.present.has("dispatchDefaultModel"), "read-back is back to inherit");
+  assert.ok(s.present.has("maxTasksPerCall"));
+});
+
+test("omitConfigKey is undefined for unparseable or non-object text", () => {
+  assert.equal(omitConfigKey("{nope", "maxTasksPerCall"), undefined);
+  assert.equal(omitConfigKey("[1,2]", "maxTasksPerCall"), undefined);
+  assert.equal(omitConfigKey("\"str\"", "maxTasksPerCall"), undefined);
+});
+
 test("configToLimits maps the three blocking limits from the effective config", () => {
   const c = { ...defaultConfig(), maxTasksPerCall: 12, maxConcurrency: 3, perTaskOutputCap: 1000 };
   assert.deepEqual(configToLimits(c), { maxTasksPerCall: 12, maxConcurrency: 3, perTaskOutputCap: 1000 });
@@ -1735,6 +1755,18 @@ test("parseSubagentsArgs parses the config sub-verb forms", () => {
   assert.equal(parseSubagentsArgs("config set maxConcurrency").action, "invalid");
   assert.equal(parseSubagentsArgs("config set nope 6").action, "invalid");
   assert.equal(parseSubagentsArgs("config set extra bits").action, "invalid");
+  assert.deepEqual(parseSubagentsArgs("config reset maxConcurrency"), {
+    action: "config",
+    verb: "reset",
+    key: "maxConcurrency",
+  });
+  assert.deepEqual(parseSubagentsArgs("config reset dispatchDefaultModel"), {
+    action: "config",
+    verb: "reset",
+    key: "dispatchDefaultModel",
+  });
+  assert.equal(parseSubagentsArgs("config reset nope").action, "invalid");
+  assert.equal(parseSubagentsArgs("config reset a b").action, "invalid");
 });
 
 test("formatConfigOverview marks each key default/customized/degraded and shows the path", () => {
