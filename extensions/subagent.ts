@@ -930,9 +930,10 @@ export default function (pi: ExtensionAPI) {
 
       let suggestions: Array<{ value: string; label: string; description?: string }> = [];
       if (fixed.length === 0) {
-        // Verb position; a fully-typed "config" (with or without space) moves
-        // on to its sub-verbs instead of re-suggesting itself.
-        if (partial === "config" || partial === "") {
+        // Verb position: an empty or partial token trims against the five
+        // verbs; a fully typed "config" (with or without trailing space)
+        // moves on to its sub-verbs instead of re-suggesting itself.
+        if (partial === "config") {
           suggestions = SUB_VERBS.map((v) => suggest(`config ${v}`, v));
         } else {
           suggestions = match(VERBS).map((v) => suggest(v, v));
@@ -961,7 +962,7 @@ export default function (pi: ExtensionAPI) {
             );
           }
         }
-      } else if ((fixed[0] === "kill" || fixed[0] === "tail") && fixed.length >= 1) {
+      } else if (fixed[0] === "kill" || fixed[0] === "tail") {
         const ids = match(subagentRuns.snapshot().map((r) => r.id));
         suggestions = ids.map((id) => suggest(`${fixed[0]} ${id}`, id));
       }
