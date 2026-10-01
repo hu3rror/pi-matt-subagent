@@ -578,6 +578,14 @@ export default function (pi: ExtensionAPI) {
   // aborts the in-process child session; the runner resolves the run `aborted`
   // and pushes the outcome (no OS signals, no pid reuse hazard).
   const researchAborts = new Map<string, AbortController>();
+  // Configured/logged-in models (provider/id) snapshotted on session start so
+  // `/subagents` autocomplete and the model picker list only models whose
+  // provider has working credentials — the same source pi's own /model uses.
+  let availableModels: { ref: string; provider: string }[] = [];
+
+  pi.on("session_start", (_event, ctx) => {
+    availableModels = ctx.modelRegistry.getAvailable().map((m) => ({ ref: `${m.provider}/${m.id}`, provider: m.provider }));
+  });
   // Registry update that tolerates the already-terminal race: the first
   // terminal status wins, and a late backfill (logPath) can race the push, so
   // a frozen-update error must never surface as a tool error.
@@ -795,6 +803,17 @@ export default function (pi: ExtensionAPI) {
       if (sel === undefined) return;
       return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
     }
+    if (key === "dispatchDefaultModel") {
+      // Pick from configured/logged-in models (the pi model registry), not a
+      // free-text provider/id. Falling back to manual input when no model has
+      // credentials leaves a path to set a not-yet-configured provider.
+      const refs = availableModels.map((m) => m.ref);
+      if (refs.length > 0) {
+        const sel = await ctx.ui.select(`${key}`, [...refs, "inherit (clear)"]);
+        if (sel === undefined) return;
+        return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
+      }
+    }
     const raw = await ctx.ui.input(`${key}`, "new value (inherit clears the dispatch knobs)");
     if (raw === undefined) return;
     setConfig(ctx, key, raw);
@@ -827,7 +846,56 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("subagents", {
     description:
-      "List and manage tracked subagent runs: no args opens the menu; snapshot, kill <id>, tail <id>, prune run directly",
+      "List and manage tracked subagent runs: no args opens the menu; snapshot, kill <id>, tail <id>, prune, config [set <key> <value>|reset] run directly",
+    getArgumentCompletions(argumentPrefix) {
+      // Return the full rebuilt argument string per suggestion: pi replaces the
+      // whole argument text (everything after `/subagents`) with `value`.
+      const tokens = argumentPrefix.trim().split(/\s+/).filter(Boolean);
+      const last = tokens[tokens.length - 1] ?? "";
+      const match = (arr: string[]) => arr.filter((s) => s.startsWith(last));
+      if (tokens.length === 0) {
+        return match(["snapshot", "kill", "tail", "prune", "config"]).map((v) => ({
+          value: v,
+          label: v,
+        }));
+      }
+      if (tokens[0] === "config") {
+        if (tokens.length === 1) {
+          return match(["show", "set", "reset"]).map((v) => ({ value: `config ${v}`, label: v }));
+        }
+        if (tokens[1] === "set") {
+          if (tokens.length === 2) {
+            const keys = match([...CONFIG_KEYS]);
+            return keys.map((k) => ({ value: `config set ${k}`, label: k }));
+          }
+          if (tokens[1] === "set" && tokens[2] === "dispatchDefaultModel" && tokens.length >= 3) {
+            // tokens.length===3 → no value yet (all models); ===4+ → filter by the typed value.
+            const valuePrefix = tokens.length >= 4 ? last : "";
+            const items = availableModels
+              .filter((m) => m.ref.startsWith(valuePrefix))
+              .map((m) => ({
+                value: `config set ${tokens[2]} ${m.ref}`,
+                label: m.ref,
+                description: `provider: ${m.provider}`,
+              }));
+            return items.length > 0 ? items : null;
+          }
+          if (tokens[1] === "set" && tokens[2] === "dispatchDefaultThinkingLevel" && tokens.length >= 3) {
+            const valuePrefix = tokens.length >= 4 ? last : "";
+            return match([...THINKING_LEVELS].filter((l) => l.startsWith(valuePrefix))).map((l) => ({
+              value: `config set ${tokens[2]} ${l}`,
+              label: l,
+            }));
+          }
+        }
+        return null;
+      }
+      if ((tokens[0] === "kill" || tokens[0] === "tail") && tokens.length >= 2) {
+        const ids = match(subagentRuns.snapshot().map((r) => r.id));
+        return ids.map((id) => ({ value: `${tokens[0]} ${id}`, label: id }));
+      }
+      return null;
+    },
     handler: async (args, ctx) => {
       footerUi = ctx as SubagentsUi;
       const argText = args ?? "";

@@ -108,7 +108,7 @@ The knobs and their built-in defaults:
 
 Read `dispatchDefaultModel`/`dispatchDefaultThinkingLevel` show `(inherit)` — the main session's model/level — until overridden. Dispatch precedence is: per-call override > role declaration > config default > main-session inheritance.
 
-Drive it from the `/subagents` command (also under the menu's "Settings…" entry):
+Drive it from the `/subagents` command (also under the menu's "Settings…" entry). The command argument-completes verbs, config keys, thinking levels, run ids, and — for `dispatchDefaultModel` — only the models from `~/.pi/agent/models.json` whose provider has working credentials; the menu's model picker lists the same registry instead of asking for free text:
 
 ```
 /subagents config

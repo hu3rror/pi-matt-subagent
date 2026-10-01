@@ -108,7 +108,7 @@ pi install <本仓库路径>
 
 `dispatchDefaultModel`/`dispatchDefaultThinkingLevel` 显示 `(inherit)`（= 继承主会话的模型/档位）。派发优先级：per-call override > 角色声明 > 配置默认 > 主会话继承。
 
-通过 `/subagents` 命令驱动（也在菜单的 "Settings…" 入口里）：
+通过 `/subagents` 命令驱动（也在菜单的 "Settings…" 入口里）。该命令会为动词、config 子动词、config 键、思考档位、run id 以及 `dispatchDefaultModel` 的模型提供补全——模型只列出 `~/.pi/agent/models.json` 里已配 key/已登录的 provider；菜单的模型选择器同样取自这份列表（而非自由输入）：
 
 ```
 /subagents config
