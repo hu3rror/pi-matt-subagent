@@ -1555,8 +1555,8 @@ test("planRunThinking records the requested/effective pair through the clamp", (
     calls.push(level);
     return level === "xhigh" ? "high" : level;
   };
-  assert.deepEqual(planRunThinking("xhigh", clamp), { requested: "xhigh", actual: "high" });
-  assert.deepEqual(planRunThinking("medium", clamp), { requested: "medium", actual: "medium" });
+  assert.deepEqual(planRunThinking("xhigh", clamp), { requested: "xhigh", actual: "high", clamped: true });
+  assert.deepEqual(planRunThinking("medium", clamp), { requested: "medium", actual: "medium", clamped: false });
   assert.deepEqual(calls, ["xhigh", "medium"], "the clamp runs exactly once per request");
 });
 
@@ -1575,6 +1575,11 @@ test("formatModelSegment annotates a clamped level and stays clean otherwise", (
     formatModelSegment("openai/gpt-x", "medium"),
     "(openai) gpt-x • medium",
     "a run without a request has no suffix (old rendering byte-identical)",
+  );
+  assert.equal(
+    formatModelSegment("openai/gpt-x", "off", "xhigh"),
+    "(openai) gpt-x • thinking off (req: xhigh)",
+    "pi's `thinking off` wording survives the clamp annotation",
   );
   assert.equal(
     formatUsageLine(

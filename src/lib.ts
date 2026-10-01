@@ -1299,10 +1299,7 @@ export function resolveThinkingLevel(opts: {
   configLevel?: string;
 }): string | undefined {
   if (opts.override) return opts.override;
-  // Explicit layers (role declaration, config knob) outrank a pinned model's
-  // built-in reasoning default; only the implicit inherited (main-session)
-  // layer is skipped, so a model-pinned agent with nothing explicit still runs
-  // un-touched (historical behavior) — the caller then passes no --thinking.
+  // ADR 0018: a pinned model beats only the inherited layer; explicit role/config levels apply.
   if (opts.hasModel) return opts.roleLevel ?? opts.configLevel ?? undefined;
   return opts.roleLevel ?? opts.configLevel ?? opts.inherited;
 }
@@ -1313,14 +1310,15 @@ export function resolveThinkingLevel(opts: {
  * Otherwise returns the requested level plus the effective level the clamp
  * produced (the clamp is injected; the extension binds `clampThinkingLevel`
  * to the resolved target model, so parent and child agree by construction —
- * ADR 0018 clamp transparency).
+ * ADR 0018 clamp transparency) and whether the clamp changed it.
  */
 export function planRunThinking(
   requested: string | undefined,
   clampToModel: (level: string) => string,
-): { requested: string; actual: string } | undefined {
+): { requested: string; actual: string; clamped: boolean } | undefined {
   if (requested === undefined) return undefined;
-  return { requested, actual: clampToModel(requested) };
+  const actual = clampToModel(requested);
+  return { requested, actual, clamped: actual !== requested };
 }
 
 /**
@@ -1627,11 +1625,11 @@ export function formatModelSegment(
   thinking: string | undefined,
   requestedThinking?: string,
 ): string {
-  const level = thinking ?? THINKING_UNRESOLVED_LABEL;
-  const annotated =
-    requestedThinking !== undefined && requestedThinking !== thinking ? `${level} (req: ${requestedThinking})` : level;
-  const label = annotated === "off" ? "thinking off" : annotated;
-  if (!model) return annotated === "off" ? label : `thinking:${annotated}`;
+  const base =
+    thinking === undefined ? THINKING_UNRESOLVED_LABEL : thinking === "off" ? "thinking off" : thinking;
+  const label =
+    requestedThinking !== undefined && requestedThinking !== thinking ? `${base} (req: ${requestedThinking})` : base;
+  if (!model) return label.startsWith("thinking ") ? label : `thinking:${label}`;
   const { provider, id } = splitModelRef(model);
   return `${provider ? `(${provider}) ` : ""}${id} • ${label}`;
 }
@@ -1695,7 +1693,7 @@ function formatRunRow(run: RunEntry, now: number): string[] {
       requestedThinking: run.requestedThinking,
     });
     if (u) lines.push(`  usage: ${u}`);
-  } else if (run.model || run.thinkingLevel !== undefined) {
+  } else if (run.channel === "background" && (run.model || run.thinkingLevel !== undefined)) {
     // Background runs carry no usage; still surface the dispatched model and
     // thinking level (with the clamp annotation) so the snapshot row stays
     // legible next to blocking rows (ADR 0018).

@@ -426,6 +426,16 @@ const makeModelResolver =
   };
 
 /**
+ * Plans one run's thinking pair (ADR 0018 clamp transparency): only a
+ * resolved model clamps; otherwise the request passes through unchanged and
+ * nothing extra is recorded.
+ */
+const planForRun = (requested: string | undefined, model: Model<any> | undefined) => {
+  const planned = model ? planRunThinking(requested, clampForModel(model)) : undefined;
+  return { effective: planned?.actual ?? requested, requested: planned?.requested };
+};
+
+/**
  * Decides the thinking level for one subagent run, shared by the blocking
  * runner and the background researcher: per-call override > role level >
  * config default > the inherited main-session level; undefined when the agent
@@ -462,8 +472,8 @@ async function runSingleAgent(
   agentTask: AgentTask,
   signal: AbortSignal | undefined,
   onProgress: (partial: SingleResult) => void,
-  availableToolNames?: ReadonlySet<string>,
-  resolveModel?: (ref: string) => Model<any> | undefined,
+  availableToolNames: ReadonlySet<string>,
+  resolveModel: (ref: string) => Model<any> | undefined,
 ): Promise<SingleResult> {
   const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
@@ -484,14 +494,8 @@ async function runSingleAgent(
 
   const model = agent.model ?? dispatchDefaults.model;
   const requested = resolveDispatchThinking(agent, dispatchDefaults);
-  const resolvedModel = model ? resolveModel?.(model) : undefined;
-  // Clamp transparency (ADR 0018): only a resolved model participates — an
-  // unresolvable ref (e.g. a bare role-pinned id) keeps the requested level
-  // and records nothing extra, so the record never fabricates an effective
-  // value the parent could not observe. No request stays untouched.
-  const planned = resolvedModel ? planRunThinking(requested, clampForModel(resolvedModel)) : undefined;
-  const thinking = planned?.actual ?? requested;
-  const requestedThinking = planned?.requested;
+  const resolvedModel = model ? resolveModel(model) : undefined;
+  const { effective: thinking, requested: requestedThinking } = planForRun(requested, resolvedModel);
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
@@ -1265,13 +1269,7 @@ export default function (pi: ExtensionAPI) {
         thinkingOverride: merged.thinkingLevel,
         configLevel: config.dispatchDefaultThinkingLevel,
       });
-      // Same clamp transparency as blocking (ADR 0018): pre-clamp with the
-      // resolved child model when one exists; otherwise keep the requested
-      // level and record nothing extra (no fabricated effective value). No
-      // request → nothing recorded (old path).
-      const planned = childModel ? planRunThinking(requested, clampForModel(childModel)) : undefined;
-      const thinking = planned?.actual ?? requested;
-      const requestedThinking = planned?.requested;
+      const { effective: thinking, requested: requestedThinking } = planForRun(requested, childModel);
 
       const runId = subagentRuns.register({
         role: "researcher",

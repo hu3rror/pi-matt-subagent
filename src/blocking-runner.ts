@@ -190,8 +190,8 @@ export async function runBlockingPlan(opts: {
               // Model and thinking level are pre-set by the adapter, so they can
               // land before the first assistant text does (usage cannot).
               ...(partial.model ? { model: partial.model } : {}),
-              ...(partial.thinkingLevel ? { thinkingLevel: partial.thinkingLevel } : {}),
-              ...(partial.requestedThinking ? { requestedThinking: partial.requestedThinking } : {}),
+              ...(partial.thinkingLevel !== undefined ? { thinkingLevel: partial.thinkingLevel } : {}),
+              ...(partial.requestedThinking !== undefined ? { requestedThinking: partial.requestedThinking } : {}),
             });
           }
           opts.onPartial?.(partial);
