@@ -90,7 +90,7 @@ _Avoid_: status panel, 面板
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **clamp（档位钳制）**:
-按目标模型能力映射表把请求的档位落到该模型实际使用的档位（不支持 reasoning 的模型只有 `off`）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。clamp 语义是「模型能力映射」，不是「主会话档位减一」；pi-ai 先向上找再向下找，个别模型档位表不连续时请求档也可能被抬升（如 deepseek-flash 的 `minimal→low`）。档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
+按目标模型能力映射表把请求的档位落到该模型实际使用的档位（不支持 reasoning 的模型只有 `off`）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。模型声明「支持」某档（映射到字符串）时 clamp 不介入——降级发生在 API 层；只有映射为 `null`（如 kimi-k3 的 `minimal`/`xhigh`）或无 reasoning 才触发 clamp，且 pi-ai 先向上找再向下找（kimi-k3 请求 `minimal`→`low` 抬升、请求 `xhigh`→`max`）。clamp 语义是「模型能力映射」，不是「主会话档位减一」。档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
 _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 
 **extension config（扩展配置）**:
