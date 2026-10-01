@@ -340,25 +340,25 @@ const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
 const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
 
 const TaskItem = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
-  task: Type.String({ description: "Task to delegate to the agent" }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+  agent: Type.String({ description: "Agent name" }),
+  task: Type.String({ description: "Task for the agent" }),
+  cwd: Type.Optional(Type.String({ description: "Working directory" })),
 });
 
 const ChainItem = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
-  task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+  agent: Type.String({ description: "Agent name" }),
+  task: Type.String({ description: "Task; {previous} = prior step's output" }),
+  cwd: Type.Optional(Type.String({ description: "Working directory" })),
 });
 
 const SubagentPublicFields = {
-  agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
-  task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
-  tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-  chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+  agent: Type.Optional(Type.String({ description: "Agent name (single mode)" })),
+  task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
+  tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel tasks: {agent, task}[]" })),
+  chain: Type.Optional(Type.Array(ChainItem, { description: "Sequential chain: {agent, task}[]" })),
   agentScope: Type.Optional(AgentScopeSchema),
   thinkingLevel: Type.Optional(ThinkingLevelSchema),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+  cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
 };
 
 const ResearchPublicFields = {
@@ -366,21 +366,17 @@ const ResearchPublicFields = {
   findingsPath: Type.String({
     description: "Absolute or repo-relative path where the researcher must write findings (Markdown).",
   }),
-  cwd: Type.Optional(Type.String({ description: "Working directory for the researcher process" })),
+  cwd: Type.Optional(Type.String({ description: "Working directory" })),
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
   agentScope: Type.Optional(AgentScopeSchema),
   thinkingLevel: Type.Optional(ThinkingLevelSchema),
 };
 
 const SUBAGENT_INPUT_DESCRIPTION =
-  "JSON object string carrying advanced parameters the public schema hides. " +
-  "Direct fields override same-name JSON keys. Carries: model (provider/id override for this run), " +
-  "thinkingOverride (thinking level for this run).";
+  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), thinkingOverride (thinking level).";
 
 const RESEARCH_INPUT_DESCRIPTION =
-  "JSON object string carrying advanced parameters the public schema hides. " +
-  "Direct fields override same-name JSON keys. Carries: model (provider/id override for this run), " +
-  "maxWallClockMs (hidden wall-clock cap in ms; may only tighten the 60-minute default).";
+  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), maxWallClockMs (cap in ms; may only tighten the 60-min default).";
 
 /** `subagent`'s registered (public) parameter schema — what the model sees. */
 export const SUBAGENT_TOOL_PARAMS = Type.Object({
@@ -444,8 +440,22 @@ export function buildResearchFullParams(maxCeilingMs: number): TObject {
 /** The code-default research full contract (used unless a config ceiling raises it). */
 export const RESEARCH_FULL_PARAMS = buildResearchFullParams(DEFAULT_RESEARCH_WALL_CLOCK_MS);
 
-/** `subagent`'s registered description — part of the model-facing surface. */
+/** `subagent`'s registered description — part of the model-facing surface (ADR 0019 slimmed). */
 export const SUBAGENT_TOOL_DESCRIPTION = [
+  "Delegate tasks to specialized subagents (isolated context windows, each a separate pi process).",
+  "BLOCKING: returns only after every subagent finishes, all results in one result. Never spawn subagents via bash or poll files.",
+  "Modes: single = agent+task; parallel = tasks array — what a skill means by 'spawn sub-agents in parallel'; sequential = chain ({previous} placeholder available).",
+  "Bundled roles: standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder.",
+  "agentScope: user by default (user agents from ~/.pi/agent/agents plus the bundled roles); both/project add project agents from .pi/agents.",
+].join(" ");
+
+/**
+ * The pre-slim `subagent` teaching text, preserved verbatim as the structural
+ * entry point for the deferred help-on-demand option (ADR 0012/0019). Not
+ * wired to any model-visible path today; the anti-rot test keeps the facts
+ * alive — an export that looks dead is deliberate (see ADR 0019).
+ */
+export const SUBAGENT_HELP_TEXT = [
   "Delegate tasks to specialized subagents with isolated context windows (each runs in a separate pi process).",
   "This is the BLOCKING subagent primitive: the call does not return until every subagent finishes, and the full results are returned in one result. Do NOT spawn subagents via bash and poll files.",
   "When a skill says 'spawn sub-agents in parallel', use the `tasks` array (parallel mode); for a sequential handoff use `chain` (with the {previous} placeholder); for one task use `agent` + `task`.",
@@ -453,8 +463,22 @@ export const SUBAGENT_TOOL_DESCRIPTION = [
   'Agent scope is "user" by default (user agents from ~/.pi/agent/agents plus the bundled roles); use "both" or "project" to add project agents from .pi/agents.',
 ].join(" ");
 
-/** `research`'s registered description — part of the model-facing surface. */
+/** `research`'s registered description — part of the model-facing surface (ADR 0019 slimmed). */
 export const RESEARCH_TOOL_DESCRIPTION = [
+  "Run a background research subagent (an in-process second session) that writes cited findings to a file and returns immediately.",
+  "Use when the research or wayfinder skill asks for a background agent; completion (succeeded/failed/terminated/aborted) is pushed with the findings path — no polling, no read-later.",
+  "Not for blocking work: code review and design exploration must use the subagent tool.",
+  "agentScope: user by default (user agents plus the bundled researcher role); both/project allow a project-local researcher from .pi/agents to override the bundled role (untrusted projects get a confirmation first).",
+  "Wall-clock capped (default 60 min); findings checkpointed before each search round, so a cap kill or crash loses at most one round.",
+].join(" ");
+
+/**
+ * The pre-slim `research` teaching text, preserved verbatim as the structural
+ * entry point for the deferred help-on-demand option (ADR 0012/0019). Not
+ * wired to any model-visible path today; the anti-rot test keeps the facts
+ * alive — an export that looks dead is deliberate (see ADR 0019).
+ */
+export const RESEARCH_HELP_TEXT = [
   "Run a background research subagent (an in-process second session) that writes cited findings to a file, then return immediately.",
   "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, and the completion (succeeded / failed / terminated / aborted) is pushed to you with the findings path — no polling, no \"read later\".",
   "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",

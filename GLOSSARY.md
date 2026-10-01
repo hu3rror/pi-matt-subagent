@@ -122,5 +122,5 @@ Seam D 的测试形态（Path 1，无假 pi）：在 runtime-free 的 lib 层断
 _Avoid_: fake-pi harness, 契约测试（泛称）
 
 **help-on-demand（按需帮助）**:
-被明确推迟的 schema 瘦身方案（ADR 0012）：把公开 schema 的详细参数藏到 `help` 操作/文档，按需展开，以缩小模型可见 footprint（轻量 subagents 门面的做法）。本插件在 token 基准基线建立之前不做——不盲目瘦身；基线数字出来后再单独决策。
-_Avoid_: schema slimming（作为已采纳）, help 命令
+被明确推迟的 schema 瘦身方案（ADR 0012）：把公开 schema 的详细参数藏到 `help` 操作/文档，按需展开，以缩小模型可见 footprint（轻量 subagents 门面的做法）。基线建立后（2026-09-22）重新决策（ADR 0019）：采纳就地瘦身（Variant A，description 精简但全保留 + schema 描述去冗词，合计 1147→979 tokens），help 机制本身继续挂起；完整教学文本以 `SUBAGENT_HELP_TEXT` / `RESEARCH_HELP_TEXT` 常量原样保留并配防腐化测试，作为将来的结构性入口——接线即用、无需重写。
+_Avoid_: schema slimming（作为已采纳）, help 命令, 悬空的 "call help" 指引

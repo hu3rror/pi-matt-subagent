@@ -43,6 +43,7 @@ import {
   RESEARCH_FULL_PARAMS,
   RESEARCH_INPUT_KEYS,
   RESEARCH_RESULT_SCHEMA,
+  RESEARCH_HELP_TEXT,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
   resolveRole,
@@ -58,6 +59,7 @@ import {
   toolErrorDetails,
   toolErrorMessage,
   SUBAGENT_FULL_PARAMS,
+  SUBAGENT_HELP_TEXT,
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_PARENT_SESSION_ENV,
   SUBAGENT_TOOL_DESCRIPTION,
@@ -2031,9 +2033,10 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 60-m
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
 // Per-tool tokens of description + serialized parameter schema, measured
-// with pi 0.87.0 on 2026-09-22 after the ADR 0013 surface change (research
-// lost budget/budgetOverrides, gained the hidden maxWallClockMs).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 630, research: 517 };
+// with pi 0.99.2 on 2026-10-01 after the ADR 0019 surface slimming
+// (Variant A: terse-but-complete descriptions, trimmed schema wording;
+// the pre-slim teaching text lives on in the help-text constants).
+const TOKEN_BASELINE: Record<string, number> = { subagent: 531, research: 448 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
@@ -2095,6 +2098,59 @@ test("the registered descriptions match the frozen surface", () => {
   assert.ok(!RESEARCH_TOOL_DESCRIPTION.includes("budget"), "the description no longer mentions budget tiers");
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "subagent")?.description, SUBAGENT_TOOL_DESCRIPTION);
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "research")?.description, RESEARCH_TOOL_DESCRIPTION);
+});
+
+test("the slimmed descriptions retain the load-bearing facts (Variant A, no drift)", () => {
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("BLOCKING"), "blocking semantics survive");
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("bash"), "the no-bash anti-pattern survives");
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("tasks array"), "the parallel mode mapping survives");
+  assert.ok(
+    SUBAGENT_TOOL_DESCRIPTION.includes("'spawn sub-agents in parallel'"),
+    "the skill-trigger mapping survives",
+  );
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("{previous}"), "the chain placeholder survives");
+  assert.ok(
+    SUBAGENT_TOOL_DESCRIPTION.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder"),
+    "all six bundled roles survive",
+  );
+  assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("agentScope"), "the scope semantics survive");
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("pushed"), "push delivery survives");
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("no polling"), "the no-polling contract survives");
+  assert.ok(
+    RESEARCH_TOOL_DESCRIPTION.includes("code review and design exploration must use the subagent tool"),
+    "the research-vs-subagent discrimination survives",
+  );
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("60 min"), "the wall-clock cap survives");
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("override the bundled role"), "the project-researcher override nuance survives");
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("checkpointed"), "the checkpoint guarantee survives");
+  // ADR 0019: the help-on-demand entry point is structural, not behavioral —
+  // the slimmed descriptions must not carry a dangling "call help" pointer.
+  assert.ok(!SUBAGENT_TOOL_DESCRIPTION.includes("help"), "subagent description has no dangling help pointer");
+  assert.ok(!RESEARCH_TOOL_DESCRIPTION.includes("help"), "research description has no dangling help pointer");
+});
+
+test("the preserved help texts carry the full teaching text (help-on-demand entry point, ADR 0012/0019)", () => {
+  // subagent
+  assert.ok(
+    SUBAGENT_HELP_TEXT.includes("does not return until every subagent finishes"),
+    "blocking semantics survive in the help text",
+  );
+  assert.ok(SUBAGENT_HELP_TEXT.includes("bash and poll files"), "the anti-pattern survives in the help text");
+  assert.ok(SUBAGENT_HELP_TEXT.includes("{previous}"), "the chain placeholder survives in the help text");
+  assert.ok(
+    SUBAGENT_HELP_TEXT.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder"),
+    "all six bundled roles survive in the help text",
+  );
+  assert.ok(SUBAGENT_HELP_TEXT.includes(".pi/agents"), "the scope semantics survive in the help text");
+  // research
+  assert.ok(RESEARCH_HELP_TEXT.includes("pushed to you"), "push delivery survives in the help text");
+  assert.ok(RESEARCH_HELP_TEXT.includes("no polling"), "the no-polling contract survives in the help text");
+  assert.ok(
+    RESEARCH_HELP_TEXT.includes("code review or design exploration"),
+    "the not-for-blocking discrimination survives in the help text",
+  );
+  assert.ok(RESEARCH_HELP_TEXT.includes("60 minutes"), "the wall-clock cap survives in the help text");
+  assert.ok(RESEARCH_HELP_TEXT.includes("checkpointed"), "the checkpoint guarantee survives in the help text");
 });
 
 test("toolErrorMessage converts any thrown value to model-visible text", () => {
