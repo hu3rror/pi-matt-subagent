@@ -47,6 +47,7 @@ import {
   CONFIG_FILE_NAME,
   CONFIG_KEYS,
   configKeyLabel,
+  configKeySpec,
   defaultConfig,
   discoverAgents,
   emptyUsage,
@@ -796,15 +797,16 @@ export default function (pi: ExtensionAPI) {
     }
     const key = CONFIG_KEYS.find((k) => choice.startsWith(`${k} =`));
     if (!key) return;
-    if (key === "dispatchDefaultThinkingLevel") {
+    // The per-key spec drives the value input: level → enum select, model →
+    // the pi model registry picker (falling back to text when no model has
+    // credentials), number → free text.
+    const spec = configKeySpec(key);
+    if (spec?.kind === "level") {
       const sel = await ctx.ui.select(`${key}`, [...THINKING_LEVELS, "inherit (clear)"]);
       if (sel === undefined) return;
       return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
     }
-    if (key === "dispatchDefaultModel") {
-      // Pick from configured/logged-in models (the pi model registry), not a
-      // free-text provider/id. Falling back to manual input when no model has
-      // credentials leaves a path to set a not-yet-configured provider.
+    if (spec?.kind === "model") {
       const refs = availableModels.map((m) => m.ref);
       if (refs.length > 0) {
         const sel = await ctx.ui.select(`${key}`, [...refs, "inherit (clear)"]);
@@ -866,25 +868,28 @@ export default function (pi: ExtensionAPI) {
             const keys = match([...CONFIG_KEYS]);
             return keys.map((k) => ({ value: `config set ${k}`, label: k }));
           }
-          if (tokens[1] === "set" && tokens[2] === "dispatchDefaultModel" && tokens.length >= 3) {
-            // tokens.length===3 → no value yet (all models); ===4+ → filter by the typed value.
+          const key = (CONFIG_KEYS as readonly string[]).includes(tokens[2] ?? "") ? (tokens[2] as ConfigKey) : undefined;
+          if (key && tokens.length >= 3) {
             const valuePrefix = tokens.length >= 4 ? last : "";
-            const items = availableModels
-              .filter((m) => m.ref.startsWith(valuePrefix))
-              .map((m) => ({
-                value: `config set ${tokens[2]} ${m.ref}`,
-                label: m.ref,
-                description: `provider: ${m.provider}`,
+            const spec = configKeySpec(key);
+            if (spec?.kind === "model") {
+              const items = availableModels
+                .filter((m) => m.ref.startsWith(valuePrefix))
+                .map((m) => ({
+                  value: `config set ${key} ${m.ref}`,
+                  label: m.ref,
+                  description: `provider: ${m.provider}`,
+                }));
+              return items.length > 0 ? items : null;
+            }
+            if (spec?.kind === "level") {
+              return THINKING_LEVELS.filter((l) => l.startsWith(valuePrefix)).map((l) => ({
+                value: `config set ${key} ${l}`,
+                label: l,
               }));
-            return items.length > 0 ? items : null;
+            }
           }
-          if (tokens[1] === "set" && tokens[2] === "dispatchDefaultThinkingLevel" && tokens.length >= 3) {
-            const valuePrefix = tokens.length >= 4 ? last : "";
-            return match([...THINKING_LEVELS].filter((l) => l.startsWith(valuePrefix))).map((l) => ({
-              value: `config set ${tokens[2]} ${l}`,
-              label: l,
-            }));
-          }
+          return null;
         }
         return null;
       }

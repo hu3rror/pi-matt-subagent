@@ -76,16 +76,37 @@ const TEE_DRAIN_BOUND_MS = 500;
 
 export const CONFIG_FILE_NAME = "matt-subagent.json";
 
-export const CONFIG_KEYS = [
-  "maxTasksPerCall",
-  "maxConcurrency",
-  "perTaskOutputCap",
-  "researchWallClockMs",
-  "logTailBytes",
-  "dispatchDefaultModel",
-  "dispatchDefaultThinkingLevel",
+/**
+ * One knob's static contract: `kind` drives validation/UI/autocomplete,
+ * `optional` means absent/null/inherit is a valid state (the run then
+ * inherits the main session). Single source for the key order, the types,
+ * and every per-key branch.
+ */
+const CONFIG_KEY_SPECS = [
+  { key: "maxTasksPerCall", kind: "number" as const, optional: false as const },
+  { key: "maxConcurrency", kind: "number" as const, optional: false as const },
+  { key: "perTaskOutputCap", kind: "number" as const, optional: false as const },
+  { key: "researchWallClockMs", kind: "number" as const, optional: false as const },
+  { key: "logTailBytes", kind: "number" as const, optional: false as const },
+  { key: "dispatchDefaultModel", kind: "model" as const, optional: true as const },
+  { key: "dispatchDefaultThinkingLevel", kind: "level" as const, optional: true as const },
 ] as const;
-export type ConfigKey = (typeof CONFIG_KEYS)[number];
+type ConfigKind = (typeof CONFIG_KEY_SPECS)[number]["kind"];
+interface ConfigKeySpec {
+  key: ConfigKey;
+  kind: ConfigKind;
+  optional: boolean;
+}
+const CONFIG_KEY_SPEC_BY_KEY = Object.fromEntries(CONFIG_KEY_SPECS.map((s) => [s.key, s])) as Readonly<
+  Record<ConfigKey, ConfigKeySpec>
+>;
+export const CONFIG_KEYS: readonly ConfigKey[] = CONFIG_KEY_SPECS.map((s) => s.key);
+export type ConfigKey = (typeof CONFIG_KEY_SPECS)[number]["key"];
+
+/** The per-key contract; the extension's menu and autocomplete drive on it too. */
+export function configKeySpec(key: ConfigKey): ConfigKeySpec | undefined {
+  return CONFIG_KEY_SPEC_BY_KEY[key];
+}
 
 export interface EffectiveConfig {
   maxTasksPerCall: number;
@@ -122,34 +143,30 @@ export interface ConfigStatus {
   parseError: boolean;
 }
 
-const NUMERIC_KEYS: readonly ConfigKey[] = [
-  "maxTasksPerCall",
-  "maxConcurrency",
-  "perTaskOutputCap",
-  "researchWallClockMs",
-  "logTailBytes",
-];
-
-function isNumericKey(key: ConfigKey): boolean {
-  return (NUMERIC_KEYS as readonly string[]).includes(key);
-}
-
 /**
- * Decodes a single raw config JSON value into a valid one for the key, or
- * returns undefined when the value is structurally invalid (caller degrades).
+ * Decodes one raw config JSON value into a valid one. Numeric keys need a
+ * positive integer; the optional dispatch kinds accept an explicit `null`
+ * (the "inherit" marker, value undefined) and otherwise their string value
+ * (non-empty model / known thinking level). valid:false degrades (caller).
  */
-function decodeConfigValue(key: ConfigKey, value: unknown): number | string | ThinkingLevel | undefined {
-  if (isNumericKey(key)) {
-    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : undefined;
+function decodeConfigValue(
+  key: ConfigKey,
+  value: unknown,
+): { valid: true; value: number | string | ThinkingLevel | undefined } | { valid: false } {
+  const spec = configKeySpec(key);
+  if (!spec) return { valid: false };
+  if (spec.kind === "number") {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1
+      ? { valid: true, value }
+      : { valid: false };
   }
-  if (key === "dispatchDefaultModel") {
-    // null is the explicit "inherit the session" marker; a non-empty string sets it.
-    if (value === null) return undefined;
-    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  if (value === null) {
+    return spec.optional ? { valid: true, value: undefined } : { valid: false };
   }
-  // dispatchDefaultThinkingLevel
-  if (value === null) return undefined;
-  return typeof value === "string" && isThinkingLevel(value) ? value : undefined;
+  if (spec.kind === "model") {
+    return typeof value === "string" && value.trim().length > 0 ? { valid: true, value } : { valid: false };
+  }
+  return typeof value === "string" && isThinkingLevel(value) ? { valid: true, value } : { valid: false };
 }
 
 /**
@@ -176,18 +193,14 @@ export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
   for (const key of CONFIG_KEYS) {
     if (!(key in obj)) continue;
     const decoded = decodeConfigValue(key, obj[key]);
-    if (decoded !== undefined) {
-      effective = setConfigValue(effective, key, decoded);
+    if (decoded.valid) {
+      effective = setConfigValue(effective, key, decoded.value);
       present.add(key);
-    } else if (key === "dispatchDefaultModel" || key === "dispatchDefaultThinkingLevel") {
-      if (obj[key] === null) {
-        // Explicit null writes "inherit the session" (value stays undefined) but
-        // still counts as the user customizing that knob. An empty string is NOT
-        // a valid file value — it degrades below.
-        present.add(key);
-      } else {
-        degraded.add(key);
-      }
+    } else if (configKeySpec(key)?.optional === true && obj[key] === null) {
+      // Explicit null writes "inherit the session" (value stays undefined) but
+      // still counts as the user customizing that knob. An empty string is NOT
+      // a valid file value — it degrades below.
+      present.add(key);
     } else {
       degraded.add(key);
     }
@@ -204,37 +217,32 @@ export function parseConfigSetValue(
   key: ConfigKey,
   rawValue: string,
 ): { ok: true; value: number | string | ThinkingLevel | undefined } | { ok: false; reason: string } {
-  if (isNumericKey(key)) {
+  const spec = configKeySpec(key);
+  if (!spec) return { ok: false, reason: `unknown config key "${key}"` };
+  if (spec.kind === "number") {
     const n = Number(rawValue);
     if (!Number.isInteger(n) || n < 1) {
       return { ok: false, reason: `${key} must be a positive integer, got "${rawValue}"` };
     }
     return { ok: true, value: n };
   }
+  // Optional dispatch kinds: inherit/empty clears the override.
   const trimmed = rawValue.trim();
-  if (key === "dispatchDefaultModel") {
-    if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
-    return { ok: true, value: trimmed };
-  }
-  // dispatchDefaultThinkingLevel
   if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
+  if (spec.kind === "model") return { ok: true, value: trimmed };
   if (isThinkingLevel(trimmed)) return { ok: true, value: trimmed };
   return { ok: false, reason: `dispatchDefaultThinkingLevel must be one of ${THINKING_LEVELS.join(", ")} (or inherit), got "${trimmed}"` };
 }
 
-/** Serializes an effective config to the file: the numeric keys always, the two
+/** Serializes an effective config to the file: required keys always, the two
  * optional dispatch knobs only when set (absent = inherit the main session,
  * so `null` never appears in the file). */
 export function serializeConfig(cfg: EffectiveConfig): string {
-  const out: Record<string, unknown> = {
-    maxTasksPerCall: cfg.maxTasksPerCall,
-    maxConcurrency: cfg.maxConcurrency,
-    perTaskOutputCap: cfg.perTaskOutputCap,
-    researchWallClockMs: cfg.researchWallClockMs,
-    logTailBytes: cfg.logTailBytes,
-  };
-  if (cfg.dispatchDefaultModel !== undefined) out.dispatchDefaultModel = cfg.dispatchDefaultModel;
-  if (cfg.dispatchDefaultThinkingLevel !== undefined) out.dispatchDefaultThinkingLevel = cfg.dispatchDefaultThinkingLevel;
+  const out: Record<string, unknown> = {};
+  for (const spec of CONFIG_KEY_SPECS) {
+    const value = getConfigValue(cfg, spec.key);
+    if (!spec.optional || value !== undefined) out[spec.key] = value;
+  }
   return JSON.stringify(out, null, 2);
 }
 
@@ -271,12 +279,10 @@ export function configToLimits(cfg: EffectiveConfig): ConfigBlockingLimits {
 /** One config knob's `key = value [status]` line, shared by the overview and the menu. */
 export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
   const marker = status.degraded.has(key) ? "degraded" : status.present.has(key) ? "customized" : "default";
-  const value =
-    key === "dispatchDefaultModel"
-      ? (status.effective.dispatchDefaultModel ?? "(inherit)")
-      : key === "dispatchDefaultThinkingLevel"
-        ? (status.effective.dispatchDefaultThinkingLevel ?? "(inherit)")
-        : String(getConfigValue(status.effective, key));
+  const spec = configKeySpec(key);
+  const value = spec?.optional
+    ? (getConfigValue(status.effective, key) ?? "(inherit)")
+    : String(getConfigValue(status.effective, key));
   return `${key} = ${value} [${marker}]`;
 }
 
