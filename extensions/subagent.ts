@@ -1043,20 +1043,32 @@ export default function (pi: ExtensionAPI) {
               researchAborts.delete(runId);
               const lastOutput = readLogTail(handle.logPath);
               updateRun(runId, { status: info.status, lastOutput: lastOutput || undefined });
-              pi.sendMessage(
-                {
-                  customType: RESEARCH_STATUS_CUSTOM_TYPE,
-                  content: researchStatusContent(info.status, findingsPath, handle.logPath),
-                  display: true,
-                  details: {
-                    status: info.status,
-                    findingsPath,
-                    logPath: handle.logPath,
-                    lastOutput,
-                  } satisfies ResearchStatusDetails,
-                },
-                { deliverAs: "followUp", triggerTurn: true },
-              );
+              // A short-lived process can tear the session context down while
+              // the researcher is still finishing: the terminal push then
+              // throws the stale-context error, which inside the runner's
+              // promise chain surfaces as an unhandled rejection that crashes
+              // the process (observed in the scripted-run repro, #32). The
+              // registry entry is already settled above, so only the push is
+              // lost — swallow just that stale error; anything else stays
+              // loud.
+              try {
+                pi.sendMessage(
+                  {
+                    customType: RESEARCH_STATUS_CUSTOM_TYPE,
+                    content: researchStatusContent(info.status, findingsPath, handle.logPath),
+                    display: true,
+                    details: {
+                      status: info.status,
+                      findingsPath,
+                      logPath: handle.logPath,
+                      lastOutput,
+                    } satisfies ResearchStatusDetails,
+                  },
+                  { deliverAs: "followUp", triggerTurn: true },
+                );
+              } catch (err) {
+                if (!(err instanceof Error && err.message.includes("stale"))) throw err;
+              }
             },
           },
           (childOpts) => createResearchChildSession(childOpts),
