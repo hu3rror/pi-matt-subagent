@@ -227,21 +227,20 @@ export function parseConfigSetValue(
   return { ok: false, reason: `dispatchDefaultThinkingLevel must be one of ${THINKING_LEVELS.join(", ")} (or inherit), got "${trimmed}"` };
 }
 
-/** Serializes an effective config to the self-documenting 7-key JSON file. */
+/** Serializes an effective config to the file: the numeric keys always, the two
+ * optional dispatch knobs only when set (absent = inherit the main session,
+ * so `null` never appears in the file). */
 export function serializeConfig(cfg: EffectiveConfig): string {
-  return JSON.stringify(
-    {
-      maxTasksPerCall: cfg.maxTasksPerCall,
-      maxConcurrency: cfg.maxConcurrency,
-      perTaskOutputCap: cfg.perTaskOutputCap,
-      researchWallClockMs: cfg.researchWallClockMs,
-      logTailBytes: cfg.logTailBytes,
-      dispatchDefaultModel: cfg.dispatchDefaultModel ?? null,
-      dispatchDefaultThinkingLevel: cfg.dispatchDefaultThinkingLevel ?? null,
-    },
-    null,
-    2,
-  );
+  const out: Record<string, unknown> = {
+    maxTasksPerCall: cfg.maxTasksPerCall,
+    maxConcurrency: cfg.maxConcurrency,
+    perTaskOutputCap: cfg.perTaskOutputCap,
+    researchWallClockMs: cfg.researchWallClockMs,
+    logTailBytes: cfg.logTailBytes,
+  };
+  if (cfg.dispatchDefaultModel !== undefined) out.dispatchDefaultModel = cfg.dispatchDefaultModel;
+  if (cfg.dispatchDefaultThinkingLevel !== undefined) out.dispatchDefaultThinkingLevel = cfg.dispatchDefaultThinkingLevel;
+  return JSON.stringify(out, null, 2);
 }
 
 /** The three blocking knobs as a named shape (part of the config surface). */

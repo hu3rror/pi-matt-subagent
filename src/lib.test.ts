@@ -1650,19 +1650,30 @@ test("parseConfigSetValue accepts a thinking level and clears via empty/inherit"
   assert.equal(parseConfigSetValue("dispatchDefaultThinkingLevel", "bogus").ok, false);
 });
 
-test("serializeConfig writes all seven keys and round-trips through parseConfigFile", () => {
+test("serializeConfig writes the set keys and round-trips; unset dispatch knobs are omitted, not null", () => {
   const cfg = { ...defaultConfig(), maxConcurrency: 10, dispatchDefaultThinkingLevel: "low" as const };
   const text = serializeConfig(cfg);
   const parsed = JSON.parse(text);
   assert.equal(parsed.maxConcurrency, 10);
   assert.equal(parsed.dispatchDefaultThinkingLevel, "low");
-  assert.equal(parsed.dispatchDefaultModel, null);
   assert.equal(parsed.maxTasksPerCall, 8);
+  assert.ok(!("dispatchDefaultModel" in parsed), "unset dispatch knob is omitted, never null");
   const s = parseConfigFile(text);
   assert.equal(s.effective.maxConcurrency, 10);
   assert.equal(s.effective.dispatchDefaultThinkingLevel, "low");
   assert.ok(s.present.has("maxConcurrency"));
-  assert.ok(s.present.has("researchWallClockMs"), "full self-documenting write marks every key present");
+  assert.ok(s.present.has("researchWallClockMs"));
+});
+
+test("serializeConfig(defaultConfig()) omits both dispatch knobs (no null anywhere)", () => {
+  const text = serializeConfig(defaultConfig());
+  assert.equal(/null/.test(text), false, "no null literal in the reset file");
+  const parsed = JSON.parse(text);
+  assert.ok(!("dispatchDefaultModel" in parsed));
+  assert.ok(!("dispatchDefaultThinkingLevel" in parsed));
+  const s = parseConfigFile(text);
+  assert.equal(s.effective.dispatchDefaultModel, undefined);
+  assert.equal(s.effective.dispatchDefaultThinkingLevel, undefined);
 });
 
 test("configToLimits maps the three blocking limits from the effective config", () => {
