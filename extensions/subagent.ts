@@ -911,60 +911,61 @@ export default function (pi: ExtensionAPI) {
     description:
       "List and manage tracked subagent runs: no args opens the menu; snapshot, kill <id>, tail <id>, prune, config [set <key> <value>|reset] run directly",
     getArgumentCompletions(argumentPrefix) {
-      // Return the full rebuilt argument string per suggestion: pi replaces the
-      // whole argument text (everything after `/subagents`) with `value`.
-      const tokens = argumentPrefix.trim().split(/\s+/).filter(Boolean);
-      const last = tokens[tokens.length - 1] ?? "";
-      const match = (arr: string[]) => arr.filter((s) => s.startsWith(last));
-      if (tokens.length === 0) {
-        return match(["snapshot", "kill", "tail", "prune", "config"]).map((v) => ({
-          value: v,
-          label: v,
-        }));
-      }
-      if (tokens[0] === "config") {
-        if (tokens.length === 1) {
-          return match(["show", "set", "reset"]).map((v) => ({ value: `config ${v}`, label: v }));
+      // pi replaces the whole argument text (everything after `/subagents`)
+      // with `value`. The cursor sits either mid-token (no trailing space, the
+      // last token is being typed) or after a space (the next token is fresh),
+      // so keep that distinction: it decides whether the last token filters
+      // the current candidates or is already settled.
+      const text = argumentPrefix ?? "";
+      const trailingSpace = /\s$/.test(text);
+      const tokens = text.trim().split(/\s+/).filter(Boolean);
+      const editIndex = trailingSpace ? tokens.length : tokens.length - 1;
+      const fixed = tokens.slice(0, editIndex);
+      const partial = trailingSpace ? "" : (tokens[editIndex] ?? "");
+      const match = (arr: string[]) => (partial === "" ? arr : arr.filter((s) => s.startsWith(partial)));
+      const suggest = (value: string, label: string) => ({ value, label });
+
+      const VERBS = ["snapshot", "kill", "tail", "prune", "config"];
+      const SUB_VERBS = ["show", "set", "reset"];
+
+      let suggestions: Array<{ value: string; label: string; description?: string }> = [];
+      if (fixed.length === 0) {
+        // Verb position; a fully-typed "config" (with or without space) moves
+        // on to its sub-verbs instead of re-suggesting itself.
+        if (partial === "config" || partial === "") {
+          suggestions = SUB_VERBS.map((v) => suggest(`config ${v}`, v));
+        } else {
+          suggestions = match(VERBS).map((v) => suggest(v, v));
         }
-        if (tokens[1] === "reset" && tokens.length === 2) {
-          const keys = match([...CONFIG_KEYS]);
-          return keys.map((k) => ({ value: `config reset ${k}`, label: k }));
-        }
-        if (tokens[1] === "set") {
-          if (tokens.length === 2) {
-            const keys = match([...CONFIG_KEYS]);
-            return keys.map((k) => ({ value: `config set ${k}`, label: k }));
-          }
-          const key = (CONFIG_KEYS as readonly string[]).includes(tokens[2] ?? "") ? (tokens[2] as ConfigKey) : undefined;
-          if (key && tokens.length >= 3) {
-            const valuePrefix = tokens.length >= 4 ? last : "";
-            const spec = configKeySpec(key);
-            if (spec?.kind === "model") {
-              const items = availableModels
-                .filter((m) => m.ref.startsWith(valuePrefix))
-                .map((m) => ({
-                  value: `config set ${key} ${m.ref}`,
-                  label: m.ref,
-                  description: `provider: ${m.provider}`,
-                }));
-              return items.length > 0 ? items : null;
-            }
-            if (spec?.kind === "level") {
-              return THINKING_LEVELS.filter((l) => l.startsWith(valuePrefix)).map((l) => ({
-                value: `config set ${key} ${l}`,
-                label: l,
+      } else if (fixed[0] === "config") {
+        if (fixed.length === 1) {
+          suggestions = match(SUB_VERBS).map((v) => suggest(`config ${v}`, v));
+        } else if (fixed.length === 2 && (fixed[1] === "set" || fixed[1] === "reset")) {
+          suggestions = match([...CONFIG_KEYS]).map((k) => suggest(`config ${fixed[1]} ${k}`, k));
+        } else if (fixed.length === 3 && fixed[1] === "set") {
+          const key = fixed[2] as ConfigKey;
+          const spec = (CONFIG_KEYS as readonly string[]).includes(key) ? configKeySpec(key) : undefined;
+          if (spec?.kind === "model") {
+            const items = availableModels
+              .filter((m) => m.ref.startsWith(partial))
+              .map((m) => ({
+                value: `config set ${key} ${m.ref}`,
+                label: m.ref,
+                description: `provider: ${m.provider}`,
               }));
-            }
+            return items.length > 0 ? items : null;
           }
-          return null;
+          if (spec?.kind === "level") {
+            suggestions = THINKING_LEVELS.filter((l) => l.startsWith(partial)).map((l) =>
+              suggest(`config set ${key} ${l}`, l),
+            );
+          }
         }
-        return null;
-      }
-      if ((tokens[0] === "kill" || tokens[0] === "tail") && tokens.length >= 2) {
+      } else if ((fixed[0] === "kill" || fixed[0] === "tail") && fixed.length >= 1) {
         const ids = match(subagentRuns.snapshot().map((r) => r.id));
-        return ids.map((id) => ({ value: `${tokens[0]} ${id}`, label: id }));
+        suggestions = ids.map((id) => suggest(`${fixed[0]} ${id}`, id));
       }
-      return null;
+      return suggestions.length > 0 ? suggestions : null;
     },
     handler: async (args, ctx) => {
       footerUi = ctx as SubagentsUi;

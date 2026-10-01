@@ -192,14 +192,12 @@ export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
   let effective = defaultConfig();
   for (const key of CONFIG_KEYS) {
     if (!(key in obj)) continue;
+    // decodeConfigValue already returns valid for an optional key's explicit
+    // null (the inherit marker) and for any structurally-valid value; only
+    // genuinely invalid values land here to degrade.
     const decoded = decodeConfigValue(key, obj[key]);
     if (decoded.valid) {
       effective = setConfigValue(effective, key, decoded.value);
-      present.add(key);
-    } else if (configKeySpec(key)?.optional === true && obj[key] === null) {
-      // Explicit null writes "inherit the session" (value stays undefined) but
-      // still counts as the user customizing that knob. An empty string is NOT
-      // a valid file value — it degrades below.
       present.add(key);
     } else {
       degraded.add(key);
@@ -1300,8 +1298,9 @@ export function resolveThinkingLevel(opts: {
 }): string | undefined {
   if (opts.override) return opts.override;
   // ADR 0018: a pinned model beats only the inherited layer; explicit role/config levels apply.
-  if (opts.hasModel) return opts.roleLevel ?? opts.configLevel ?? undefined;
-  return opts.roleLevel ?? opts.configLevel ?? opts.inherited;
+  const explicit = opts.roleLevel ?? opts.configLevel;
+  if (opts.hasModel) return explicit;
+  return explicit ?? opts.inherited;
 }
 
 /**
@@ -1485,7 +1484,7 @@ export interface RunEntry {
   model?: string;
   /** Effective dispatch thinking level; undefined when the run never pinned one (see ADR 0005). */
   thinkingLevel?: string;
-  /** Requested level before clamping; present whenever a level was requested (see ADR 0018). */
+  /** Requested level before clamping; only present when the resolved model could be clamped against (see ADR 0018). */
   requestedThinking?: string;
   findingsPath?: string;
   logPath?: string;
