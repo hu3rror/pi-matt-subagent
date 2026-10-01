@@ -93,6 +93,7 @@ import {
   isToolError,
   lastOutputLine,
   toolErrorDetails,
+  toolErrorMessage,
 } from "../src/lib.ts";
 
 import {
@@ -301,6 +302,16 @@ function renderAgentRow(
 /** The indented, 10-line-capped body text shared by both renderResult branches. */
 function renderIndentedBody(text: string): string {
   return text.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n");
+}
+
+/** The indented dim usage line shared by the error row and the success rows. */
+function renderUsageLine(
+  theme: { fg(color: ThemeColor, text: string): string },
+  usage: UsageStats,
+  opts: { model?: string; thinking?: string },
+): string | undefined {
+  const u = formatUsageLine(usage, { ...opts, showContext: true });
+  return u ? `  ${theme.fg("dim", u)}` : undefined;
 }
 
 /**
@@ -862,7 +873,7 @@ export default function (pi: ExtensionAPI) {
           },
         });
       } catch (err) {
-        const text = err instanceof Error ? err.message : String(err);
+        const text = toolErrorMessage(err);
         return {
           content: [{ type: "text", text }],
           details: { ...noRunDetails, error: toolErrorDetails(subagentRuns.snapshot(), sinceIndex) },
@@ -898,12 +909,11 @@ export default function (pi: ExtensionAPI) {
         lines.push(renderAgentRow(theme, icon, details.error.agent, details.error.agentSource));
         if (first?.type === "text" && first.text) lines.push(renderIndentedBody(first.text));
         if (details.error.usage) {
-          const u = formatUsageLine(details.error.usage, {
+          const u = renderUsageLine(theme, details.error.usage, {
             model: details.error.model,
             thinking: details.error.thinkingLevel,
-            showContext: true,
           });
-          if (u) lines.push(`  ${theme.fg("dim", u)}`);
+          if (u) lines.push(u);
         }
         return new Text(lines.join("\n"), 0, 0);
       }
@@ -921,8 +931,8 @@ export default function (pi: ExtensionAPI) {
         } else if (out && out !== "(no output)") {
           lines.push(renderIndentedBody(out));
         }
-        const u = formatUsageLine(r.usage, { model: r.model, thinking: r.thinkingLevel, showContext: true });
-        if (u) lines.push(`  ${theme.fg("dim", u)}`);
+        const u = renderUsageLine(theme, r.usage, { model: r.model, thinking: r.thinkingLevel });
+        if (u) lines.push(u);
       }
 
       if (details.mode !== "single" && first?.type === "text" && first.text) {
@@ -1084,7 +1094,7 @@ export default function (pi: ExtensionAPI) {
         researchAborts.delete(runId);
         updateRun(runId, { status: "failed" });
         return {
-          content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+          content: [{ type: "text", text: toolErrorMessage(err) }],
           details: undefined,
           isError: true,
         };

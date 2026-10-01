@@ -241,7 +241,7 @@ export const TOKEN_GUARD_MULTIPLIER = 1.2;
  * validates the result against the full parameter contract (public + hidden).
  * Returns the merged params (the direct type plus the hidden keys declared by
  * `THidden`) with `input` consumed. Throws a model-visible tool error (ADR
- * 0010 contract) when `input` is present but not a JSON object string, or
+ * 0011 loud contract) when `input` is present but not a JSON object string, or
  * when the merged object violates the full schema — the message names the
  * offending field paths. Absent/empty `input` is a passthrough that returns
  * the direct params untouched.
@@ -1567,6 +1567,24 @@ export function formatBlockingToolError(
 ): string {
   if (mode === "chain") return `Chain stopped at step ${opts.step} (${opts.agent}): ${opts.output}`;
   return `Agent ${opts.stopReason || "failed"}: ${opts.output}`;
+}
+
+/**
+ * The model-visible text for a thrown value, shared by the tool-boundary
+ * conversions (subagent blocking catch, research startup-failure catch): an
+ * Error's message, a string as-is, and any other value JSON-stringified so an
+ * object does not degrade to the useless `[object Object]`. JSON.stringify
+ * can throw (circular/bigint) — fall back to String() then.
+ */
+export function toolErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    const json = JSON.stringify(err);
+    return typeof json === "string" ? json : String(err);
+  } catch {
+    return String(err);
+  }
 }
 
 // ---------------------------------------------------------------------------

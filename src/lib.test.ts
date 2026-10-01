@@ -43,6 +43,7 @@ import {
   scopeAllowsProject,
   splitModelRef,
   toolErrorDetails,
+  toolErrorMessage,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_INPUT_KEYS,
   SUBAGENT_PARENT_SESSION_ENV,
@@ -1737,6 +1738,13 @@ test("the registered descriptions match the frozen surface", () => {
   assert.ok(!RESEARCH_TOOL_DESCRIPTION.includes("budget"), "the description no longer mentions budget tiers");
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "subagent")?.description, SUBAGENT_TOOL_DESCRIPTION);
   assert.equal(TOOL_CONTRACTS.find((t) => t.name === "research")?.description, RESEARCH_TOOL_DESCRIPTION);
+});
+
+test("toolErrorMessage converts any thrown value to model-visible text", () => {
+  assert.equal(toolErrorMessage(new Error("boom")), "boom");
+  assert.equal(toolErrorMessage("plain string"), "plain string");
+  assert.equal(toolErrorMessage({ code: 7, detail: "x" }), '{"code":7,"detail":"x"}');
+  assert.equal(toolErrorMessage(undefined), String(undefined));
 });
 
 test("estimateToolSurfaceTokens uses ceil(chars / 4) on description + serialized schema", () => {
