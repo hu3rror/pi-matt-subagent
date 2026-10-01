@@ -10,6 +10,8 @@
 
 import {
   blockingRunStatus,
+  configToLimits,
+  defaultConfig,
   emptyUsage,
   formatBlockingToolError,
   getResultOutput,
@@ -73,11 +75,9 @@ export interface BlockingPlanResult {
   details: SubagentDetails;
 }
 
-const DEFAULT_LIMITS: Required<BlockingPlanLimits> = {
-  maxTasksPerCall: 8,
-  maxConcurrency: 4,
-  perTaskOutputCap: 50 * 1024,
-};
+// The single source for the blocking default limits is the extension config
+// defaults, so the two cannot drift.
+const DEFAULT_LIMITS: Required<BlockingPlanLimits> = configToLimits(defaultConfig());
 
 // ---------------------------------------------------------------------------
 // Result semantics helpers
@@ -147,6 +147,11 @@ export async function runBlockingPlan(opts: {
 
   const sourceOf = (name: string): AgentSource => resolveRole(agents, name)?.source ?? "unknown";
   const makeDetails = (results: SingleResult[]): SubagentDetails => ({ mode: plan.mode, results });
+  /** The refusal returned for an over-limit plan (parallel tasks or chain steps) before anything registers/runs. */
+  const tooMany = (what: "parallel tasks" | "chain steps", count: number, max: number) => ({
+    text: `Too many ${what} (${count}). Max is ${max}.`,
+    details: makeDetails([]),
+  });
 
   /**
    * One delegated execution's registry flow, shared by single / chain steps /
@@ -227,6 +232,11 @@ export async function runBlockingPlan(opts: {
   }
 
   if (plan.mode === "chain") {
+    if (plan.steps.length > limits.maxTasksPerCall) {
+      // The config ceiling applies to chain steps too (ADR 0018), reported
+      // without registering or running anything.
+      return tooMany("chain steps", plan.steps.length, limits.maxTasksPerCall);
+    }
     const results: SingleResult[] = [];
     let previousOutput = "";
     for (let i = 0; i < plan.steps.length; i++) {
@@ -256,10 +266,7 @@ export async function runBlockingPlan(opts: {
 
   // parallel
   if (plan.tasks.length > limits.maxTasksPerCall) {
-    return {
-      text: `Too many parallel tasks (${plan.tasks.length}). Max is ${limits.maxTasksPerCall}.`,
-      details: makeDetails([]),
-    };
+    return tooMany("parallel tasks", plan.tasks.length, limits.maxTasksPerCall);
   }
   const allResults: SingleResult[] = new Array(plan.tasks.length);
   const runIds: string[] = plan.tasks.map((t) =>

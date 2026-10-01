@@ -65,6 +65,227 @@ export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 60 * 60 * 1000;
 const TEE_DRAIN_BOUND_MS = 500;
 
 // ---------------------------------------------------------------------------
+// Extension config surface (ADR 0018)
+//   A user-level, lazily-created JSON (`~/.pi/agent/extensions/` +
+//   `CONFIG_FILE_NAME`) exposing seven tunable knobs. The file is never
+//   created by loading the extension (only `set`/`reset` writes it), and
+//   deleting it restores all defaults. The decode/validate/degrade lime lives
+//   here (runtime-free) so the whole surface is nailed with node --test and
+//   the extension stays a thin wiring shell. Reading is per-config-key
+//   structural validation (not one strict TypeBox object): unknown keys are
+//   ignored and a structurally-invalid known key falls back to that key's
+//   built-in default and is marked degraded (vs config explicit-null/typo
+//   being the user's own fault when "valid but extreme").
+// ---------------------------------------------------------------------------
+
+export const CONFIG_FILE_NAME = "matt-subagent.json";
+
+export const CONFIG_KEYS = [
+  "maxTasksPerCall",
+  "maxConcurrency",
+  "perTaskOutputCap",
+  "researchWallClockMs",
+  "logTailBytes",
+  "dispatchDefaultModel",
+  "dispatchDefaultThinkingLevel",
+] as const;
+export type ConfigKey = (typeof CONFIG_KEYS)[number];
+
+export interface EffectiveConfig {
+  maxTasksPerCall: number;
+  maxConcurrency: number;
+  perTaskOutputCap: number;
+  researchWallClockMs: number;
+  logTailBytes: number;
+  /** provider/id; undefined => inherit the main session model. */
+  dispatchDefaultModel?: string;
+  /** thinking level; undefined => inherit the main session level. */
+  dispatchDefaultThinkingLevel?: ThinkingLevel;
+}
+
+/** Built-in defaults — the single source for the blocking limits too. */
+export function defaultConfig(): EffectiveConfig {
+  return {
+    maxTasksPerCall: 8,
+    maxConcurrency: 4,
+    perTaskOutputCap: 50 * 1024,
+    researchWallClockMs: DEFAULT_RESEARCH_WALL_CLOCK_MS,
+    logTailBytes: 4096,
+    dispatchDefaultModel: undefined,
+    dispatchDefaultThinkingLevel: undefined,
+  };
+}
+
+export interface ConfigStatus {
+  effective: EffectiveConfig;
+  /** keys the user wrote and that validated (marked "customized"). */
+  present: ReadonlySet<ConfigKey>;
+  /** keys the user wrote but that were invalid and fell back to default. */
+  degraded: ReadonlySet<ConfigKey>;
+  /** the file existed but its JSON did not parse (all values default). */
+  parseError: boolean;
+}
+
+const NUMERIC_KEYS: readonly ConfigKey[] = [
+  "maxTasksPerCall",
+  "maxConcurrency",
+  "perTaskOutputCap",
+  "researchWallClockMs",
+  "logTailBytes",
+];
+
+function isNumericKey(key: ConfigKey): boolean {
+  return (NUMERIC_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * Decodes a single raw config JSON value into a valid one for the key, or
+ * returns undefined when the value is structurally invalid (caller degrades).
+ */
+function decodeConfigValue(key: ConfigKey, value: unknown): number | string | ThinkingLevel | undefined {
+  if (isNumericKey(key)) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : undefined;
+  }
+  if (key === "dispatchDefaultModel") {
+    // null is the explicit "inherit the session" marker; a non-empty string sets it.
+    if (value === null) return undefined;
+    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  }
+  // dispatchDefaultThinkingLevel
+  if (value === null) return undefined;
+  return typeof value === "string" && isThinkingLevel(value) ? value : undefined;
+}
+
+/**
+ * Parses the config file text into a validated status. `raw` is undefined/
+ * null/blank when there is no file (all defaults, nothing present/degraded);
+ * unparseable JSON is a parse error with all defaults.
+ */
+export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
+  const present = new Set<ConfigKey>();
+  const degraded = new Set<ConfigKey>();
+  const blank: ConfigStatus = { effective: defaultConfig(), present, degraded, parseError: false };
+  if (raw === undefined || raw === null || raw.trim() === "") return blank;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { effective: defaultConfig(), present, degraded, parseError: true };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { effective: defaultConfig(), present, degraded, parseError: true };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const effective = defaultConfig();
+  for (const key of CONFIG_KEYS) {
+    if (!(key in obj)) continue;
+    const decoded = decodeConfigValue(key, obj[key]);
+    const target = effective as unknown as Record<string, unknown>;
+    if (decoded !== undefined) {
+      target[key] = decoded;
+      present.add(key);
+    } else if (key === "dispatchDefaultModel" || key === "dispatchDefaultThinkingLevel") {
+      if (obj[key] === null) {
+        // Explicit null writes "inherit the session" (value stays undefined) but
+        // still counts as the user customizing that knob. An empty string is NOT
+        // a valid file value — it degrades below.
+        present.add(key);
+      } else {
+        degraded.add(key);
+      }
+    } else {
+      degraded.add(key);
+    }
+  }
+  return { effective, present, degraded, parseError: false };
+}
+
+/**
+ * Parses one raw CLI/set value for a config key. Numeric keys take a
+ * positive integer; the dispatch knobs take their value and accept
+ * `inherit`/empty to clear the override (fall back to the main session).
+ */
+export function parseConfigSetValue(
+  key: ConfigKey,
+  rawValue: string,
+): { ok: true; value: number | string | ThinkingLevel | undefined } | { ok: false; reason: string } {
+  if (isNumericKey(key)) {
+    const n = Number(rawValue);
+    if (!Number.isInteger(n) || n < 1) {
+      return { ok: false, reason: `${key} must be a positive integer, got "${rawValue}"` };
+    }
+    return { ok: true, value: n };
+  }
+  const trimmed = rawValue.trim();
+  if (key === "dispatchDefaultModel") {
+    if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
+    return { ok: true, value: trimmed };
+  }
+  // dispatchDefaultThinkingLevel
+  if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
+  if (isThinkingLevel(trimmed)) return { ok: true, value: trimmed };
+  return { ok: false, reason: `dispatchDefaultThinkingLevel must be one of ${THINKING_LEVELS.join(", ")} (or inherit), got "${trimmed}"` };
+}
+
+/** Serializes an effective config to the self-documenting 7-key JSON file. */
+export function serializeConfig(cfg: EffectiveConfig): string {
+  return JSON.stringify(
+    {
+      maxTasksPerCall: cfg.maxTasksPerCall,
+      maxConcurrency: cfg.maxConcurrency,
+      perTaskOutputCap: cfg.perTaskOutputCap,
+      researchWallClockMs: cfg.researchWallClockMs,
+      logTailBytes: cfg.logTailBytes,
+      dispatchDefaultModel: cfg.dispatchDefaultModel ?? null,
+      dispatchDefaultThinkingLevel: cfg.dispatchDefaultThinkingLevel ?? null,
+    },
+    null,
+    2,
+  );
+}
+
+/** The three blocking knobs as a named shape (part of the config surface). */
+export interface ConfigBlockingLimits {
+  maxTasksPerCall: number;
+  maxConcurrency: number;
+  perTaskOutputCap: number;
+}
+
+/** Maps the three effective blocking knobs onto the orchestration limits. */
+export function configToLimits(cfg: EffectiveConfig): ConfigBlockingLimits {
+  return {
+    maxTasksPerCall: cfg.maxTasksPerCall,
+    maxConcurrency: cfg.maxConcurrency,
+    perTaskOutputCap: cfg.perTaskOutputCap,
+  };
+}
+
+/** One config knob's `key = value [status]` line, shared by the overview and the menu. */
+export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
+  const marker = status.degraded.has(key) ? "degraded" : status.present.has(key) ? "customized" : "default";
+  const value =
+    key === "dispatchDefaultModel"
+      ? (status.effective.dispatchDefaultModel ?? "(inherit)")
+      : key === "dispatchDefaultThinkingLevel"
+        ? (status.effective.dispatchDefaultThinkingLevel ?? "(inherit)")
+        : String((status.effective as unknown as Record<string, unknown>)[key]);
+  return `${key} = ${value} [${marker}]`;
+}
+
+/** The `/subagents config` show view (pure text; the command notifies it). */
+export function formatConfigOverview(status: ConfigStatus, configPath: string, exists: boolean): string {
+  const lines: string[] = [
+    `Config file: ${configPath}${exists ? "" : " (not created — all defaults)"}`, // prettier
+  ];
+  if (status.parseError) lines.push("⚠ config JSON is unparseable — using all defaults. Fix or delete the file.");
+  for (const key of CONFIG_KEYS) {
+    lines.push(`  ${configKeyLabel(key, status)}`);
+  }
+  return lines.join("\n");
+}
+
+
+// ---------------------------------------------------------------------------
 // Tool parameter schemas and the `input` escape hatch (ADR 0011)
 //   Single source of truth for both tools' model-facing parameter schemas,
 //   shared by the extension (registration + dispatch validation) and the
@@ -159,21 +380,33 @@ export const SUBAGENT_FULL_PARAMS = Type.Object(
   { additionalProperties: false },
 );
 
-/** The full `research` dispatch contract (public fields + hidden `model` / `maxWallClockMs`). */
-export const RESEARCH_FULL_PARAMS = Type.Object(
-  {
-    ...ResearchPublicFields,
-    model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
-    maxWallClockMs: Type.Optional(
-      Type.Integer({
-        minimum: 1,
-        maximum: DEFAULT_RESEARCH_WALL_CLOCK_MS,
-        description: "Hidden: wall-clock hard cap in ms; may only tighten the 60-minute default.",
-      }),
-    ),
-  },
-  { additionalProperties: false },
-);
+/**
+ * Builds the full `research` dispatch contract with the given wall-clock
+ * ceiling as the `maxWallClockMs` maximum. The exported base constant uses
+ * the code default (so the surface-contract tests pin that bound); the
+ * extension builds one per dispatch from the effective config ceiling so
+ * raising it is honored without /reload, and a per-call `maxWallClockMs` may
+ * only tighten (≤ the configured ceiling).
+ */
+export function buildResearchFullParams(maxCeilingMs: number): TObject {
+  return Type.Object(
+    {
+      ...ResearchPublicFields,
+      model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
+      maxWallClockMs: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: maxCeilingMs,
+          description: "Hidden: wall-clock hard cap in ms; may only tighten the configured ceiling.",
+        }),
+      ),
+    },
+    { additionalProperties: false },
+  );
+}
+
+/** The code-default research full contract (used unless a config ceiling raises it). */
+export const RESEARCH_FULL_PARAMS = buildResearchFullParams(DEFAULT_RESEARCH_WALL_CLOCK_MS);
 
 /** `subagent`'s registered description — part of the model-facing surface. */
 export const SUBAGENT_TOOL_DESCRIPTION = [
@@ -1013,22 +1246,23 @@ export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | 
 
 /**
  * Decides the thinking level for a subagent's pi invocation.
- * Priority: per-call override > the role's configured level > the main
- * session's inherited level. A per-call override wins even when the agent
- * pins its own model (explicit escape hatch); without an override, a
- * model-pinned agent gets undefined so the caller does not force --thinking
- * on a model that brings its own reasoning configuration (historical
- * behavior preserved).
+ * Priority: per-call override > the role's configured level > the config
+ * default > the main session's inherited level (ADR 0005 extended). A
+ * per-call override wins even when the agent pins its own model (explicit
+ * escape hatch); without an override, a model-pinned agent gets undefined so
+ * the caller does not force --thinking on a model that brings its own
+ * reasoning configuration (historical behavior preserved).
  */
 export function resolveThinkingLevel(opts: {
   roleLevel?: string;
   override?: string;
   inherited?: string;
   hasModel: boolean;
+  configLevel?: string;
 }): string | undefined {
   if (opts.override) return opts.override;
   if (opts.hasModel) return undefined;
-  return opts.roleLevel ?? opts.inherited;
+  return opts.roleLevel ?? opts.configLevel ?? opts.inherited;
 }
 
 /**
@@ -1647,6 +1881,9 @@ export type SubagentsCommand =
   | { action: "kill"; id: string }
   | { action: "tail"; id: string }
   | { action: "prune" }
+  | { action: "config"; verb: "show" }
+  | { action: "config"; verb: "set"; key: ConfigKey; value: string }
+  | { action: "config"; verb: "reset" }
   | { action: "invalid"; reason: string };
 
 /** Parses the /subagents argument string into a command the handler can dispatch. */
@@ -1666,6 +1903,20 @@ export function parseSubagentsArgs(args: string): SubagentsCommand {
     if (rest.length === 0) return { action: "invalid", reason: `${verb} requires a run id` };
     if (rest.length > 1) return { action: "invalid", reason: `unexpected extra arguments: ${rest.slice(1).join(" ")}` };
     return { action: verb, id: rest[0] };
+  }
+  if (verb === "config") {
+    if (rest.length === 0) return { action: "config", verb: "show" };
+    if (rest[0] === "reset" && rest.length === 1) return { action: "config", verb: "reset" };
+    if (rest[0] === "set") {
+      if (rest.length < 3) return { action: "invalid", reason: "config set requires a key and a value" };
+      const key = rest[1] as ConfigKey;
+      if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
+        return { action: "invalid", reason: `unknown config key "${rest[1]}"` };
+      }
+      const value = rest.slice(2).join(" ");
+      return { action: "config", verb: "set", key, value };
+    }
+    return { action: "invalid", reason: `unknown config verb "${rest[0]}"` };
   }
   return { action: "invalid", reason: `unknown action "${verb}"` };
 }

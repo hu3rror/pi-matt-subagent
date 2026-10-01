@@ -320,6 +320,53 @@ test("parallel mode rejects more than 8 tasks without registering or running", a
   assert.equal(called, 0);
 });
 
+test("parallel mode honors a configured maxTasksPerCall cap", async () => {
+  const registry = createRunRegistry();
+  let called = 0;
+  const runner: RunnerSeam = { async runTask() { called++; return okResult("a", "x"); } };
+  const out = await runBlockingPlan({
+    plan: { mode: "parallel", tasks: Array.from({ length: 4 }, () => ({ agent: "a", task: "t" })) },
+    runner,
+    registry,
+    agents: noAgents,
+    limits: { maxTasksPerCall: 2 },
+  });
+  assert.equal(out.text, "Too many parallel tasks (4). Max is 2.");
+  assert.equal(called, 0);
+  assert.equal(registry.snapshot().length, 0);
+});
+
+test("chain mode rejects more than the default 8 steps without running", async () => {
+  const registry = createRunRegistry();
+  let called = 0;
+  const runner: RunnerSeam = { async runTask() { called++; return okResult("a", "x"); } };
+  const out = await runBlockingPlan({
+    plan: { mode: "chain", steps: Array.from({ length: 9 }, () => ({ agent: "a", task: "t" })) },
+    runner,
+    registry,
+    agents: noAgents,
+  });
+  assert.equal(out.text, "Too many chain steps (9). Max is 8.");
+  assert.equal(called, 0);
+  assert.equal(registry.snapshot().length, 0);
+});
+
+test("chain mode honors a configured maxTasksPerCall cap", async () => {
+  const registry = createRunRegistry();
+  let called = 0;
+  const runner: RunnerSeam = { async runTask() { called++; return okResult("a", "x"); } };
+  const out = await runBlockingPlan({
+    plan: { mode: "chain", steps: Array.from({ length: 4 }, () => ({ agent: "a", task: "t" })) },
+    runner,
+    registry,
+    agents: noAgents,
+    limits: { maxTasksPerCall: 3 },
+  });
+  assert.equal(out.text, "Too many chain steps (4). Max is 3.");
+  assert.equal(called, 0);
+  assert.equal(registry.snapshot().length, 0);
+});
+
 test("parallel mode honors the concurrency limit", async () => {
   const registry = createRunRegistry();
   let active = 0;

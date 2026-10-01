@@ -90,6 +90,36 @@ pi install <本仓库路径>
 
 模型名按 `provider/id` 对照 `~/.pi/agent/models.json` 注册表解析；解析不了的名字在工具层大声报错，run 不会启动。直接字段优先于 JSON 同名键，合并结果派发前按完整契约校验（ADR 0011）。
 
+## 配置（ADR 0018）
+
+本扩展的运行旋钮可通过惰性创建的文件配置：`~/.pi/agent/extensions/matt-subagent.json`。加载从不写盘——只有你 `set` 或 `reset` 时才生成文件——删除文件即恢复全部默认。改动对下一次 run 生效，无需 `/reload`。
+
+七个旋钮及其内置默认值：
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `maxTasksPerCall` | 8 | 单次调用任务数上限——并行 tasks **与** chain steps；超出即拒绝该调用 |
+| `maxConcurrency` | 4 | 并行模式下同时 in-flight 的子代理进程上限 |
+| `perTaskOutputCap` | 50 KiB | 并行聚合中单个任务摘要的字节截断上限 |
+| `researchWallClockMs` | 60 分钟 | 后台 research 默认墙钟，也是 `input.maxWallClockMs` 的硬天花板 |
+| `logTailBytes` | 4096 | `/subagents tail` 读日志的字节上限 |
+| `dispatchDefaultModel` | (继承) | 当调用与角色都未指定时的默认 `provider/id` |
+| `dispatchDefaultThinkingLevel` | (继承) | 当调用与角色都未指定时的默认思考档位 |
+
+`dispatchDefaultModel`/`dispatchDefaultThinkingLevel` 显示 `(inherit)`（= 继承主会话的模型/档位）。派发优先级：per-call override > 角色声明 > 配置默认 > 主会话继承。
+
+通过 `/subagents` 命令驱动（也在菜单的 "Settings…" 入口里）：
+
+```
+/subagents config
+/subagents config set maxConcurrency 6
+/subagents config set dispatchDefaultThinkingLevel low
+/subagents config set dispatchDefaultModel inherit
+/subagents config reset
+```
+
+`set` 会重写全量 7 键（自文档化；未改的键保留其值或默认）。非法项——坏 JSON、未知键、类型错、正数约束下 ≤0、未知思考档位、空 model 串——会把该键降级回默认并在配置视图标记 `[degraded]`，所以手误不会弄垮会话。删除文件即完全重置。
+
 ## 项目结构
 
 ```

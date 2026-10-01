@@ -86,8 +86,16 @@ _Avoid_: 管理面板, panel
 _Avoid_: status panel, 面板
 
 **dispatch thinking level（派发思考档位）**:
-一次 subagent 运行在派发前解析出的档位意图，优先级同 ADR 0005：per-call override > role 声明 > 继承主会话。它回答「我们要求这个 run 用多大思考力度」，**不等于**子进程实际生效的档位——role 自带 model 且无 override 时本就不设档（undefined），由子进程自行取默认，而子进程的 JSON 流只在档位**变化**时上报，初始档位只写进它自己的 transcript，父进程观测不到（ADR 0015）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
+一次 subagent 运行在派发前解析出的档位意图，优先级为 per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018 扩展）。它回答「我们要求这个 run 用多大思考力度」，**不等于**子进程实际生效的档位——role 自带 model 且无 override 时本就不设档（undefined），由子进程自行取默认，而子进程的 JSON 流只在档位**变化**时上报，初始档位只写进它自己的 transcript，父进程观测不到（ADR 0015）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
 _Avoid_: 思考强度, reasoning effort, thinking intensity
+
+**extension config（扩展配置）**:
+本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，七个 config knob，惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
+_Avoid_: 设置面板, 配置文件（笼统）
+
+**config knob（配置旋钮）**:
+extension config 暴露的单个可调项，v1 七个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话）。
+_Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:
 工具调用未完成时通过**返回** `isError: true` 显式报错（pi ≥0.99.1 起 harness 认可返回载体；此前只从 throw 派生，返回字段是死代码——ADR 0010 该版本前提已失效，被 ADR 0016 supersede）。覆盖规则：**调用完成 → 成功结果（声明处带结构化 receipt）；调用未完成 → `isError: true`，文案逐字不变**。subagent 的未完成分支：blocking 失败（single 失败 / chain 失败步 / 中止，`aborted` 与 runSingleAgent 的 abort throw 一致）、参数校验失败（含 Available agents 恢复文案）、project-agent 拒绝；转换点在工具边界（try/catch 包编排层，编排层与 `formatBlockingToolError` 仍 throw、测试钉死该契约），失败结果的 `details.error` 携带该 run 终态信息（status/agent/source/usage/model/thinking，由纯函数 `toolErrorDetails` 从 registry 本次调用增量映射，renderResult 渲染富错误行——Q2=b）。明文例外：parallel 聚合保持成功语义（部分失败是交付物）、input-JSON 解析保持 loud throw（ADR 0011）。research 的未完成分支（拒批 / 未知 model / 启动失败）已随结构化 receipt 一并迁移到本规则（ADR 0017）：同样返回 `isError: true`、文案逐字不变；启动失败先落 registry `failed`、不推送（run 从未启动、无 log）。成功调用声明 `outputSchema` 并返回 `structuredContent`（见 structuredContent 词条），错误分支不带 receipt。

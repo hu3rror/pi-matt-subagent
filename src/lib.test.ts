@@ -9,14 +9,19 @@ import {
   assistantTextOfMessage,
   blockingRunStatus,
   buildDispatchArgs,
+  buildResearchFullParams,
   buildResearchPrompt,
   buildSubagentEnv,
+  configToLimits,
+  CONFIG_KEYS,
   createRunRegistry,
+  defaultConfig,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
   emptyUsage,
   estimateToolSurfaceTokens,
   formatBlockingToolError,
+  formatConfigOverview,
   formatModelSegment,
   formatRunSnapshot,
   formatUsageLine,
@@ -26,6 +31,8 @@ import {
   lastAssistantText,
   lastOutputLine,
   mergeToolParams,
+  parseConfigFile,
+  parseConfigSetValue,
   parseSubagentsArgs,
   readLogTail,
   researchStatusContent,
@@ -38,6 +45,7 @@ import {
   resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
+  serializeConfig,
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
@@ -1531,6 +1539,193 @@ test("parseSubagentsArgs maps the four command forms and rejects the rest", () =
     reason: "unexpected extra arguments: extra",
   });
   assert.deepEqual(parseSubagentsArgs("bogus"), { action: "invalid", reason: 'unknown action "bogus"' });
+});
+
+// ---------------------------------------------------------------------------
+// S21 — extension config surface (ADR 0018). The runtime-free decode /
+// validate / degrade seam: the lazy file creation, `set`/`reset` verbs, and
+// the dispatch-time plumbing are the extension's thin wiring shell; here we
+// pin the pure pipeline (parse -> validate -> degrade -> resolve) with
+// node --test, exactly like the other runtime-free lib suites.
+// ---------------------------------------------------------------------------
+
+test("defaultConfig returns the built-in defaults, wall-clock linked to the research ceiling", () => {
+  const c = defaultConfig();
+  assert.equal(c.maxTasksPerCall, 8);
+  assert.equal(c.maxConcurrency, 4);
+  assert.equal(c.perTaskOutputCap, 50 * 1024);
+  assert.equal(c.researchWallClockMs, DEFAULT_RESEARCH_WALL_CLOCK_MS);
+  assert.equal(c.logTailBytes, 4096);
+  assert.equal(c.dispatchDefaultModel, undefined);
+  assert.equal(c.dispatchDefaultThinkingLevel, undefined);
+});
+
+test("parseConfigFile(undefined/null/blank) is all defaults, nothing present or degraded", () => {
+  for (const raw of [undefined, null, "", "   "]) {
+    const s = parseConfigFile(raw as string);
+    assert.deepEqual(s.effective, defaultConfig());
+    assert.equal(s.parseError, false, JSON.stringify(raw));
+    assert.equal(s.present.size, 0);
+    assert.equal(s.degraded.size, 0);
+  }
+});
+
+test("parseConfigFile flags unparseable JSON as a parse error with all defaults", () => {
+  for (const raw of ["{", "not json", "[1,2]", "42", "\"hi\""]) {
+    const s = parseConfigFile(raw);
+    assert.equal(s.parseError, true, raw);
+    assert.deepEqual(s.effective, defaultConfig());
+  }
+});
+
+test("parseConfigFile applies the validated keys present and leaves the rest default", () => {
+  const s = parseConfigFile(JSON.stringify({ maxConcurrency: 6, researchWallClockMs: 7200000 }));
+  assert.equal(s.parseError, false);
+  assert.equal(s.effective.maxConcurrency, 6);
+  assert.equal(s.effective.researchWallClockMs, 7200000);
+  assert.equal(s.effective.maxTasksPerCall, 8);
+  assert.ok(s.present.has("maxConcurrency"));
+  assert.ok(s.present.has("researchWallClockMs"));
+  assert.ok(!s.present.has("maxTasksPerCall"));
+});
+
+test("parseConfigFile degrades structurally-invalid per-key values to defaults", () => {
+  const s = parseConfigFile(
+    JSON.stringify({
+      maxTasksPerCall: "eight", // wrong type
+      maxConcurrency: 0, // not >= 1
+      perTaskOutputCap: 1.5, // not an integer
+      researchWallClockMs: -5,
+      logTailBytes: 2000, // valid -> NOT degraded
+      dispatchDefaultModel: "", // empty model invalid
+      dispatchDefaultThinkingLevel: "turbo", // not a thinking level
+    }),
+  );
+  const eff = s.effective;
+  assert.equal(eff.maxTasksPerCall, 8);
+  assert.equal(eff.maxConcurrency, 4);
+  assert.equal(eff.perTaskOutputCap, 50 * 1024);
+  assert.equal(eff.researchWallClockMs, DEFAULT_RESEARCH_WALL_CLOCK_MS);
+  assert.equal(eff.logTailBytes, 2000, "valid key is kept");
+  assert.equal(eff.dispatchDefaultModel, undefined);
+  assert.equal(eff.dispatchDefaultThinkingLevel, undefined);
+  for (const k of [
+    "maxTasksPerCall",
+    "maxConcurrency",
+    "perTaskOutputCap",
+    "researchWallClockMs",
+    "dispatchDefaultModel",
+    "dispatchDefaultThinkingLevel",
+  ] as const) {
+    assert.ok(s.degraded.has(k), `degraded: ${k}`);
+  }
+  assert.ok(!s.degraded.has("logTailBytes"));
+});
+
+test("parseConfigFile ignores unknown keys entirely", () => {
+  const s = parseConfigFile(JSON.stringify({ maxConcurrency: 6, bogusKey: 99, another: "x" }));
+  assert.equal(s.effective.maxConcurrency, 6);
+  assert.ok(!(s.present as ReadonlySet<string>).has("bogusKey"));
+  assert.ok(!(s.degraded as ReadonlySet<string>).has("bogusKey"));
+});
+
+test("parseConfigSetValue validates a positive integer for numeric keys", () => {
+  assert.deepEqual(parseConfigSetValue("maxConcurrency", "6"), { ok: true, value: 6 });
+  assert.deepEqual(parseConfigSetValue("researchWallClockMs", "1800000"), { ok: true, value: 1800000 });
+  for (const v of ["0", "-1", "4.5", "abc", ""]) {
+    assert.equal(parseConfigSetValue("maxConcurrency", v).ok, false, v);
+  }
+  assert.equal(parseConfigSetValue("nope" as never, "3").ok, false, "unknown key rejected");
+});
+
+test("parseConfigSetValue accepts a non-empty model string and clears with empty/inherit", () => {
+  assert.deepEqual(parseConfigSetValue("dispatchDefaultModel", "openai/gpt-x"), { ok: true, value: "openai/gpt-x" });
+  assert.deepEqual(parseConfigSetValue("dispatchDefaultModel", "inherit"), { ok: true, value: undefined });
+  assert.deepEqual(parseConfigSetValue("dispatchDefaultModel", ""), { ok: true, value: undefined });
+});
+
+test("parseConfigSetValue accepts a thinking level and clears via empty/inherit", () => {
+  assert.deepEqual(parseConfigSetValue("dispatchDefaultThinkingLevel", "low"), { ok: true, value: "low" });
+  assert.deepEqual(parseConfigSetValue("dispatchDefaultThinkingLevel", "inherit"), { ok: true, value: undefined });
+  assert.equal(parseConfigSetValue("dispatchDefaultThinkingLevel", "bogus").ok, false);
+});
+
+test("serializeConfig writes all seven keys and round-trips through parseConfigFile", () => {
+  const cfg = { ...defaultConfig(), maxConcurrency: 10, dispatchDefaultThinkingLevel: "low" as const };
+  const text = serializeConfig(cfg);
+  const parsed = JSON.parse(text);
+  assert.equal(parsed.maxConcurrency, 10);
+  assert.equal(parsed.dispatchDefaultThinkingLevel, "low");
+  assert.equal(parsed.dispatchDefaultModel, null);
+  assert.equal(parsed.maxTasksPerCall, 8);
+  const s = parseConfigFile(text);
+  assert.equal(s.effective.maxConcurrency, 10);
+  assert.equal(s.effective.dispatchDefaultThinkingLevel, "low");
+  assert.ok(s.present.has("maxConcurrency"));
+  assert.ok(s.present.has("researchWallClockMs"), "full self-documenting write marks every key present");
+});
+
+test("configToLimits maps the three blocking limits from the effective config", () => {
+  const c = { ...defaultConfig(), maxTasksPerCall: 12, maxConcurrency: 3, perTaskOutputCap: 1000 };
+  assert.deepEqual(configToLimits(c), { maxTasksPerCall: 12, maxConcurrency: 3, perTaskOutputCap: 1000 });
+});
+
+test("buildResearchFullParams ties the maxWallClockMs maximum to the given ceiling", () => {
+  const schema = buildResearchFullParams(120 * 60 * 1000);
+  const direct = { task: "t", findingsPath: "f.md" };
+  assert.doesNotThrow(() =>
+    mergeToolParams({ direct, input: JSON.stringify({ maxWallClockMs: 90 * 60 * 1000 }), fullSchema: schema }),
+  );
+  assert.throws(
+    () =>
+      mergeToolParams({ direct, input: JSON.stringify({ maxWallClockMs: 121 * 60 * 1000 }), fullSchema: schema }),
+    /maxWallClockMs/,
+  );
+});
+
+test("resolveThinkingLevel inserts the config level between role and inherited", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", configLevel: "low", inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: undefined, configLevel: "low", inherited: "high" }), "low");
+  assert.equal(resolveThinkingLevel({ hasModel: false, override: "off", configLevel: "low", inherited: "high" }), "off");
+  assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low" }), undefined, "model-pinned agent still not forced");
+});
+
+test("parseSubagentsArgs parses the config sub-verb forms", () => {
+  assert.deepEqual(parseSubagentsArgs("config"), { action: "config", verb: "show" });
+  assert.deepEqual(parseSubagentsArgs("config reset"), { action: "config", verb: "reset" });
+  assert.deepEqual(parseSubagentsArgs("config set maxConcurrency 6"), {
+    action: "config",
+    verb: "set",
+    key: "maxConcurrency",
+    value: "6",
+  });
+  assert.deepEqual(parseSubagentsArgs("config set dispatchDefaultModel openai/gpt-x"), {
+    action: "config",
+    verb: "set",
+    key: "dispatchDefaultModel",
+    value: "openai/gpt-x",
+  });
+  assert.equal(parseSubagentsArgs("config bogus").action, "invalid");
+  assert.equal(parseSubagentsArgs("config set maxConcurrency").action, "invalid");
+  assert.equal(parseSubagentsArgs("config set nope 6").action, "invalid");
+  assert.equal(parseSubagentsArgs("config set extra bits").action, "invalid");
+});
+
+test("formatConfigOverview marks each key default/customized/degraded and shows the path", () => {
+  const s = parseConfigFile(JSON.stringify({ maxConcurrency: 6, researchWallClockMs: "abc" }));
+  const out = formatConfigOverview(s, "/cfg/matt-subagent.json", true);
+  assert.match(out, /maxTasksPerCall.*default/);
+  assert.match(out, /maxConcurrency.*customized/);
+  assert.match(out, /researchWallClockMs.*degraded/);
+  assert.match(out, /\/cfg\/matt-subagent\.json/);
+});
+
+test("formatConfigOverview reports a missing file and an unparseable file", () => {
+  const missing = formatConfigOverview(parseConfigFile(undefined), "/x.json", false);
+  assert.match(missing, /not created/);
+  const bad = formatConfigOverview(parseConfigFile("{"), "/x.json", true);
+  assert.match(bad, /unparseable/i);
 });
 
 // ---------------------------------------------------------------------------

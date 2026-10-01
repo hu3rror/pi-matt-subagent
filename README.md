@@ -90,6 +90,36 @@ You don't write `input` by hand — just say "run that review with `deepseek-v4-
 
 Model names resolve against your `~/.pi/agent/models.json` registry as `provider/id`; an unresolvable name fails loudly at the tool layer and the run never starts. Direct fields beat same-name JSON keys, and the merged result is validated against the full contract before dispatch (ADR 0011).
 
+## Configuration (ADR 0018)
+
+The extension's behavioral knobs are user-configurable through a lazily-created file at `~/.pi/agent/extensions/matt-subagent.json`. Loading never writes it — the file appears only when you `set` or `reset` — and deleting it restores all defaults. Values apply to the next run without `/reload`.
+
+The knobs and their built-in defaults:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `maxTasksPerCall` | 8 | Caps tasks per call — parallel tasks **and** chain steps; over the cap the call is refused |
+| `maxConcurrency` | 4 | Max in-flight subagent processes in parallel mode |
+| `perTaskOutputCap` | 50 KiB | Byte cap for one task's summary output in parallel aggregation |
+| `researchWallClockMs` | 60 min | Default background-research wall-clock cap, and the hard ceiling for `input.maxWallClockMs` |
+| `logTailBytes` | 4096 | Byte cap for `/subagents tail` log reads |
+| `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
+| `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level when neither the call nor the role specifies one |
+
+Read `dispatchDefaultModel`/`dispatchDefaultThinkingLevel` show `(inherit)` — the main session's model/level — until overridden. Dispatch precedence is: per-call override > role declaration > config default > main-session inheritance.
+
+Drive it from the `/subagents` command (also under the menu's "Settings…" entry):
+
+```
+/subagents config
+/subagents config set maxConcurrency 6
+/subagents config set dispatchDefaultThinkingLevel low
+/subagents config set dispatchDefaultModel inherit
+/subagents config reset
+```
+
+A `set` writes the full 7-key file (self-documenting; unchanged keys keep their values or defaults). Invalid entries — bad JSON, unknown keys, wrong types, `≤0` where a positive bound applies, an unknown thinking level, an empty model string — degrade that key to its default and are flagged `[degraded]` in the config view, so a typo can't stall a session. Deleting the file is a full reset.
+
 ## Project layout
 
 ```

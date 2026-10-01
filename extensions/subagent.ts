@@ -42,18 +42,25 @@ import {
   buildDispatchArgs,
   buildSubagentEnv,
   createRunRegistry,
-  DEFAULT_RESEARCH_WALL_CLOCK_MS,
+  buildResearchFullParams,
+  configToLimits,
+  CONFIG_FILE_NAME,
+  CONFIG_KEYS,
+  configKeyLabel,
+  defaultConfig,
   discoverAgents,
   emptyUsage,
+  formatConfigOverview,
   formatRunSnapshot,
   getPiInvocation,
   isActiveRunStatus,
   isTerminalRunStatus,
   mergeToolParams,
+  parseConfigFile,
+  parseConfigSetValue,
   parseSubagentsArgs,
   readLogTail,
   researchStatusContent,
-  RESEARCH_FULL_PARAMS,
   RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
@@ -61,13 +68,18 @@ import {
   runBackgroundResearch,
   RUN_STATUS_ICONS,
   scopeAllowsProject,
+  serializeConfig,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
+  THINKING_LEVELS,
   type AgentConfig,
   type AgentScope,
   type AgentSource,
   type AgentFrontmatter,
+  type ConfigKey,
+  type ConfigStatus,
+  type EffectiveConfig,
   type FrontmatterParser,
   type ResearchHandle,
   type ResearchChildSession,
@@ -381,24 +393,28 @@ interface DispatchDefaults {
   model?: string;
   thinkingLevel?: string;
   thinkingOverride?: string;
+  /** Extension-config default thinking level (ADR 0018): sits between the role and the main-session level. */
+  configLevel?: string;
   /** Parent session id threaded to the spawn env (subagent marker). */
   parentSessionId?: string;
 }
 
 /**
  * Decides the thinking level for one subagent run, shared by the blocking
- * runner and the background researcher: per-call override > role level > the
- * inherited main-session level; undefined when the agent pins its own model.
+ * runner and the background researcher: per-call override > role level >
+ * config default > the inherited main-session level; undefined when the agent
+ * pins its own model.
  */
 function resolveDispatchThinking(
   agent: AgentConfig | undefined,
-  d: { thinkingLevel?: string; thinkingOverride?: string },
+  d: { thinkingLevel?: string; thinkingOverride?: string; configLevel?: string },
 ): string | undefined {
   return resolveThinkingLevel({
     roleLevel: agent?.thinkingLevel,
     override: d.thinkingOverride,
     inherited: d.thinkingLevel,
     hasModel: Boolean(agent?.model),
+    configLevel: d.configLevel,
   });
 }
 
@@ -624,6 +640,7 @@ export default function (pi: ExtensionAPI) {
     ui: {
       select(title: string, options: string[]): Promise<string | undefined>;
       confirm(title: string, message: string): Promise<boolean>;
+      input(title: string, placeholder?: string): Promise<string | undefined>;
       notify(message: string, type?: "info" | "warning" | "error"): void;
       setStatus(key: string, text: string | undefined): void;
     };
@@ -633,6 +650,7 @@ export default function (pi: ExtensionAPI) {
   const MENU_STOP = "Stop run…";
   const MENU_CLEAR = "Clear finished";
   const MENU_SHOW_LOG = "Show log…";
+  const MENU_SETTINGS = "Settings…";
 
   const showSnapshot = (ctx: SubagentsUi) => {
     const runs = subagentRuns.snapshot().map((r) => {
@@ -682,7 +700,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`${runRef(run)} has no log to show — only background runs keep a log file.`, "error");
       return;
     }
-    const tail = readLogTail(run.logPath);
+    const tail = readLogTail(run.logPath, readConfigStatus().effective.logTailBytes);
     ctx.ui.notify(tail ? `Log tail of ${runRef(run)}:\n${tail}` : `(empty log for ${id})`, "info");
   };
 
@@ -720,9 +738,78 @@ export default function (pi: ExtensionAPI) {
     return choice.split(" · ")[0];
   };
 
+  // -------------------------------------------------------------------------
+  // Extension config surface (ADR 0018). Lazy creation: reading never writes;
+  // only `set`/`reset` creates the file. Every handler re-reads the file so a
+  // change applies to the next dispatch without /reload.
+  // -------------------------------------------------------------------------
+  const configPath = () => path.join(getAgentDir(), "extensions", CONFIG_FILE_NAME);
+  const configFileExists = () => fs.existsSync(configPath());
+  const readConfigStatus = (): ConfigStatus => {
+    const p = configPath();
+    return parseConfigFile(configFileExists() ? fs.readFileSync(p, "utf8") : undefined);
+  };
+  const writeConfig = async (content: string) => {
+    const p = configPath();
+    const dir = path.dirname(p);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    await withFileMutationQueue(p, async () => {
+      fs.writeFileSync(p, content, "utf8");
+    });
+  };
+  const showConfig = (ctx: SubagentsUi) => {
+    const p = configPath();
+    ctx.ui.notify(formatConfigOverview(readConfigStatus(), p, configFileExists()), "info");
+  };
+  const setConfig = async (ctx: SubagentsUi, key: ConfigKey, value: string) => {
+    const parsed = parseConfigSetValue(key, value);
+    if (!parsed.ok) {
+      ctx.ui.notify(parsed.reason, "error");
+      return;
+    }
+    const next = { ...readConfigStatus().effective } as EffectiveConfig;
+    const target = next as unknown as Record<string, unknown>;
+    target[key] = parsed.value;
+    await writeConfig(serializeConfig(next));
+    ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key, readConfigStatus())}`, "info");
+  };
+  const resetConfig = async (ctx: SubagentsUi) => {
+    await writeConfig(serializeConfig(defaultConfig()));
+    ctx.ui.notify("config reset: all values back to built-in defaults", "info");
+    showConfig(ctx);
+  };
+  const configMenu = async (ctx: SubagentsUi) => {
+    const opts: string[] = CONFIG_KEYS.map((k) => configKeyLabel(k, readConfigStatus()));
+    const MENU_CONFIG_RESET = "Reset all to defaults";
+    const MENU_CONFIG_BACK = "\u2190 Back";
+    const choice = await ctx.ui.select("Subagents config", [...opts, MENU_CONFIG_RESET, MENU_CONFIG_BACK]);
+    if (!choice || choice === MENU_CONFIG_BACK) return;
+    if (choice === MENU_CONFIG_RESET) {
+      if (ctx.hasUI && !(await ctx.ui.confirm("Reset config?", "Restore every key to its built-in default?"))) return;
+      return resetConfig(ctx);
+    }
+    const key = CONFIG_KEYS.find((k) => choice.startsWith(`${k} =`));
+    if (!key) return;
+    if (key === "dispatchDefaultThinkingLevel") {
+      const sel = await ctx.ui.select(`${key}`, [...THINKING_LEVELS, "inherit (clear)"]);
+      if (sel === undefined) return;
+      return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
+    }
+    const raw = await ctx.ui.input(`${key}`, "new value (inherit clears the dispatch knobs)");
+    if (raw === undefined) return;
+    setConfig(ctx, key, raw);
+  };
+
   const openMenu = async (ctx: SubagentsUi) => {
-    const choice = await ctx.ui.select("Subagent runs", [MENU_SNAPSHOT, MENU_STOP, MENU_CLEAR, MENU_SHOW_LOG]);
+    const choice = await ctx.ui.select("Subagent runs", [
+      MENU_SNAPSHOT,
+      MENU_STOP,
+      MENU_CLEAR,
+      MENU_SHOW_LOG,
+      MENU_SETTINGS,
+    ]);
     if (!choice) return;
+    if (choice === MENU_SETTINGS) return configMenu(ctx);
     if (choice === MENU_SNAPSHOT) return showSnapshot(ctx);
     if (choice === MENU_STOP) {
       const id = await pickRun(
@@ -754,6 +841,11 @@ export default function (pi: ExtensionAPI) {
       if (cmd.action === "snapshot") return showSnapshot(ctx);
       if (cmd.action === "prune") return pruneFinishedRuns(ctx);
       if (cmd.action === "kill") return killRun(cmd.id, ctx);
+      if (cmd.action === "config") {
+        if (cmd.verb === "show") return showConfig(ctx);
+        if (cmd.verb === "reset") return resetConfig(ctx);
+        return setConfig(ctx, cmd.key, cmd.value);
+      }
       tailRun(cmd.id, ctx);
     },
   });
@@ -774,12 +866,18 @@ export default function (pi: ExtensionAPI) {
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
+      // Extension config (ADR 0018): read once per call, reused for this run.
+      const config = readConfigStatus().effective;
       const dispatchDefaults: DispatchDefaults = {
-        model: merged.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+        // Model: a role-declared model pins the run (kept); otherwise the
+        // default chain is per-call override > config default > inherited
+        // session model. Thinking is resolved separately (config layer).
+        model: merged.model ?? (config.dispatchDefaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)),
         thinkingLevel: ctx.thinkingLevel,
         // input.thinkingOverride is the canonical per-run override field; the
         // public `thinkingLevel` param maps to the same slot (ADR 0011).
         thinkingOverride: merged.thinkingOverride ?? merged.thinkingLevel,
+        configLevel: config.dispatchDefaultThinkingLevel,
         parentSessionId: ctx.sessionManager.getSessionId(),
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
@@ -868,6 +966,7 @@ export default function (pi: ExtensionAPI) {
           registry: subagentRuns,
           agents,
           signal,
+          limits: configToLimits(config),
           onToolUpdate: (text, details) => {
             onUpdate?.({ content: [{ type: "text", text }], details });
           },
@@ -957,10 +1056,13 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       footerUi = ctx as SubagentsUi;
       const { input, ...directParams } = params;
+      // Extension config (ADR 0018): the wall-clock ceiling is the schema
+      // maximum too, so raising the config immediately lets a run request it.
+      const config = readConfigStatus().effective;
       const merged = mergeToolParams<typeof directParams, { model?: string; maxWallClockMs?: number }>({
         direct: directParams,
         input,
-        fullSchema: RESEARCH_FULL_PARAMS,
+        fullSchema: buildResearchFullParams(config.researchWallClockMs),
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
       const availableToolNames = probeAvailableToolNames(pi);
@@ -990,22 +1092,26 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // The in-process child needs a Model object, not a provider/id string:
-      // inherit the main session's model, or resolve the input `model` override
-      // through the registry. An unresolvable override fails loudly.
+      const researcher = agents.find((a) => a.name === "researcher");
+
+      // The in-process child needs a Model object, not a provider/id string.
+      // Precedence: per-call `model` override > role-declared researcher model >
+      // config default > inherited main session model. An unresolvable override
+      // (any source) fails loudly.
       let childModel: Model<any> | undefined = ctx.model;
-      if (merged.model) {
-        const slash = merged.model.indexOf("/");
+      const rawModel = merged.model ?? researcher?.model ?? config.dispatchDefaultModel;
+      if (rawModel) {
+        const slash = rawModel.indexOf("/");
         const found =
           slash > 0
-            ? ctx.modelRegistry.find(merged.model.slice(0, slash), merged.model.slice(slash + 1))
+            ? ctx.modelRegistry.find(rawModel.slice(0, slash), rawModel.slice(slash + 1))
             : undefined;
         if (!found) {
           // ADR 0016/0017 (3b) — an unresolvable model override is a
           // not-completed call: error-marked, content unchanged (no run is
           // registered, so no receipt and no details).
           return {
-            content: [{ type: "text", text: `Unknown model override: ${merged.model}` }],
+            content: [{ type: "text", text: `Unknown model override: ${rawModel}` }],
             details: undefined,
             isError: true,
           };
@@ -1013,10 +1119,10 @@ export default function (pi: ExtensionAPI) {
         childModel = found;
       }
 
-      const researcher = agents.find((a) => a.name === "researcher");
       const thinking = resolveDispatchThinking(researcher, {
         thinkingLevel: ctx.thinkingLevel,
         thinkingOverride: merged.thinkingLevel,
+        configLevel: config.dispatchDefaultThinkingLevel,
       });
 
       const runId = subagentRuns.register({
@@ -1042,7 +1148,7 @@ export default function (pi: ExtensionAPI) {
             tools: merged.tools,
             task: merged.task,
             findingsPath,
-            maxWallClockMs: merged.maxWallClockMs,
+            maxWallClockMs: merged.maxWallClockMs ?? config.researchWallClockMs,
             availableToolNames,
             agents,
             abortSignal: abortController.signal,
