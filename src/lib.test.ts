@@ -14,6 +14,7 @@ import {
   buildSubagentEnv,
   configToLimits,
   CONFIG_KEYS,
+  configKeyLabel,
   createRunRegistry,
   defaultConfig,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
@@ -1776,6 +1777,20 @@ test("formatConfigOverview marks each key default/customized/degraded and shows 
   assert.match(out, /maxConcurrency.*customized/);
   assert.match(out, /researchWallClockMs.*degraded/);
   assert.match(out, /\/cfg\/matt-subagent\.json/);
+});
+
+test("configKeyLabel: a written key equal to its default is [default], not [customized]", () => {
+  // maxTasksPerCall written as its built-in default → value equals default.
+  const atDefault = parseConfigFile(JSON.stringify({ maxTasksPerCall: 8 }));
+  assert.match(configKeyLabel("maxTasksPerCall", atDefault), /8 \[default\]/);
+  // A differing value keeps [customized].
+  const changed = parseConfigFile(JSON.stringify({ maxConcurrency: 6 }));
+  assert.match(configKeyLabel("maxConcurrency", changed), /6 \[customized\]/);
+  // An explicit-null inherit marker has effective undefined = default → [default].
+  const inherit = parseConfigFile(JSON.stringify({ dispatchDefaultModel: null }));
+  assert.match(configKeyLabel("dispatchDefaultModel", inherit), /\(inherit\) \[default\]/);
+  // Not written at all is [default] too.
+  assert.match(configKeyLabel("logTailBytes", parseConfigFile(undefined)), /4096 \[default\]/);
 });
 
 test("formatConfigOverview reports a missing file and an unparseable file", () => {

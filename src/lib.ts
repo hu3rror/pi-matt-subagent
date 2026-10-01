@@ -297,7 +297,12 @@ export function configToLimits(cfg: EffectiveConfig): ConfigBlockingLimits {
 
 /** One config knob's `key = value [status]` line, shared by the overview and the menu. */
 export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
-  const marker = status.degraded.has(key) ? "degraded" : status.present.has(key) ? "customized" : "default";
+  // A key the user wrote is only "customized" when its value actually differs
+  // from the built-in default; a written-but-default value (e.g. `set`ting the
+  // default back, or an explicit-null inherit marker) labels as [default].
+  const customized =
+    status.present.has(key) && getConfigValue(status.effective, key) !== getConfigValue(defaultConfig(), key);
+  const marker = status.degraded.has(key) ? "degraded" : customized ? "customized" : "default";
   const spec = configKeySpec(key);
   const value = spec?.optional
     ? (getConfigValue(status.effective, key) ?? "(inherit)")
