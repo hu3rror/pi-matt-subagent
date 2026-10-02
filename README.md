@@ -1,25 +1,25 @@
-# pi-matt-subagent
-
-> 简体中文: [README.zh-CN.md](README.zh-CN.md)
-
-<p align="center">
+<div align="center">
+  <h1 id="pi-matt-subagent">pi-matt-subagent</h1>
+  
+  简体中文: [README.zh-CN.md](README.zh-CN.md)
+  
   <img src="docs/banner.webp" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
-</p>
+</div>
 
 A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) into real tool calls. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer — it starts real pi subagents (separate subprocesses, or an in-process session for background work), waits for them, and hands you their results.
+
+> [!WARNING]
+> This plugin registers a tool named `subagent`; similar subagents extensions do too. Don't run them side by side — install one or the other, never both.
 
 ## Features
 
 - **Two tools, two semantics** — `subagent` (blocking) and `research` (background), matching exactly what the upstream skills ask for.
-- **Blocking subagents** — run single, parallel, or chained agents in separate subprocesses; results come back in one tool result, with a `{previous}` placeholder for chain handoffs.
+- **Blocking subagents** — single, parallel, or chained agents run in separate subprocesses; results come back in one tool result, with a `{previous}` placeholder for chain handoffs.
 - **Background research** — an in-process second session writes cited findings to a file while you keep working; the completion state (`succeeded` / `failed` / `terminated` / `aborted`) is pushed into your context — no polling.
-- **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder`, the same jobs the skills describe.
+- **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder` — the same jobs the skills describe.
 - **Four slash commands** — `/code-review <ref>`, `/design-it-twice <candidate>`, `/research <question>`, and `/subagents` for run management.
-- **Per-run overrides** — pick a different model or thinking level for a single run (via the hidden `input` field).
-- **Live run management** — a footer counter (`⧗ N subagents running`), `/subagents` to follow, stop, or inspect runs.
-
-> [!WARNING]
-> This plugin registers a tool named `subagent`; similar subagents extensions do too. Don't run them side by side — install one or the other, never both.
+- **Per-run overrides** — pick a different model or thinking level for one run via the hidden `input` field.
+- **Live run management** — a footer counter (`⧗ N subagents running`); `/subagents` to follow, stop, or inspect runs.
 
 ## Install
 
@@ -33,26 +33,29 @@ Or from a local checkout:
 pi install <path-to-this-repo>
 ```
 
-Both install the extension and the prompt templates (`/code-review`, `/design-it-twice`, `/research`; `/subagents` ships in the extension itself). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
+Both install the extension and the prompt templates (`/code-review`, `/design-it-twice`, `/research`; `/subagents` ships with the extension). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
 
 ## Quick start
 
-Everything here is model-facing: you describe the job and the main agent makes the call.
+Everything here is model-facing — you describe the job, the main agent makes the call.
 
 - **Review your last commit** — `/code-review HEAD~1` runs the Standards and Spec axes as two parallel blocking subagents and reports them side by side.
-- **Research while you keep working** — `/research "verify the claim that …"` returns a handle immediately; the findings path is pushed to you when the run finishes.
-- **Call the tools directly** — say "run a `subagent` review of `src/lib.ts` with `standards-reviewer`" or "start a `research` on ADR 0013 and write findings to `docs/research-0013.md`".
+- **Research while you keep working** — `/research "verify the claim that …"` returns immediately; the findings path is pushed to you when the run finishes.
+- **Call the tools directly** — say "run a `subagent` review of `src/lib.ts` with `standards-reviewer`", or "start a `research` on ADR 0013 and write findings to `docs/research-0013.md`".
 
-## Usage
-
-### The two tools
+## The two tools
 
 | Tool | Semantics | What it does |
 | --- | --- | --- |
 | `subagent` | **blocking** | Runs single / parallel / chain subagents. Does not return until every subagent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
 | `research` | **background** | Runs an in-process second session that writes cited findings to a file, returns immediately, and pushes the completion into your context — no polling. |
 
-Both accept an optional `input` field: a JSON object string carrying advanced parameters the public schema hides. `subagent` accepts `model` and `thinkingOverride` (per-run model and thinking level); `research` accepts `model` and `maxWallClockMs` (a wall-clock cap that may only tighten the 60-minute default). Direct fields override same-name JSON keys; invalid JSON raises a clear model-visible error, and the merged parameters are validated against the full contract before dispatch.
+Both accept an optional `input` field: a JSON object string carrying advanced parameters the public schema hides.
+
+- `subagent` accepts `model` and `thinkingOverride` (per-run model and thinking level).
+- `research` accepts `model` and `maxWallClockMs` (a wall-clock cap that may only tighten the 60-minute default).
+
+Direct fields override same-name JSON keys; invalid JSON raises a clear model-visible error, and the merged parameters are validated against the full contract before dispatch.
 
 ```json
 {
@@ -64,16 +67,18 @@ Both accept an optional `input` field: a JSON object string carrying advanced pa
 
 Model names resolve against your `~/.pi/agent/models.json` registry as `provider/id`; an unresolvable name fails loudly and the run never starts.
 
-### The four slash commands
+## The four slash commands
 
 - **`/code-review <ref>`** — two-axis review (Standards + Spec) of the diff since `<ref>`, run as two parallel blocking subagents.
 - **`/design-it-twice <candidate>`** — generate 3–4 radically different interface designs for one deepening candidate as parallel blocking subagents, then compare by depth, locality, and seam placement.
 - **`/research <question>`** — start a background researcher against primary sources and keep working; the completion is pushed to you with the findings path.
 - **`/subagents`** — overview and management of every run: follow progress, stop a runaway researcher, clear finished records, read a run's log (`kill`, `tail`, `prune`, `snapshot`).
 
-### Roles and dispatch
+## Roles and dispatch
 
-Six bundled roles come with the plugin; user agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation). Dispatch precedence is: per-call override > role declaration > config default > main-session inheritance.
+Six bundled roles come with the plugin. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation).
+
+Dispatch precedence: per-call override > role declaration > config default > main-session inheritance.
 
 ## Configuration
 
@@ -98,22 +103,25 @@ Drive it from `/subagents config`:
 /subagents config reset
 ```
 
-A `set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
+`set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
 
 ## Project layout
 
 ```
-extensions/subagent.ts   pi extension: registers the subagent + research tools and the
-                         in-process research child-session factory
-src/lib.ts               pure logic — roles, tool schemas (single source of truth), input
-                         merge/validation, tool-name resolution, the research runner; zero
-                         pi-runtime imports, tested with node --test
-src/lib.test.ts          unit tests
-scripts/                 token benchmark + e2e scripts (dev-only)
-prompts/                 the four slash-command templates
-docs/adr/                18 recorded decisions (dual channel, research redesign, config
-                         surface, usage line, …)
-GLOSSARY.md              domain glossary (subagent, role, blocking, background, push, …)
+extensions/subagent.ts         pi extension: registers the two tools, the run-registry UI,
+                               and the in-process research child-session factory
+src/lib.ts                     pure logic — roles, tool schemas (single source of truth),
+                               input merge/validation, tool-name resolution, the research
+                               runner, run-registry bookkeeping; zero pi-runtime imports
+src/blocking-protocol.ts       pure blocking-child protocol: JSON-lines stdout accumulation,
+                               usage tracking, escalating-kill abort path
+src/blocking-runner.ts         pure blocking orchestration — single / parallel / chain plans
+src/*.test.ts                  unit tests (node --test, no pi runtime)
+scripts/                       token benchmark + e2e scripts (dev-only)
+prompts/                       the three slash-command templates
+docs/adr/                      19 recorded decisions (dual channel, research redesign,
+                               config surface, usage line, …)
+GLOSSARY.md                    domain glossary (subagent, role, blocking, background, push, …)
 ```
 
 ## Development
@@ -123,4 +131,4 @@ npm test          # unit tests, no pi runtime needed
 npm run typecheck # extension + lib + scripts typecheck
 ```
 
-The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) pin the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~531 / ~448 tokens for `subagent` / `research`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
+The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~531 / ~448 tokens for `subagent` / `research`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
