@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Value } from "typebox/value";
 import {
   appendResearchTerminatedMarker,
   assistantTextOfMessage,
@@ -47,6 +48,7 @@ import {
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
   resolveRole,
+  resolveDispatchThinking,
   resolveThinkingLevel,
   resolveTools,
   runBackgroundResearch,
@@ -917,6 +919,62 @@ test("resolveThinkingLevel falls back to the role level, then the inherited leve
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
+});
+
+// S8b — resolveDispatchThinking (ADR 0020): the per-task/per-step layer sits
+// above the call-level override; both beat role/config/inherited layers.
+test("resolveDispatchThinking prefers the per-task level over the call-level override", () => {
+  const agent = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", thinkingOverride: "low" }, "high"),
+    "high",
+    "task-level wins over call-level override",
+  );
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", thinkingOverride: "low" }),
+    "low",
+    "without a task level the call-level override applies",
+  );
+});
+
+test("resolveDispatchThinking per-task level beats role and config layers and inheritance", () => {
+  const agent = { name: "r", description: "", systemPrompt: "", thinkingLevel: "medium", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", configLevel: "low" }, "off"),
+    "off",
+    "per-task wins over role tier and config default",
+  );
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", configLevel: "low" }),
+    "medium",
+    "role tier wins over the config default when no override is present",
+  );
+});
+
+test("resolveDispatchThinking per-task level wins even for model-pinned roles", () => {
+  const agent = { name: "r", description: "", systemPrompt: "", model: "sensenova/deepseek-v4-flash", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh" }, "high"),
+    "high",
+    "the override slot is checked before the model-pinned shortcut",
+  );
+  assert.equal(
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh" }),
+    undefined,
+    "model-pinned role with nothing explicit still passes no level",
+  );
+});
+
+// S8c — ADR 0020 data path: per-task thinkingLevel must pass both schemas
+// unchanged (pass-through rationale: blocking-runner.ts validator JSDoc).
+test("subagent schemas accept a per-task thinkingLevel without declaring it", () => {
+  const call = { tasks: [{ agent: "a", task: "t", thinkingLevel: "high" }] };
+  assert.ok(Value.Check(SUBAGENT_TOOL_PARAMS, call), "registered schema must pass per-task thinkingLevel through");
+  assert.ok(Value.Check(SUBAGENT_FULL_PARAMS, call), "full dispatch contract must pass per-task thinkingLevel through");
+  assert.ok(
+    Value.Check(SUBAGENT_TOOL_PARAMS, { chain: [{ agent: "a", task: "t", thinkingLevel: "xhigh" }] }),
+    "chain steps pass through the same way",
+  );
 });
 
 // Literals, not derived from EMBEDDED_ROLES: a regression to a uniform role

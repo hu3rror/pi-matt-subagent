@@ -16,6 +16,7 @@ import {
   formatBlockingToolError,
   getResultOutput,
   isActiveRunStatus,
+  isThinkingLevel,
   isToolError,
   lastAssistantText,
   lastOutputLine,
@@ -46,14 +47,22 @@ export interface SubagentDetails {
 
 export type BlockingPlan =
   | { mode: "single"; agent: string; task: string; cwd?: string }
-  | { mode: "parallel"; tasks: Array<{ agent: string; task: string; cwd?: string }> }
-  | { mode: "chain"; steps: Array<{ agent: string; task: string; cwd?: string }> };
+  | {
+      mode: "parallel";
+      tasks: Array<{ agent: string; task: string; cwd?: string; thinkingLevel?: string }>;
+    }
+  | {
+      mode: "chain";
+      steps: Array<{ agent: string; task: string; cwd?: string; thinkingLevel?: string }>;
+    };
 
 export interface RunnerTask {
   agentName: string;
   task: string;
   cwd?: string;
   step?: number;
+  /** Per-task/per-step thinking override (ADR 0020). */
+  thinkingLevel?: string;
 }
 
 /** The execution seam the orchestrator runs over: pure execution plus typed progress events. */
@@ -86,6 +95,24 @@ const DEFAULT_LIMITS: Required<BlockingPlanLimits> = configToLimits(defaultConfi
 //   the orchestrator consumes it. truncateParallelOutput stays here because it
 //   is parallel-summary display, not shared semantics.
 // ---------------------------------------------------------------------------
+
+/**
+ * ADR 0020 — a per-task/per-step `thinkingLevel` is an undocumented field
+ * (never declared on the model-facing schema) that pi passes through to the
+ * tool untouched, so validate it here: a bad value fails loudly before any
+ * run registers. Returns the first offending item, or undefined when every
+ * item is valid or unset.
+ */
+export function firstInvalidPlanThinkingLevel(
+  plan: BlockingPlan,
+): { index: number; value: unknown } | undefined {
+  const items = plan.mode === "parallel" ? plan.tasks : plan.mode === "chain" ? plan.steps : [];
+  for (let i = 0; i < items.length; i++) {
+    const level = items[i].thinkingLevel;
+    if (level !== undefined && !isThinkingLevel(level)) return { index: i, value: level };
+  }
+  return undefined;
+}
 
 /** Byte-cap one task's summary output, dropping the tail of a partial multibyte char. */
 export function truncateParallelOutput(output: string, cap = DEFAULT_LIMITS.perTaskOutputCap): string {
@@ -245,7 +272,7 @@ export async function runBlockingPlan(opts: {
       const step = plan.steps[i];
       const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
       const result = await runStep(
-        { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1 },
+        { agentName: step.agent, task: taskWithContext, cwd: step.cwd, step: i + 1, thinkingLevel: step.thinkingLevel },
         step.agent,
         {
           onPartial: (partial) =>
@@ -300,7 +327,7 @@ export async function runBlockingPlan(opts: {
   let results: SingleResult[];
   try {
     results = await mapWithConcurrencyLimit(plan.tasks, limits.maxConcurrency, async (t, index) => {
-      const result = await runStep({ agentName: t.agent, task: t.task, cwd: t.cwd }, t.agent, {
+      const result = await runStep({ agentName: t.agent, task: t.task, cwd: t.cwd, thinkingLevel: t.thinkingLevel }, t.agent, {
         preRegisteredId: runIds[index],
         onPartial: (partial) => {
           allResults[index] = partial;

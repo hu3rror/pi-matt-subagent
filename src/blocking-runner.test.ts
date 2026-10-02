@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Message } from "@earendil-works/pi-ai";
 import { createRunRegistry, isActiveRunStatus, type AgentConfig } from "./lib.ts";
-import { runBlockingPlan, truncateParallelOutput, type RunnerSeam, type SingleResult } from "./blocking-runner.ts";
+import { runBlockingPlan, firstInvalidPlanThinkingLevel, truncateParallelOutput, type RunnerSeam, type SingleResult } from "./blocking-runner.ts";
 
 const noAgents: AgentConfig[] = [];
 
@@ -502,4 +502,96 @@ test("truncateParallelOutput drops the tail of a partial multibyte char", () => 
 
 test("truncateParallelOutput returns output unchanged under the cap", () => {
   assert.equal(truncateParallelOutput("short", 100), "short");
+});
+
+// ---------------------------------------------------------------------------
+// Per-task thinking level (ADR 0020)
+// ---------------------------------------------------------------------------
+
+test("firstInvalidPlanThinkingLevel passes unset and valid per-task levels", () => {
+  assert.equal(
+    firstInvalidPlanThinkingLevel({ mode: "parallel", tasks: [{ agent: "a", task: "1" }] }),
+    undefined,
+  );
+  assert.equal(
+    firstInvalidPlanThinkingLevel({
+      mode: "parallel",
+      tasks: [{ agent: "a", task: "1", thinkingLevel: "high" }, { agent: "b", task: "2", thinkingLevel: "off" }],
+    }),
+    undefined,
+  );
+  assert.equal(
+    firstInvalidPlanThinkingLevel({ mode: "chain", steps: [{ agent: "a", task: "1", thinkingLevel: "xhigh" }] }),
+    undefined,
+  );
+  // single mode has no per-task field — never flagged
+  assert.equal(firstInvalidPlanThinkingLevel({ mode: "single", agent: "a", task: "1" }), undefined);
+});
+
+test("firstInvalidPlanThinkingLevel reports the first bad level with its index and value", () => {
+  assert.deepEqual(
+    firstInvalidPlanThinkingLevel({
+      mode: "parallel",
+      tasks: [{ agent: "a", task: "1", thinkingLevel: "turbo" }, { agent: "b", task: "2", thinkingLevel: "high" }],
+    }),
+    { index: 0, value: "turbo" },
+  );
+  assert.deepEqual(
+    firstInvalidPlanThinkingLevel({
+      mode: "chain",
+      steps: [{ agent: "a", task: "1" }, { agent: "b", task: "2", thinkingLevel: 7 as unknown as string }],
+    }),
+    { index: 1, value: 7 },
+    "a non-string value is flagged too",
+  );
+});
+
+test("parallel mode forwards each task's thinkingLevel to the runner", async () => {
+  const registry = createRunRegistry();
+  const seen: Array<{ agentName: string; thinkingLevel?: string }> = [];
+  const runner: RunnerSeam = {
+    async runTask(t) {
+      seen.push({ agentName: t.agentName, thinkingLevel: t.thinkingLevel });
+      return okResult(t.agentName, `out-${t.agentName}`);
+    },
+  };
+  const out = await runBlockingPlan({
+    plan: {
+      mode: "parallel",
+      tasks: [{ agent: "a", task: "1", thinkingLevel: "high" }, { agent: "b", task: "2" }],
+    },
+    runner,
+    registry,
+    agents: noAgents,
+  });
+  assert.equal(out.details.mode, "parallel");
+  assert.deepEqual(seen, [
+    { agentName: "a", thinkingLevel: "high" },
+    { agentName: "b", thinkingLevel: undefined },
+  ]);
+});
+
+test("chain mode forwards each step's thinkingLevel to the runner", async () => {
+  const registry = createRunRegistry();
+  const seen: Array<{ agentName: string; thinkingLevel?: string }> = [];
+  const runner: RunnerSeam = {
+    async runTask(t) {
+      seen.push({ agentName: t.agentName, thinkingLevel: t.thinkingLevel });
+      return okResult(t.agentName, `out-${t.agentName}`);
+    },
+  };
+  const out = await runBlockingPlan({
+    plan: {
+      mode: "chain",
+      steps: [{ agent: "a", task: "1", thinkingLevel: "xhigh" }, { agent: "b", task: "2" }],
+    },
+    runner,
+    registry,
+    agents: noAgents,
+  });
+  assert.equal(out.details.mode, "chain");
+  assert.deepEqual(seen, [
+    { agentName: "a", thinkingLevel: "xhigh" },
+    { agentName: "b", thinkingLevel: undefined },
+  ]);
 });

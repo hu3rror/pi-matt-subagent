@@ -357,7 +357,11 @@ const SubagentPublicFields = {
   tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel tasks: {agent, task}[]" })),
   chain: Type.Optional(Type.Array(ChainItem, { description: "Sequential chain: {agent, task}[]" })),
   agentScope: Type.Optional(AgentScopeSchema),
-  thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  thinkingLevel: Type.Optional(
+    Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)), {
+      description: "Thinking level for the whole call (single, parallel, or chain); applies to every run.",
+    }),
+  ),
   cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
 };
 
@@ -1325,6 +1329,25 @@ export function resolveThinkingLevel(opts: {
   const explicit = opts.roleLevel ?? opts.configLevel;
   if (opts.hasModel) return explicit;
   return explicit ?? opts.inherited;
+}
+
+/**
+ * Resolves one run's thinking level (ADR 0005/0018/0020): a per-task/per-step
+ * `thinkingLevel` (ADR 0020) wins over the call-level override; both override
+ * the role tier, then the config default, then the inherited main-session level.
+ */
+export function resolveDispatchThinking(
+  agent: AgentConfig | undefined,
+  d: { thinkingLevel?: string; thinkingOverride?: string; configLevel?: string },
+  taskLevel?: string,
+): string | undefined {
+  return resolveThinkingLevel({
+    roleLevel: agent?.thinkingLevel,
+    override: taskLevel ?? d.thinkingOverride,
+    inherited: d.thinkingLevel,
+    hasModel: Boolean(agent?.model),
+    configLevel: d.configLevel,
+  });
 }
 
 /**

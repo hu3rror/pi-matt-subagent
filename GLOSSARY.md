@@ -86,7 +86,7 @@ _Avoid_: 管理面板, panel
 _Avoid_: status panel, 面板
 
 **dispatch thinking level（派发思考档位）**:
-一次 subagent 运行在派发前解析出的档位意图，优先级为 per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018 扩展）。`hasModel`（role 自带 model）的短路只跳过继承层，role/config 显式档位仍生效（ADR 0018）。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
+一次 subagent 运行在派发前解析出的档位意图，优先级为 per-task/per-step level > per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018/0020 扩展）。per-task/per-step level 是未在模型面 schema 声明、经 pi 透传原样读到的字段（pi 校验只拒不剥，ADR 0020）——模型把它放在调用级或任务级都生效，非法值在派发前响亮报错（parallel 为 `Invalid thinkingLevel on tasks[i]`、chain 为 `steps[i]`）。`hasModel`（role 自带 model）的短路只跳过继承层，role/config 显式档位仍生效（ADR 0018）。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **clamp（档位钳制）**:

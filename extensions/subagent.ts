@@ -68,7 +68,7 @@ import {
   RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
-  resolveThinkingLevel,
+  resolveDispatchThinking,
   runBackgroundResearch,
   RUN_STATUS_ICONS,
   scopeAllowsProject,
@@ -114,9 +114,11 @@ import {
 } from "../src/lib.ts";
 
 import {
+  firstInvalidPlanThinkingLevel,
   runBlockingPlan,
   type BlockingPlan,
   type RunnerSeam,
+  type RunnerTask,
   type SubagentDetails,
 } from "../src/blocking-runner.ts";
 
@@ -435,41 +437,15 @@ const planForRun = (requested: string | undefined, model: Model<any> | undefined
   return { effective: planned?.actual ?? requested, requested: planned?.requested };
 };
 
-/**
- * Decides the thinking level for one subagent run, shared by the blocking
- * runner and the background researcher: per-call override > role level >
- * config default > the inherited main-session level; undefined when the agent
- * pins its own model and nothing explicit remains.
- */
-function resolveDispatchThinking(
-  agent: AgentConfig | undefined,
-  d: { thinkingLevel?: string; thinkingOverride?: string; configLevel?: string },
-): string | undefined {
-  return resolveThinkingLevel({
-    roleLevel: agent?.thinkingLevel,
-    override: d.thinkingOverride,
-    inherited: d.thinkingLevel,
-    hasModel: Boolean(agent?.model),
-    configLevel: d.configLevel,
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Blocking runner
 // ---------------------------------------------------------------------------
-
-interface AgentTask {
-  agentName: string;
-  task: string;
-  cwd?: string;
-  step?: number;
-}
 
 async function runSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
   agents: AgentConfig[],
-  agentTask: AgentTask,
+  agentTask: RunnerTask,
   signal: AbortSignal | undefined,
   onProgress: (partial: SingleResult) => void,
   availableToolNames: ReadonlySet<string>,
@@ -493,7 +469,7 @@ async function runSingleAgent(
   }
 
   const model = agent.model ?? dispatchDefaults.model;
-  const requested = resolveDispatchThinking(agent, dispatchDefaults);
+  const requested = resolveDispatchThinking(agent, dispatchDefaults, agentTask.thinkingLevel);
   const resolvedModel = model ? resolveModel(model) : undefined;
   const { effective: thinking, requested: requestedThinking } = planForRun(requested, resolvedModel);
 
@@ -1049,6 +1025,32 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      const plan: BlockingPlan = hasChain
+        ? { mode: "chain", steps: merged.chain! }
+        : hasTasks
+          ? { mode: "parallel", tasks: merged.tasks! }
+          : { mode: "single", agent: merged.agent!, task: merged.task!, cwd: merged.cwd };
+
+      // ADR 0020 — a bad per-task/per-step thinkingLevel fails loudly here,
+      // before any agent-confirm prompt or run registers (see the validator's
+      // JSDoc in blocking-runner.ts for the pass-through rationale).
+      const badLevel = firstInvalidPlanThinkingLevel(plan);
+      if (badLevel) {
+        const kind = mode === "chain" ? "steps" : "tasks";
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Invalid thinkingLevel on ${kind}[${badLevel.index}]: ${JSON.stringify(badLevel.value)}. ` +
+                `Must be one of: ${THINKING_LEVELS.join(", ")}.`,
+            },
+          ],
+          details: noRunDetails,
+          isError: true,
+        };
+      }
+
       const requestedNames = new Set<string>();
       if (merged.chain) for (const s of merged.chain) requestedNames.add(s.agent);
       if (merged.tasks) for (const t of merged.tasks) requestedNames.add(t.agent);
@@ -1072,19 +1074,19 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const plan: BlockingPlan = hasChain
-        ? { mode: "chain", steps: merged.chain! }
-        : hasTasks
-          ? { mode: "parallel", tasks: merged.tasks! }
-          : { mode: "single", agent: merged.agent!, task: merged.task!, cwd: merged.cwd };
-
       const runner: RunnerSeam = {
         runTask(task, opts) {
           return runSingleAgent(
             ctx.cwd,
             dispatchDefaults,
             agents,
-            { agentName: task.agentName, task: task.task, cwd: task.cwd, step: task.step },
+            {
+              agentName: task.agentName,
+              task: task.task,
+              cwd: task.cwd,
+              step: task.step,
+              thinkingLevel: task.thinkingLevel,
+            },
             opts.signal,
             opts.onProgress,
             availableToolNames,
