@@ -3,7 +3,7 @@
 > English: [README.md](README.md)
 
 <p align="center">
-  <img src="docs/banner.png" alt="pi-matt-subagent：把 Matt Pocock 的 skills 变成阻塞式/后台式 subagent" width="800">
+  <img src="docs/banner.webp" alt="pi-matt-subagent：把 Matt Pocock 的 skills 变成阻塞式/后台式 subagent" width="800">
 </p>
 
 一个 [pi](https://github.com/earendil-works/pi) 插件，把 [Matt Pocock 的 skills](https://github.com/mattpocock) 里的 subagent 指令变成真正的工具调用。当某个 skill 写到 *"spawn sub-agents in parallel"* 或 *"fire the research subagents"* 时，本插件就是它的执行层——启动真实的 pi subagent（独立子进程，后台任务则用进程内会话），等待它们完成，然后把结果交还给你。

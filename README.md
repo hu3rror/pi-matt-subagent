@@ -3,7 +3,7 @@
 > 简体中文: [README.zh-CN.md](README.zh-CN.md)
 
 <p align="center">
-  <img src="docs/banner.png" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
+  <img src="docs/banner.webp" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
 </p>
 
 A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) into real tool calls. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer — it starts real pi subagents (separate subprocesses, or an in-process session for background work), waits for them, and hands you their results.
