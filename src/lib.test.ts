@@ -2091,10 +2091,11 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 60-m
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
 // Per-tool tokens of description + serialized parameter schema, measured
-// with pi 0.99.2 on 2026-10-01 after the ADR 0019 surface slimming
-// (Variant A: terse-but-complete descriptions, trimmed schema wording;
-// the pre-slim teaching text lives on in the help-text constants).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 531, research: 448 };
+// with pi 1.0.2 on 2026-10-04 (re-verified during the 0.99.1 → 1.0.2
+// devDeps bump; the ADR 0020 call-level description already brought the
+// measured surface to 557, and the baseline constant is updated here to
+// match the recorded + re-measured numbers; see ADR 0021).
+const TOKEN_BASELINE: Record<string, number> = { subagent: 557, research: 448 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
