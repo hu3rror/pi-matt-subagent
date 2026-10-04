@@ -25,6 +25,16 @@ The changelog between 0.99.1 and 1.0.2 names no extension-API breaking changes, 
 - **Run the dev-only real-pi e2e scripts (`blocking-e2e.ts`, `push-e2e.ts`) as part of this verification** — deferred: they require a working model/API key and are live-provider smoke tests; nothing in this bump changes the wiring they cover (byte-identical seams). Recorded here as the manual-verification step to run at release time.
 - **Extend devDeps to `^1.x`-style caret ranges** — unchanged: the existing `^1.0.2` caret already permits patch updates within 1.0.x; the previous `^0.99.1` caret could not reach 1.0.2 (npm caret semantics treat 0.x specially), which is exactly why a hard version line existed.
 
+## Sources and verification traces
+
+- **Release notes**: read from `CHANGELOG.md` inside the installed pi 1.0.2 package (mise install, `<mise>/npm-earendil-works-pi-coding-agent/1.0.2/node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md`), sections 0.99.2 / 1.0.0 / 1.0.1 / 1.0.2; cross-checked with `npm view @earendil-works/pi-{ai,agent-core,coding-agent,tui} version` (all 1.0.2, 2026-10-04). The claims in this ADR cite these lines:
+  - `pi.registerToolRenderer()` added — 1.0.1, [#10285](https://github.com/earendil-works/pi/issues/10285).
+  - `npm-shrinkwrap.json` removed from the published package — 1.0.1, [#5653](https://github.com/earendil-works/pi/issues/5653).
+  - `brace-expansion` 5.0.12 pinned as a direct dependency (GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p) — 1.0.1, [#10288](https://github.com/earendil-works/pi/issues/10288).
+  - Fullscreen-default TUI and leaner codemode — 1.0.0 (no issue numbers recorded in the changelog).
+  - Provider-level retry fixes named in “No behavior changes adopted” — 0.99.2 `Retry-After` exponential backoff [#9571](https://github.com/earendil-works/pi/issues/9571), 1.0.2 capacity-error retry [#10278](https://github.com/earendil-works/pi/issues/10278).
+- **Open-issues check** (task step b): `gh issue list --state open` returned empty on 2026-10-04 — no open issues in this repo at verification time, so no pending work was in scope for this bump.
+
 ## Consequences
 
 - The dev-time compile seam now enforces the 1.0.2 contract; `typecheck` (tsc --noEmit) is clean and the full suite (208 tests) is green on 1.0.2.
