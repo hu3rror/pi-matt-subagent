@@ -1,5 +1,7 @@
 # Extension config surface: seven tunable knobs, lazily-created JSON, and a dispatch-default layer
 
+> **Updated by issue #37 (subagent tool fidelity).** The knob set grew from seven to eight with `researchChildExtensions` (optional; absent → the curated two-package default; explicit `[]` in the JSON file → no extensions). It is extension-package-level by design: loading (extensions) and activation (role tool declarations) stay separate concerns. The copy below describes the original seven.
+
 The subagents extension's behavioral knobs (blocking limits, the research wall-clock cap, the `/subagents tail` byte limit, and the model / thinking level a run falls back to) were hard-coded constants. We add a user-level, on-disk extension config (`~/.pi/agent/extensions/matt-subagent.json`) with seven knobs, surfaced through `/subagents config` plus a menu entry, so a user can retune without editing or forking source.
 
 ## Decision
