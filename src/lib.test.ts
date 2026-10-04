@@ -18,8 +18,12 @@ import {
   configKeyLabel,
   createRunRegistry,
   defaultConfig,
+  DEFAULT_RESEARCH_CHILD_EXTENSIONS,
+  DEFAULT_RESEARCH_TOOLS,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
+  effectiveResearchChildExtensions,
+  EMBEDDED_ROLES,
   emptyUsage,
   estimateToolSurfaceTokens,
   formatBlockingToolError,
@@ -71,6 +75,8 @@ import {
   TOKEN_GUARD_MULTIPLIER,
   TOOL_ALIASES,
   TOOL_CONTRACTS,
+  packageNameOfSpec,
+  pathIsInsidePackage,
   type AgentConfig,
   type FrontmatterParser,
   type LogTailFs,
@@ -149,10 +155,61 @@ test("TOOL_ALIASES maps only the fff search names to built-ins", () => {
   assert.deepEqual(TOOL_ALIASES, { ffgrep: "grep", ffind: "find" });
 });
 
-test("resolveTools applies the win32 bash mapping alongside alias degradation", () => {
+test("packageNameOfSpec strips a npm: prefix and keeps scoped names whole", () => {
+  assert.equal(packageNameOfSpec("npm:@ssk_dev/pi-web-access-lean"), "@ssk_dev/pi-web-access-lean");
+  assert.equal(packageNameOfSpec("npm:@upstash/context7-pi"), "@upstash/context7-pi");
+  assert.equal(packageNameOfSpec("@x/y"), "@x/y");
+});
+
+test("pathIsInsidePackage matches install paths on both separators, scoped and plain", () => {
+  assert.ok(
+    pathIsInsidePackage(
+      "C:/Users/u/.pi/agent/npm/node_modules/@ssk_dev/pi-web-access-lean/index.ts",
+      "@ssk_dev/pi-web-access-lean",
+    ),
+  );
+  assert.ok(
+    pathIsInsidePackage(
+      "C:\\Users\\u\\.pi\\agent\\npm\\node_modules\\@upstash\\context7-pi\\extensions",
+      "@upstash/context7-pi",
+    ),
+  );
+  assert.ok(pathIsInsidePackage("/usr/lib/node_modules/ffgrep/dist.js", "ffgrep"));
+});
+
+test("pathIsInsidePackage rejects other packages, unrelated paths, and prefixes", () => {
+  assert.ok(!pathIsInsidePackage("/n/node_modules/@ssk_dev/other-pkg/index.ts", "@ssk_dev/pi-web-access-lean"));
+  assert.ok(!pathIsInsidePackage("/n/node_modules/pi-web-access-lean2/x.ts", "pi-web-access-lean"));
+  assert.ok(!pathIsInsidePackage("/n/node_modules/@ssk_dev/index.ts", "@ssk_dev/pi-web-access-lean"));
+  assert.ok(!pathIsInsidePackage("/tmp/somewhere.ts", "read"));
+});
+
+test("resolveTools keeps bash when the registry has it, even on win32 (Git Bash honored)", () => {
   const available = new Set(["powershell", "grep", "find", "bash"]);
-  const expected = process.platform === "win32" ? ["grep", "find", "powershell"] : ["grep", "find", "bash"];
-  assert.deepEqual(resolveTools(["ffgrep", "ffind", "bash"], available), expected);
+  assert.deepEqual(resolveTools(["ffgrep", "ffind", "bash"], available), ["grep", "find", "bash"]);
+});
+
+test("resolveTools maps bash to powershell on win32 only when bash is missing", () => {
+  assert.deepEqual(resolveTools(["bash", "grep"], new Set(["grep", "powershell"]), "win32"), ["powershell", "grep"]);
+  assert.deepEqual(resolveTools(["bash", "grep"], new Set(["grep", "powershell"]), "linux"), ["grep"]);
+});
+
+test("resolveTools drops bash on win32 when neither bash nor powershell exists", () => {
+  assert.deepEqual(resolveTools(["bash", "grep"], new Set(["grep"]), "win32"), ["grep"]);
+});
+
+test("resolveTools drops an explicit powershell declaration off-win32 (registered but not callable)", () => {
+  assert.deepEqual(resolveTools(["powershell", "grep"], new Set(["powershell", "grep"]), "darwin"), ["grep"]);
+  assert.deepEqual(resolveTools(["powershell"], new Set(["powershell", "bash"]), "linux"), []);
+});
+
+test("resolveTools keeps powershell on win32 when it is actually available", () => {
+  assert.deepEqual(resolveTools(["powershell", "grep"], new Set(["powershell", "grep"]), "win32"), ["powershell", "grep"]);
+});
+
+test("resolveTools keeps the legacy win32 bash→powershell mapping without a registry", () => {
+  assert.deepEqual(resolveTools(["bash", "read"], undefined, "win32"), ["powershell", "read"]);
+  assert.deepEqual(resolveTools(["bash", "read"], undefined, "linux"), ["bash", "read"]);
 });
 
 // S2 — emptyUsage
@@ -185,6 +242,14 @@ test("discoverAgents returns the six embedded roles", () => {
     for (const a of agents) assert.equal(a.source, "embedded");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the researcher role and default research tools include web and docs queries", () => {
+  const roleTools = EMBEDDED_ROLES.researcher.tools ?? [];
+  for (const t of ["web_access", "query-docs", "resolve-library-id"]) {
+    assert.ok(roleTools.includes(t), `researcher role declares ${t}`);
+    assert.ok(DEFAULT_RESEARCH_TOOLS.includes(t), `default research tools include ${t}`);
   }
 });
 
@@ -274,23 +339,43 @@ test("buildResearchPrompt embeds the agent system prompt, findings path, and tas
   assert.ok(p.includes("do the thing"));
 });
 
-test("buildResearchPrompt writes the 60-minute wall-clock cap as a single line by default", () => {
+test("buildResearchPrompt writes the 45-minute wall-clock cap as a single line by default", () => {
   const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
-  assert.ok(p.includes("60 min"), "the default cap must reach the prompt");
+  assert.ok(p.includes("45 min"), "the default cap must reach the prompt");
   assert.ok(p.includes("wall-clock time"), "the wall-clock line must be present");
-  assert.equal(DEFAULT_RESEARCH_WALL_CLOCK_MS, 60 * 60 * 1000, "the default is 60 minutes");
+  assert.equal(DEFAULT_RESEARCH_WALL_CLOCK_MS, 45 * 60 * 1000, "the default is 45 minutes");
 });
 
 test("buildResearchPrompt reflects a tightened wall-clock cap", () => {
   const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md", 5 * 60 * 1000);
   assert.ok(p.includes("5 min"));
-  assert.ok(!p.includes("60 min"));
+  assert.ok(!p.includes("45 min"));
 });
 
 test("buildResearchPrompt carries the checkpoint rule and the enough-to-answer rule", () => {
   const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
   assert.ok(p.includes("checkpoint"), "checkpoint-write behaviour must be in the prompt");
   assert.ok(p.includes("enough information to answer well"), "the enough-to-answer rule must be in the prompt");
+});
+
+test("buildResearchPrompt lists the child's real tool names when provided", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md", undefined, [
+    "read",
+    "grep",
+    "bash",
+    "web_access",
+  ]);
+  assert.ok(p.includes("Available tools (the only tools you can call): read, grep, bash, web_access."));
+});
+
+test("buildResearchPrompt says none when an empty tool list is provided", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md", undefined, []);
+  assert.ok(p.includes("Available tools: none."));
+});
+
+test("buildResearchPrompt omits the tool line when no list is given (legacy calls)", () => {
+  const p = buildResearchPrompt(embeddedResearcher(), "T", "/tmp/f.md");
+  assert.ok(!p.includes("Available tools"));
 });
 
 test("buildResearchPrompt has no budget block or tiers", () => {
@@ -413,7 +498,58 @@ test("runBackgroundResearch returns immediately and starts the child with the as
   assert.equal(c.findingsPath, "/tmp/f.md");
   assert.ok(c.systemPrompt.includes("SP"), "role system prompt reaches the child");
   assert.ok(c.systemPrompt.includes("/tmp/f.md"), "findings path reaches the child (in the override, not argv)");
-  assert.ok(c.systemPrompt.includes("60 min"), "the wall-clock cap line reaches the child");
+  assert.ok(c.systemPrompt.includes("45 min"), "the wall-clock cap line reaches the child");
+});
+
+test("runBackgroundResearch hands the child the resolved allowlist and reports dropped tools", (t) => {
+  const calls: Array<{ tools?: string[]; systemPrompt?: string }> = [];
+  const { child } = pendingChild();
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      tools: ["read", "web_access", "query_docs"],
+      availableToolNames: new Set(["read", "grep"]),
+      agents: [embeddedResearcher()],
+    },
+    (opts) => {
+      calls.push({ tools: opts.tools, systemPrompt: opts.systemPrompt });
+      return child;
+    },
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.deepEqual(handle.droppedTools, ["web_access", "query_docs"], "unloaded declarations are reported");
+  assert.deepEqual(calls[0]?.tools, ["read"], "the child allowlist carries only the resolved names");
+  assert.ok(
+    (calls[0]?.systemPrompt ?? "").includes("Available tools (the only tools you can call): read."),
+    "the prompt names the child's real tools",
+  );
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  assert.ok(logText.includes("research-drift"), "the drift report lands in the per-run log");
+  assert.ok(logText.includes("web_access"), "the drift report names the dropped tools");
+});
+
+test("runBackgroundResearch omits the drift report when everything resolves", (t) => {
+  const { child } = pendingChild();
+  const handle = runBackgroundResearch(
+    {
+      cwd: "/w",
+      task: "T",
+      findingsPath: "/tmp/f.md",
+      tools: ["read"],
+      availableToolNames: new Set(["read"]),
+      agents: [embeddedResearcher()],
+    },
+    () => child,
+  );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+  assert.equal(handle.droppedTools, undefined, "no drift field when nothing was dropped");
+  assert.ok(!fs.readFileSync(handle.logPath, "utf8").includes("research-drift"));
 });
 
 test("runBackgroundResearch resolves tools for the child against the registry", () => {
@@ -1711,6 +1847,60 @@ test("defaultConfig returns the built-in defaults, wall-clock linked to the rese
   assert.equal(c.logTailBytes, 4096);
   assert.equal(c.dispatchDefaultModel, undefined);
   assert.equal(c.dispatchDefaultThinkingLevel, undefined);
+  assert.equal(c.researchChildExtensions, undefined, "inherit is the default state");
+});
+
+test("effectiveResearchChildExtensions returns the curated two-package default when unset", () => {
+  assert.deepEqual(effectiveResearchChildExtensions(defaultConfig()), [...DEFAULT_RESEARCH_CHILD_EXTENSIONS]);
+  assert.deepEqual(DEFAULT_RESEARCH_CHILD_EXTENSIONS, [
+    "npm:@ssk_dev/pi-web-access-lean",
+    "npm:@upstash/context7-pi",
+  ]);
+});
+
+test("effectiveResearchChildExtensions honors an explicit empty array (network off)", () => {
+  const cfg = setConfigValue(defaultConfig(), "researchChildExtensions", []);
+  assert.deepEqual(effectiveResearchChildExtensions(cfg), []);
+});
+
+test("parseConfigFile decodes researchChildExtensions arrays and degrades malformed ones", () => {
+  const s = parseConfigFile(JSON.stringify({ researchChildExtensions: ["npm:a", "npm:b"] }));
+  assert.deepEqual(s.effective.researchChildExtensions, ["npm:a", "npm:b"]);
+  assert.ok(s.present.has("researchChildExtensions"));
+  for (const bad of [
+    JSON.stringify({ researchChildExtensions: [1, "npm:a"] }),
+    JSON.stringify({ researchChildExtensions: ["", "npm:a"] }),
+    JSON.stringify({ researchChildExtensions: "npm:a" }),
+  ]) {
+    const degraded = parseConfigFile(bad);
+    assert.ok(degraded.degraded.has("researchChildExtensions"), bad);
+    assert.equal(degraded.effective.researchChildExtensions, undefined, bad);
+  }
+});
+
+test("parseConfigSetValue parses comma-separated package lists and clears with inherit", () => {
+  assert.deepEqual(parseConfigSetValue("researchChildExtensions", "npm:a,npm:b"), {
+    ok: true,
+    value: ["npm:a", "npm:b"],
+  });
+  assert.deepEqual(parseConfigSetValue("researchChildExtensions", "inherit"), { ok: true, value: undefined });
+  assert.deepEqual(parseConfigSetValue("researchChildExtensions", ""), { ok: true, value: undefined });
+  assert.equal(parseConfigSetValue("researchChildExtensions", ",").ok, false);
+});
+
+test("serializeConfig omits an unset researchChildExtensions and round-trips a set one", () => {
+  assert.ok(!serializeConfig(defaultConfig()).includes("researchChildExtensions"));
+  const cfg = setConfigValue(defaultConfig(), "researchChildExtensions", ["npm:a"]);
+  const back = parseConfigFile(serializeConfig(cfg));
+  assert.deepEqual(back.effective.researchChildExtensions, ["npm:a"]);
+});
+
+test("configKeyLabel shows the effective package list for the extensions knob", () => {
+  const label = configKeyLabel("researchChildExtensions", parseConfigFile(undefined));
+  assert.ok(label.includes("npm:@ssk_dev/pi-web-access-lean"), "unset shows the effective default list");
+  assert.ok(label.includes("[default]"));
+  const custom = parseConfigFile(JSON.stringify({ researchChildExtensions: ["npm:custom"] }));
+  assert.ok(configKeyLabel("researchChildExtensions", custom).includes("npm:custom [customized]"));
 });
 
 test("parseConfigFile(undefined/null/blank) is all defaults, nothing present or degraded", () => {
@@ -2042,7 +2232,7 @@ test("mergeToolParams validates the research full contract (model + maxWallClock
   );
 });
 
-test("maxWallClockMs is a hidden positive integer that may only tighten the 60-minute default", () => {
+test("maxWallClockMs is a hidden positive integer that may only tighten the 45-minute default", () => {
   const direct = { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>;
   // tighten: accepted
   const tight = mergeToolParams({
@@ -2051,7 +2241,7 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 60-m
     fullSchema: RESEARCH_FULL_PARAMS,
   });
   assert.equal(tight.maxWallClockMs, 60_000);
-  // the 60-minute ceiling itself: accepted
+  // the 45-minute ceiling itself: accepted
   const ceiling = mergeToolParams({
     direct,
     input: JSON.stringify({ maxWallClockMs: DEFAULT_RESEARCH_WALL_CLOCK_MS }),
@@ -2091,10 +2281,11 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 60-m
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
 // Per-tool tokens of description + serialized parameter schema, measured
-// with pi 0.99.2 on 2026-10-01 after the ADR 0019 surface slimming
-// (Variant A: terse-but-complete descriptions, trimmed schema wording;
-// the pre-slim teaching text lives on in the help-text constants).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 531, research: 448 };
+// with pi 1.0.2 on 2026-10-04 (re-verified during the 0.99.1 → 1.0.2
+// devDeps bump; the ADR 0020 call-level description already brought the
+// measured surface to 557, and the baseline constant is updated here to
+// match the recorded + re-measured numbers; see ADR 0021).
+const TOKEN_BASELINE: Record<string, number> = { subagent: 557, research: 448 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
@@ -2118,20 +2309,25 @@ test("research schema keeps its public fields and gains the input field, budget 
   assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
 });
 
-test("research result schema is exactly the handle shape: three string fields, all required", () => {
+test("research result schema is the handle shape plus the optional drift field", () => {
   const props = RESEARCH_RESULT_SCHEMA.properties ?? {};
   assert.deepEqual(
     new Set(Object.keys(props)),
-    new Set(["researchId", "findingsPath", "logPath"]),
-    "no field beyond the handle's three",
+    new Set(["researchId", "findingsPath", "logPath", "droppedTools"]),
   );
-  for (const prop of Object.values(props)) {
-    assert.equal((prop as { type?: unknown }).type, "string", "every field is a string");
+  const stringKeys = ["researchId", "findingsPath", "logPath"] as const;
+  for (const key of stringKeys) {
+    assert.equal((props[key] as { type?: unknown }).type, "string", `${key} is a string`);
   }
+  assert.equal((props.droppedTools as { type?: unknown }).type, "array", "droppedTools is an array");
+  assert.ok(
+    !((RESEARCH_RESULT_SCHEMA.required ?? []) as readonly string[]).includes("droppedTools"),
+    "droppedTools is optional (absent when nothing drifted)",
+  );
   assert.deepEqual(
     new Set(RESEARCH_RESULT_SCHEMA.required ?? []),
     new Set(["researchId", "findingsPath", "logPath"]),
-    "every field is required",
+    "the three handle fields stay required",
   );
 });
 
@@ -2178,7 +2374,7 @@ test("the slimmed descriptions retain the load-bearing facts (Variant A, no drif
     RESEARCH_TOOL_DESCRIPTION.includes("code review and design exploration must use the subagent tool"),
     "the research-vs-subagent discrimination survives",
   );
-  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("60 min"), "the wall-clock cap survives");
+  assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("45 min"), "the wall-clock cap survives");
   assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("override the bundled role"), "the project-researcher override nuance survives");
   assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("checkpointed"), "the checkpoint guarantee survives");
   // ADR 0019: the help-on-demand entry point is structural, not behavioral —
@@ -2207,7 +2403,7 @@ test("the preserved help texts carry the full teaching text (help-on-demand entr
     RESEARCH_HELP_TEXT.includes("code review or design exploration"),
     "the not-for-blocking discrimination survives in the help text",
   );
-  assert.ok(RESEARCH_HELP_TEXT.includes("60 minutes"), "the wall-clock cap survives in the help text");
+  assert.ok(RESEARCH_HELP_TEXT.includes("45 minutes"), "the wall-clock cap survives in the help text");
   assert.ok(RESEARCH_HELP_TEXT.includes("checkpointed"), "the checkpoint guarantee survives in the help text");
 });
 
@@ -2321,13 +2517,10 @@ test("buildDispatchArgs resolves tool names through resolveTools before assembly
   const tools = toolsEntry.split(",").filter(Boolean);
   assert.ok(tools.includes("grep"), "ffgrep degrades to grep in the allowlist");
   assert.ok(!tools.includes("ffgrep"));
-  // bash maps to powershell on win32 and is dropped when powershell is missing
-  // from the allowlist; on other platforms it stays bash.
-  if (process.platform === "win32") {
-    assert.ok(!tools.includes("bash"));
-  } else {
-    assert.ok(tools.includes("bash"), "not on win32 here; bash stays bash");
-  }
+  // bash resolves to the real bash when the registry has it (Git Bash honored
+  // on win32); it is never invented into powershell on other platforms.
+  assert.ok(tools.includes("bash"), "bash stays bash when the registry has it");
+  assert.ok(!tools.includes("powershell"), "powershell is not substituted when bash exists");
 });
 
 test("buildDispatchArgs drops a task with no tools flag when the allowlist has none", () => {

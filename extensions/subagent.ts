@@ -51,6 +51,7 @@ import {
   configKeySpec,
   defaultConfig,
   discoverAgents,
+  effectiveResearchChildExtensions,
   emptyUsage,
   formatConfigOverview,
   formatRunSnapshot,
@@ -62,6 +63,8 @@ import {
   parseConfigFile,
   parseConfigSetValue,
   parseSubagentsArgs,
+  packageNameOfSpec,
+  pathIsInsidePackage,
   planRunThinking,
   readLogTail,
   researchStatusContent,
@@ -125,14 +128,18 @@ import {
 const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
 
 // ---------------------------------------------------------------------------
-// In-process research child (ADR 0013)
+// In-process research child (ADR 0013, revised by issue #37)
 //   The real `createChildSession` factory wired into `runBackgroundResearch`:
 //   an in-process second session (`createAgentSession` +
-//   `SessionManager.inMemory()`) built with `noExtensions: true` +
-//   `systemPromptOverride` and only built-in tools (no recursive extension
-//   re-entry, no subagent/research in the child). The async body is wrapped in
-//   try/catch; every session is tracked here so `session_shutdown` disposes
-//   any that outlive their runs (session-scoped research lifetime).
+//   `SessionManager.inMemory()`) built with `systemPromptOverride`. The child's
+//   extension loadout is curated: it loads exactly the approved query packages
+//   (`researchChildExtensions`, issue #37) via an `extensionsOverride` filter;
+//   only a caller that passes no extension list gets the legacy
+//   `noExtensions: true` child. Anti-recursion is structural either way —
+//   subagent/research (this extension) never match the knob, so no recursive
+//   extension re-entry. The async body is wrapped in try/catch; every session
+//   is tracked here so `session_shutdown` disposes any that outlive their runs
+//   (session-scoped research lifetime).
 // ---------------------------------------------------------------------------
 
 interface Disposable {
@@ -156,6 +163,8 @@ export function createResearchChildSession(opts: {
   cwd: string;
   model?: unknown;
   thinkingLevel?: string;
+  /** The extension packages to load into the child (knob value); undefined keeps the legacy fully-disabled child. */
+  extensions?: string[];
   tools?: string[];
   systemPrompt: string;
   task: string;
@@ -200,10 +209,29 @@ export function createResearchChildSession(opts: {
   const abortController = new AbortController();
   const done = (async () => {
     try {
+      // issue #37 — a curated child loadout: an `extensions` list (the knob's
+      // packages) filters the base's loaded extensions to exactly those
+      // packages, so the child carries built-ins + the approved query tools
+      // and nothing else (ADR 0013's anti-recursion property survives: the
+      // extension's own subagent/research never match the knob). An undefined
+      // value keeps the legacy noExtensions:true child. Uninstalled packages
+      // simply never appear in the base's extensions, so the filter drops
+      // them harmlessly (the drift report surfaces the consequence).
+      const knob = opts.extensions;
       const loader = new DefaultResourceLoader({
         cwd: opts.cwd,
         agentDir: getAgentDir(),
-        noExtensions: true,
+        noExtensions: knob === undefined,
+        ...(knob !== undefined
+          ? {
+              extensionsOverride: (base) => ({
+                ...base,
+                extensions: base.extensions.filter((e) =>
+                  knob.some((k) => pathIsInsidePackage(e.sourceInfo.path, packageNameOfSpec(k))),
+                ),
+              }),
+            }
+          : {}),
         systemPromptOverride: () => opts.systemPrompt,
       });
       await loader.reload();
@@ -225,6 +253,30 @@ export function createResearchChildSession(opts: {
       }
       session = created.session;
       researchChildren.add(session);
+      // issue #37 — a loadout self-report as the child's FIRST output line(s):
+      // the knob-package tools actually registered, and any allowlist names
+      // missing from the loadout. Tee'd into the per-run log before the
+      // session ever prompts, so a loadout regression (a package that no
+      // longer loads, a renamed/retired tool) surfaces at start time instead
+      // of as model-side tool-not-found loops.
+      if (knob && knob.length > 0) {
+        const knobTools = session
+          .getAllTools()
+          .filter((t) => knob.some((k) => pathIsInsidePackage(t.sourceInfo.path, packageNameOfSpec(k))))
+          .map((t) => t.name);
+        if (knobTools.length > 0) {
+          pushChunk(`[child-loadout] knob packages registered: ${knobTools.join(", ")}\n`);
+        } else {
+          pushChunk(
+            "[child-loadout] NO knob packages registered — check that researchChildExtensions packages are installed and named correctly\n",
+          );
+        }
+      }
+      const childAll = new Set(session.getAllTools().map((t) => t.name));
+      const missing = (opts.tools ?? []).filter((t) => !childAll.has(t));
+      if (missing.length > 0) {
+        pushChunk(`[child-loadout] allowlist missing from loadout: ${missing.join(", ")}\n`);
+      }
       const unsubscribe = session.subscribe((event) => {
         if (event.type === "message_end" && event.message) {
           const text = assistantTextOfMessage(event.message);
@@ -359,6 +411,47 @@ function updateSubagentFooter(
  */
 function probeAvailableToolNames(pi: ExtensionAPI): ReadonlySet<string> {
   return new Set(pi.getAllTools().map((t) => t.name));
+}
+
+/**
+ * Probes the tool set a research child can actually call (issue #37) — the
+ * built-ins plus the tools whose extension source is one of the knob's
+ * packages — NOT the main session's full registry (the incident root cause:
+ * the child had no web tools while the parent did). Tools are matched by
+ * their install path (`node_modules/<pkg>`; the same predicate the child
+ * loader's filter uses, so probe and loadout cannot drift); a tool's
+ * `sourceInfo` is the same object as its extension's, and built-ins all
+ * carry `source === "builtin"`. Off-win32, powershell is registered but not
+ * callable (pi's implementation throws), so it is excluded here too. An
+ * empty knob (network off) reduces the probe to built-ins. Also reports the
+ * knob packages for which NOTHING registered — a mistyped or uninstalled
+ * package stays silent when no role declares its tools, so the caller warns.
+ */
+function probeResearchChildTools(
+  pi: ExtensionAPI,
+  knob: string[],
+): { names: ReadonlySet<string>; packagesNotLoaded: string[] } {
+  const names = new Set<string>();
+  const packagesHit = new Set<string>();
+  for (const t of pi.getAllTools()) {
+    if (t.sourceInfo?.source === "builtin") {
+      names.add(t.name);
+      continue;
+    }
+    const path = t.sourceInfo?.path ?? "";
+    for (const k of knob) {
+      if (pathIsInsidePackage(path, packageNameOfSpec(k))) {
+        packagesHit.add(packageNameOfSpec(k));
+        names.add(t.name);
+        break;
+      }
+    }
+  }
+  if (process.platform !== "win32") names.delete("powershell");
+  return {
+    names,
+    packagesNotLoaded: [...new Set(knob.map(packageNameOfSpec).filter((p) => !packagesHit.has(p)))],
+  };
 }
 
 /**
@@ -1217,7 +1310,14 @@ export default function (pi: ExtensionAPI) {
         fullSchema: buildResearchFullParams(config.researchWallClockMs),
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
-      const availableToolNames = probeAvailableToolNames(pi);
+      // issue #37 — the research child loads exactly the knob's extension
+      // packages (effectiveResearchChildExtensions), so its callable tool set
+      // is build-ins ∪ knob-package tools, probed as such instead of the main
+      // session's full registry (the incident root cause). The same knob
+      // reaches the child factory, so probe and loadout cannot drift.
+      const knob = effectiveResearchChildExtensions(config);
+      const probe = probeResearchChildTools(pi, knob);
+      const availableToolNames = probe.names;
       const findingsPath = path.isAbsolute(merged.findingsPath)
         ? merged.findingsPath
         : path.join(ctx.cwd, merged.findingsPath);
@@ -1304,6 +1404,7 @@ export default function (pi: ExtensionAPI) {
             maxWallClockMs: merged.maxWallClockMs ?? config.researchWallClockMs,
             availableToolNames,
             agents,
+            extensions: knob,
             abortSignal: abortController.signal,
             // Fires exactly once at a terminal state: settle the registry entry
             // and push the outcome into the main context — content worded as an
@@ -1363,6 +1464,18 @@ export default function (pi: ExtensionAPI) {
       // a tool error.
       updateRun(runId, { logPath: handle.logPath });
 
+      const driftNote =
+        handle.droppedTools && handle.droppedTools.length > 0
+          ? `\n\n⚠ Declared but not loaded: ${handle.droppedTools.join(
+              ", ",
+            )}. Install the extension package, point 'researchChildExtensions' at it, or remove the tool from the role/call.`
+          : "";
+      const unloadedNote =
+        probe.packagesNotLoaded.length > 0
+          ? `\n⚠ Query packages in 'researchChildExtensions' registered nothing: ${probe.packagesNotLoaded.join(
+              ", ",
+            )}. Check they are installed and the names match the installed packages exactly.`
+          : "";
       return {
         content: [
           {
@@ -1371,7 +1484,9 @@ export default function (pi: ExtensionAPI) {
               `Research started (id: ${handle.researchId}). It is running in the background; ` +
               `findings will be written to: ${findingsPath}\n` +
               `Log: ${handle.logPath}\n\n` +
-              `Keep working. The completion (succeeded / failed / terminated / aborted) is pushed to you — no polling needed.`,
+              `Keep working. The completion (succeeded / failed / terminated / aborted) is pushed to you — no polling needed.` +
+              driftNote +
+              unloadedNote,
           },
         ],
         details: handle,

@@ -89,7 +89,8 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `maxTasksPerCall` | 8 | Caps tasks per call — parallel tasks **and** chain steps; over the cap the call is refused |
 | `maxConcurrency` | 4 | Max in-flight subagent processes in parallel mode |
 | `perTaskOutputCap` | 50 KiB | Byte cap for one task's summary output in parallel aggregation |
-| `researchWallClockMs` | 60 min | Default background-research wall-clock cap, and the hard ceiling for `input.maxWallClockMs` |
+| `researchWallClockMs` | 45 min | Default background-research wall-clock cap, and the hard ceiling for `input.maxWallClockMs` (an existing explicit value overrides the new default; reset the key to pick up 45) |
+| `researchChildExtensions` | (curated) | npm packages loaded into a research child: default `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`; only an explicit empty array disables extensions |
 | `logTailBytes` | 4096 | Byte cap for `/subagents tail` log reads |
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level when neither the call nor the role specifies one |
@@ -104,6 +105,22 @@ Drive it from `/subagents config`:
 ```
 
 `set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
+
+## Research child extensions (trust surface)
+
+A background research child starts with **only built-in tools plus the approved query packages** — never the main session's full extension set. The default loadout is `npm:@ssk_dev/pi-web-access-lean` (web search/page fetch) and `npm:@upstash/context7-pi` (library docs), which the researcher role declares as `web_access`, `query-docs`, `resolve-library-id`.
+
+This list is a **curated trust surface, not a promise that every query-style tool is default**. A package qualifies for the default list only when it is read-only, has no external write side effects, has low and explicit external cost, and serves primary-source retrieval.
+
+**Maintaining the list per-machine** (no code changes):
+
+- **Extend/override** — add packages to `researchChildExtensions` (JSON array in `~/.pi/agent/extensions/matt-subagent.json`, or a comma list via `/subagents config set researchChildExtensions npm:x,npm:y`). Remember step 2 below: a loaded package is only visible to the researcher once its tools are also declared on the role.
+- **Disable entirely** — set `researchChildExtensions` to `[]` in the JSON file (the config-set CLI cannot express an empty list): the child then loads no extensions at all (network fully off, built-ins only).
+- **Finer control** — override the built-in researcher role with a user agent at `~/.pi/agent/agents/researcher.md` (frontmatter `tools:` + body; same-name overrides win, and the runner still appends the findings path / wall-clock / checkpoint rules), to pin exactly which tools are declared.
+
+**Adding a new query tool — the two steps.** (1) *Load*: put its package in `researchChildExtensions`. (2) *Expose*: declare the tool name on the researcher role (the built-in list, or your custom `researcher.md`). Missing either half is a drift.
+
+**Error shapes and remedies.** When a declared tool cannot be loaded (package not installed, knob-disabled, or platform-impossible — e.g. `powershell` off-Windows), the run still starts but the tool is absent from the child, the research tool's returned text and the run log carry a `⚠ Declared but not loaded: …` drift note, and the researcher prompt only lists tools it actually has. The symptom of ignoring the note: the researcher model guesses tool names and loops. Fix by installing the package, pointing the knob at it, or removing the tool from the role.
 
 ## Project layout
 
