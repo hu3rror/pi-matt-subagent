@@ -40,6 +40,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createResearchChildSession, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
+import { DEFAULT_RESEARCH_CHILD_EXTENSIONS, EMBEDDED_ROLES } from "../src/lib.ts";
 
 export default function (pi: ExtensionAPI) {
   const logPath = path.join(os.tmpdir(), "push-e2e.log");
@@ -140,6 +141,50 @@ export default function (pi: ExtensionAPI) {
       } catch (err) {
         log(`(1) child session FAILED: ${(err as Error).message}`);
         log("PUSH-E2E FAIL: gate 1");
+      }
+
+      // Gate 5 — issue #37: the curated knob loadout. A child built with the
+      // default researchChildExtensions must actually register the query
+      // packages and self-report them in its first output line, and nothing
+      // the loadout promised (the default role's declared query tools) may be
+      // missing. This is the regression guard for the round-1 incident (child
+      // with built-ins only: tool names mismatched / loadout filter drifted).
+      try {
+        const declared = EMBEDDED_ROLES.researcher.tools ?? [];
+        for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
+          if (!declared.includes(q)) throw new Error(`default researcher role no longer declares ${q} — update gate 5`);
+        }
+        const knobChild = createResearchChildSession({
+          cwd: ctx.cwd,
+          model: ctx.model,
+          thinkingLevel: "off",
+          extensions: [...DEFAULT_RESEARCH_CHILD_EXTENSIONS],
+          tools: declared,
+          systemPrompt: "You are a loadout check. Reply with exactly: pong",
+          task: "Reply with exactly: pong",
+          findingsPath: path.join(os.tmpdir(), "push-e2e-knob-findings.md"),
+        });
+        children.push(knobChild);
+        let out = "";
+        void (async () => {
+          for await (const chunk of knobChild.output) out += chunk;
+        })().catch(() => {});
+        await knobChild.done;
+        const firstLine = out.split("\n")[0] ?? "";
+        log(`(5) knob child first line: ${JSON.stringify(firstLine)}`);
+        const ok =
+          firstLine.includes("[child-loadout] knob packages registered:") &&
+          ["web_access", "query-docs", "resolve-library-id"].every((t) => firstLine.includes(t)) &&
+          !out.includes("[child-loadout] allowlist missing from loadout:") &&
+          !out.includes("[child-loadout] NO knob packages registered");
+        log(
+          ok
+            ? "PUSH-E2E OK: gate 5 (curated knob loadout registers the declared query tools)"
+            : "PUSH-E2E FAIL: gate 5 (child-loadout line above shows which tool/package drifted)",
+        );
+      } catch (err) {
+        log(`(5) knob loadout child FAILED: ${(err as Error).message}`);
+        log("PUSH-E2E FAIL: gate 5");
       }
     })().catch((err) => {
       log(`push-e2e async body errored: ${(err as Error).stack ?? (err as Error).message}`);

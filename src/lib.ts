@@ -45,14 +45,14 @@ export function scopeAllowsProject(scope: AgentScope): boolean {
 // ---------------------------------------------------------------------------
 // Research wall-clock cap (ADR 0013)
 //   One hard control dimension replaces the retired five-budget machinery
-//   (ADR 0003/0008): a wall-clock cap, default 60 minutes, written into the
+//   (ADR 0003/0008): a wall-clock cap, default 45 minutes, written into the
 //   researcher's prompt as a single line. Findings are checkpointed before
 //   each search round, so a kill or crash loses at most one round of work;
 //   the runner enforces the cap by aborting the in-process child and
 //   appending the slim `research-terminated` marker.
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 60 * 60 * 1000;
+export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 45 * 60 * 1000;
 
 /**
  * Bounded window the abort paths (wall-clock kill, manual kill) give the tee
@@ -87,6 +87,7 @@ const CONFIG_KEY_SPECS = [
   { key: "maxConcurrency", kind: "number" as const, optional: false as const },
   { key: "perTaskOutputCap", kind: "number" as const, optional: false as const },
   { key: "researchWallClockMs", kind: "number" as const, optional: false as const },
+  { key: "researchChildExtensions", kind: "extensions" as const, optional: true as const },
   { key: "logTailBytes", kind: "number" as const, optional: false as const },
   { key: "dispatchDefaultModel", kind: "model" as const, optional: true as const },
   { key: "dispatchDefaultThinkingLevel", kind: "level" as const, optional: true as const },
@@ -118,6 +119,12 @@ export interface EffectiveConfig {
   dispatchDefaultModel?: string;
   /** thinking level; undefined => inherit the main session level. */
   dispatchDefaultThinkingLevel?: ThinkingLevel;
+  /**
+   * The extension packages loaded into a research child; undefined => the
+   * curated defaults (DEFAULT_RESEARCH_CHILD_EXTENSIONS); explicit [] => no
+   * extensions (network fully off).
+   */
+  researchChildExtensions?: string[];
 }
 
 /** Built-in defaults — the single source for the blocking limits too. */
@@ -130,7 +137,32 @@ export function defaultConfig(): EffectiveConfig {
     logTailBytes: 4096,
     dispatchDefaultModel: undefined,
     dispatchDefaultThinkingLevel: undefined,
+    researchChildExtensions: undefined,
   };
+}
+
+/**
+ * The curated default research-child extension packages (the trust surface;
+ * issue #37): web/page retrieval and library-docs queries. A package is
+ * eligible for this default list when it is read-only, has no external write
+ * side effects, has low and explicit external cost, and serves primary-source
+ * retrieval — anything else goes through the per-machine knob. See the
+ * README's maintenance section.
+ */
+export const DEFAULT_RESEARCH_CHILD_EXTENSIONS = [
+  "npm:@ssk_dev/pi-web-access-lean",
+  "npm:@upstash/context7-pi",
+] as const;
+
+/**
+ * The effective research-child extension list for a run: the knob when the
+ * user set it (an explicit empty array fully disables extensions / network),
+ * otherwise the curated defaults. Package-level (not tool-level) by design:
+ * loading and activation stay separate concerns, mirroring blocking subagents
+ * and pi's own `--tools` mental model (issue #37, Decision 4).
+ */
+export function effectiveResearchChildExtensions(cfg: EffectiveConfig): string[] {
+  return cfg.researchChildExtensions ?? [...DEFAULT_RESEARCH_CHILD_EXTENSIONS];
 }
 
 export interface ConfigStatus {
@@ -152,7 +184,7 @@ export interface ConfigStatus {
 function decodeConfigValue(
   key: ConfigKey,
   value: unknown,
-): { valid: true; value: number | string | ThinkingLevel | undefined } | { valid: false } {
+): { valid: true; value: ConfigValue } | { valid: false } {
   const spec = configKeySpec(key);
   if (!spec) return { valid: false };
   if (spec.kind === "number") {
@@ -162,6 +194,19 @@ function decodeConfigValue(
   }
   if (value === null) {
     return spec.optional ? { valid: true, value: undefined } : { valid: false };
+  }
+  // The extensions knob: a JSON array of non-empty package specifiers. An
+  // explicit empty array is the "load nothing" state, so it validates too.
+  if (spec.kind === "extensions") {
+    if (!Array.isArray(value)) return { valid: false };
+    const cleaned: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string") return { valid: false };
+      const trimmed = item.trim();
+      if (trimmed === "") return { valid: false };
+      cleaned.push(trimmed);
+    }
+    return { valid: true, value: cleaned };
   }
   if (spec.kind === "model") {
     return typeof value === "string" && value.trim().length > 0 ? { valid: true, value } : { valid: false };
@@ -214,7 +259,7 @@ export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
 export function parseConfigSetValue(
   key: ConfigKey,
   rawValue: string,
-): { ok: true; value: number | string | ThinkingLevel | undefined } | { ok: false; reason: string } {
+): { ok: true; value: ConfigValue } | { ok: false; reason: string } {
   const spec = configKeySpec(key);
   if (!spec) return { ok: false, reason: `unknown config key "${key}"` };
   if (spec.kind === "number") {
@@ -224,17 +269,24 @@ export function parseConfigSetValue(
     }
     return { ok: true, value: n };
   }
-  // Optional dispatch kinds: inherit/empty clears the override.
+  // Optional knobs: inherit/empty clears the override.
   const trimmed = rawValue.trim();
   if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
+  // The extensions knob takes a comma-separated package list.
+  if (spec.kind === "extensions") {
+    const items = trimmed.split(",").map((s) => s.trim()).filter((s) => s !== "");
+    return items.length > 0
+      ? { ok: true, value: items }
+      : { ok: false, reason: `${key} needs at least one package name, got "${rawValue}"` };
+  }
   if (spec.kind === "model") return { ok: true, value: trimmed };
   if (isThinkingLevel(trimmed)) return { ok: true, value: trimmed };
   return { ok: false, reason: `dispatchDefaultThinkingLevel must be one of ${THINKING_LEVELS.join(", ")} (or inherit), got "${trimmed}"` };
 }
 
-/** Serializes an effective config to the file: required keys always, the two
- * optional dispatch knobs only when set (absent = inherit the main session,
- * so `null` never appears in the file). */
+/** Serializes an effective config to the file: required keys always, the
+ * optional knobs only when set (absent = inherit the main session / curated
+ * default, so `null` never appears in the file). */
 export function serializeConfig(cfg: EffectiveConfig): string {
   const out: Record<string, unknown> = {};
   for (const spec of CONFIG_KEY_SPECS) {
@@ -270,7 +322,7 @@ export interface ConfigBlockingLimits {
   perTaskOutputCap: number;
 }
 
-type ConfigValue = number | string | ThinkingLevel | undefined;
+type ConfigValue = number | string | string[] | ThinkingLevel | undefined;
 
 /** Returns one knob's effective value off a config without indexing casts. */
 export function getConfigValue(cfg: EffectiveConfig, key: ConfigKey): ConfigValue {
@@ -302,6 +354,12 @@ export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
     status.present.has(key) && getConfigValue(status.effective, key) !== getConfigValue(defaultConfig(), key);
   const marker = status.degraded.has(key) ? "degraded" : customized ? "customized" : "default";
   const spec = configKeySpec(key);
+  if (spec?.kind === "extensions") {
+    // Show the effective package list (the defaults when unset) so the view
+    // reflects what a research child will actually load, not just an
+    // "(inherit)" marker.
+    return `${key} = ${effectiveResearchChildExtensions(status.effective).join(", ")} [${marker}]`;
+  }
   const value = spec?.optional
     ? (getConfigValue(status.effective, key) ?? "(inherit)")
     : String(getConfigValue(status.effective, key));
@@ -380,7 +438,7 @@ const SUBAGENT_INPUT_DESCRIPTION =
   "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), thinkingOverride (thinking level).";
 
 const RESEARCH_INPUT_DESCRIPTION =
-  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), maxWallClockMs (cap in ms; may only tighten the 60-min default).";
+  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), maxWallClockMs (cap in ms; may only tighten the 45-min default).";
 
 /** `subagent`'s registered (public) parameter schema — what the model sees. */
 export const SUBAGENT_TOOL_PARAMS = Type.Object({
@@ -473,7 +531,7 @@ export const RESEARCH_TOOL_DESCRIPTION = [
   "Use when the research or wayfinder skill asks for a background agent; completion (succeeded/failed/terminated/aborted) is pushed with the findings path — no polling, no read-later.",
   "Not for blocking work: code review and design exploration must use the subagent tool.",
   "agentScope: user by default (user agents plus the bundled researcher role); both/project allow a project-local researcher from .pi/agents to override the bundled role (untrusted projects get a confirmation first).",
-  "Wall-clock capped (default 60 min); findings checkpointed before each search round, so a cap kill or crash loses at most one round.",
+  "Wall-clock capped (default 45 min); findings checkpointed before each search round, so a cap kill or crash loses at most one round.",
 ].join(" ");
 
 /**
@@ -487,7 +545,7 @@ export const RESEARCH_HELP_TEXT = [
   "Use when the research or wayfinder skill asks for a background agent: call this tool, keep working, and the completion (succeeded / failed / terminated / aborted) is pushed to you with the findings path — no polling, no \"read later\".",
   "This is NOT for code review or design exploration — those must block for their results, so use the `subagent` tool instead.",
   'Agent scope is "user" by default (user agents plus the bundled researcher role); use "both" or "project" so a project-local `researcher` from .pi/agents overrides the bundled role (untrusted projects get a confirmation first).',
-  "Every run is bounded by a single wall-clock cap (default 60 minutes); findings are checkpointed before each search round, so a cap kill or crash loses at most one round of work.",
+  "Every run is bounded by a single wall-clock cap (default 45 minutes); findings are checkpointed before each search round, so a cap kill or crash loses at most one round of work.",
 ].join(" ");
 
 /** One tool's frozen model-facing surface, shared by the extension and the contract tests. */
@@ -733,7 +791,7 @@ Report findings with exact file paths and line ranges, grouped by severity, and 
   researcher: {
     description:
       "Investigates a question against primary sources and writes cited findings to a Markdown file.",
-    tools: ["read", "grep", "find", "ls", "bash", "write"],
+    tools: ["read", "grep", "find", "ls", "bash", "write", "web_access", "query-docs", "resolve-library-id"],
     thinkingLevel: "medium",
     systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
 
@@ -880,31 +938,86 @@ export const TOOL_ALIASES: Record<string, string> = {
 };
 
 /**
- * Resolves role tool names for a subagent's `--tools` allowlist:
- * - `bash` maps to `powershell` on win32 (no powershell on other platforms).
- * - When `availableToolNames` (the tool registry of the current environment,
- *   probed via `pi.getAllTools()` by the extension) is given, a declared tool
- *   that is not in it falls back to its built-in alias when that alias IS
- *   available, and is DROPPED when neither the declared name nor its alias
- *   exists — passing an unknown name to the child's allowlist would silently
- *   leave the agent without the tool until the first call. Without the
- *   registry the list passes through untouched (legacy behavior).
+ * The package-name portion of a spec (drops a `npm:` prefix, keeps scoped
+ * names whole): `npm:@ssk_dev/pi-web-access-lean` → `@ssk_dev/pi-web-access-lean`.
+ * A bare path is returned unchanged.
  */
-export function resolveTools(
+export function packageNameOfSpec(spec: string): string {
+  return spec.startsWith("npm:") ? spec.slice(4) : spec;
+}
+
+/**
+ * True when a file/extension path lives under `node_modules/<pkg>` (scoped
+ * names keep their inner slash). Shared by the research child's loader
+ * filter and the tool probe, so both sides of the loadout can never drift.
+ * The path comparison normalizes separators so it is platform-independent,
+ * and requires the package segment to end at a boundary (`/` or end of
+ * string) so a shorter prefix never matches a longer package name.
+ */
+export function pathIsInsidePackage(filePath: string, pkgName: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const needle = `node_modules/${norm(pkgName)}`;
+  const idx = norm(filePath).indexOf(needle);
+  if (idx < 0) return false;
+  const rest = norm(filePath).slice(idx + needle.length);
+  return rest === "" || rest.startsWith("/");
+}
+
+/**
+ * Resolves role tool names for a subagent's `--tools` allowlist (issue #37,
+ * registry-driven shell mapping). With a tool registry (`availableToolNames`,
+ * probed via `pi.getAllTools()` by the extension), the shell and platform
+ * special cases are resolved against reality instead of hardcoded:
+ *
+ * - A declared `bash` resolves to the real `bash` when the registry has it
+ *   (Git Bash / `shellPath` honored on win32); to `powershell` only when the
+ *   registry has powershell but no bash; and is DROPPED when neither exists.
+ * - `powershell` is *registered but not callable* off-win32 (pi's tool
+ *   implementation throws "only available on Windows"), so off-win32 it is
+ *   never treated as a usable shell and an explicit declaration is dropped —
+ *   mirroring the same rule pi enforces at call time. (PowerShell 7 itself is
+ *   cross-platform; the constraint is pi's implementation, and if upstream
+ *   lifts it, the registry-driven mapping above applies with no change.)
+ * - Any other declared tool falls back to its built-in alias (TOOL_ALIASES)
+ *   when that alias IS in the registry, and is DROPPED when neither the
+ *   declared name nor its alias exists — passing an unknown name to the
+ *   child's allowlist would silently leave the agent without the tool until
+ *   the first call.
+ *
+ * Without a registry the list passes through with the legacy win32
+ * `bash`→`powershell` rewrite (pi itself only surfaces a powershell tool
+ * there). `resolveToolsInternal` additionally reports the dropped names so
+ * the research runner can surface declared-but-unloaded tools at start time.
+ */
+function resolveToolsInternal(
   tools: string[] | undefined,
-  availableToolNames?: ReadonlySet<string>,
-): string[] | undefined {
-  if (!tools || tools.length === 0) return tools;
+  availableToolNames: ReadonlySet<string> | undefined,
+  platform: NodeJS.Platform,
+): { resolved: string[]; dropped: string[] } {
+  if (!tools || tools.length === 0) return { resolved: [], dropped: [] };
   const resolved: string[] = [];
+  const dropped: string[] = [];
   for (const t of tools) {
-    let name = t;
-    if (process.platform === "win32" && t === "bash") name = "powershell";
     if (!availableToolNames) {
-      resolved.push(name);
+      resolved.push(platform === "win32" && t === "bash" ? "powershell" : t);
       continue;
     }
-    if (availableToolNames.has(name)) {
-      resolved.push(name);
+    if (t === "bash") {
+      if (availableToolNames.has("bash")) {
+        resolved.push("bash");
+      } else if (platform === "win32" && availableToolNames.has("powershell")) {
+        resolved.push("powershell");
+      } else {
+        dropped.push(t);
+      }
+      continue;
+    }
+    if (t === "powershell" && platform !== "win32") {
+      dropped.push(t);
+      continue;
+    }
+    if (availableToolNames.has(t)) {
+      resolved.push(t);
       continue;
     }
     const alias = TOOL_ALIASES[t];
@@ -912,11 +1025,18 @@ export function resolveTools(
       resolved.push(alias);
       continue;
     }
-    // Neither the declared name nor its alias exists in this environment's
-    // tool registry: drop it rather than hand the child an unknown --tools
-    // entry.
+    dropped.push(t);
   }
-  return resolved;
+  return { resolved, dropped };
+}
+
+export function resolveTools(
+  tools: string[] | undefined,
+  availableToolNames?: ReadonlySet<string>,
+  platform: NodeJS.Platform = process.platform,
+): string[] | undefined {
+  if (!tools || tools.length === 0) return tools;
+  return resolveToolsInternal(tools, availableToolNames, platform).resolved;
 }
 
 export function emptyUsage(): UsageStats {
@@ -927,7 +1047,17 @@ export function emptyUsage(): UsageStats {
 // Background research
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "bash", "write"];
+export const DEFAULT_RESEARCH_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "write",
+  "web_access",
+  "query-docs",
+  "resolve-library-id",
+];
 
 /** This extension's own tool names — never handed to a research child (ADR 0013: no recursive extension re-entry). */
 const EXTENSION_TOOL_NAMES = new Set(TOOL_CONTRACTS.map((c) => c.name));
@@ -944,6 +1074,8 @@ export interface ResearchRunOptions {
   availableToolNames?: ReadonlySet<string>;
   /** Wall-clock hard cap in ms; defaults to DEFAULT_RESEARCH_WALL_CLOCK_MS (may only tighten). */
   maxWallClockMs?: number;
+  /** The extension packages the research child loads (the knob's value); undefined keeps the legacy no-extension child. */
+  extensions?: string[];
   /** Injectable timer deps for the wall-clock watcher (tests). */
   watcherDeps?: ResearchWatcherDeps;
   /** Manual-kill signal (/subagents kill): aborts the child and resolves the run `aborted`. */
@@ -1028,12 +1160,17 @@ export const RESEARCH_RESULT_SCHEMA = Type.Object({
   researchId: Type.String({ description: "Unique id of the background research run." }),
   findingsPath: Type.String({ description: "Absolute path where the researcher writes cited findings (Markdown)." }),
   logPath: Type.String({ description: "Per-run log of the in-process research child session." }),
+  droppedTools: Type.Optional(
+    Type.Array(Type.String({ description: "Role tools declared but not loaded (package unavailable or platform-impossible)." })),
+  ),
 });
 
 export interface ResearchHandle {
   researchId: string;
   findingsPath: string;
   logPath: string;
+  /** Role tools that resolved to nothing (not installed / knob-disabled / platform-impossible); undefined when nothing drifted. */
+  droppedTools?: string[];
 }
 
 /**
@@ -1077,6 +1214,8 @@ export type CreateChildSession = (opts: {
   cwd: string;
   model?: unknown;
   thinkingLevel?: string;
+  /** The extension packages to load into the child (knob value; undefined = legacy no-extension child). */
+  extensions?: string[];
   tools?: string[];
   systemPrompt: string;
   task: string;
@@ -1138,10 +1277,17 @@ export function runBackgroundResearch(
   const clearTimer = deps.clearTimeout ?? ((id?: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>));
 
   const maxWallClockMs = opts.maxWallClockMs ?? DEFAULT_RESEARCH_WALL_CLOCK_MS;
-  const systemPrompt = buildResearchPrompt(agent, opts.task, opts.findingsPath, maxWallClockMs);
-  const tools = resolveTools(opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS, opts.availableToolNames)?.filter(
-    (t) => !EXTENSION_TOOL_NAMES.has(t),
+  // Resolution is registry-driven (issue #37): the resolved set becomes the
+  // child's allowlist AND the prompt's tool-name line, so the two cannot
+  // drift; names that resolved to nothing are surfaced at start time (handle
+  // + per-run log) instead of surfacing as model-side tool-not-found loops.
+  const { resolved, dropped } = resolveToolsInternal(
+    opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS,
+    opts.availableToolNames,
+    process.platform,
   );
+  const tools = resolved.filter((t) => !EXTENSION_TOOL_NAMES.has(t));
+  const systemPrompt = buildResearchPrompt(agent, opts.task, opts.findingsPath, maxWallClockMs, tools);
 
   // The runner owns the per-run artifacts: the output log (every child output
   // chunk appended, serving `/subagents tail`) and the toolCall audit (one
@@ -1151,6 +1297,15 @@ export function runBackgroundResearch(
   // stuck run cannot leak either. If the second open fails, the first fd is
   // closed before rethrowing: the pair must never leak mid-open.
   const logFd = fs.openSync(logPath, "a");
+  if (dropped.length > 0) {
+    // The drift report lands in the per-run log before anything else, so
+    // /subagents tail shows it even when the child never emits a line.
+    try {
+      fs.writeSync(logFd, `[research-drift] declared but not loaded: ${dropped.join(", ")}\n`);
+    } catch {
+      /* a log write must never kill the run */
+    }
+  }
   let toolCallsFd: number;
   try {
     toolCallsFd = fs.openSync(toolCallsPath, "a");
@@ -1194,6 +1349,7 @@ export function runBackgroundResearch(
       cwd: opts.cwd,
       model: opts.model,
       thinkingLevel: opts.thinkingLevel,
+      extensions: opts.extensions,
       tools,
       systemPrompt,
       task: opts.task,
@@ -1297,7 +1453,12 @@ export function runBackgroundResearch(
     }
   }
 
-  return { researchId, findingsPath: opts.findingsPath, logPath };
+  return {
+    researchId,
+    findingsPath: opts.findingsPath,
+    logPath,
+    ...(dropped.length > 0 ? { droppedTools: dropped } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,7 +1539,15 @@ export function buildResearchPrompt(
   task: string,
   findingsPath: string,
   maxWallClockMs: number = DEFAULT_RESEARCH_WALL_CLOCK_MS,
+  toolNames?: string[],
 ): string {
+  const toolLine =
+    toolNames === undefined
+      ? ""
+      : toolNames.length > 0
+        ? `Available tools (the only tools you can call): ${toolNames.join(", ")}.`
+        : "Available tools: none.";
+  const middle = toolLine ? [toolLine, ""] : [];
   return [
     agent.systemPrompt,
     "",
@@ -1386,6 +1555,7 @@ export function buildResearchPrompt(
     "",
     `You have at most ${formatDuration(maxWallClockMs)} of wall-clock time before the run is cut off.`,
     "",
+    ...middle,
     "Before each new search round, rewrite the findings file with everything gathered so far (a checkpoint), so a cut loses at most one round of work.",
     "",
     "Stop as soon as you have enough information to answer well — do not chase source code or implementation details beyond that.",
