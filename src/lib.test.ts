@@ -75,8 +75,10 @@ import {
   TOKEN_GUARD_MULTIPLIER,
   TOOL_ALIASES,
   TOOL_CONTRACTS,
+  childLoadoutReport,
   packageNameOfSpec,
   pathIsInsidePackage,
+  runStageLine,
   type AgentConfig,
   type FrontmatterParser,
   type LogTailFs,
@@ -182,6 +184,71 @@ test("pathIsInsidePackage rejects other packages, unrelated paths, and prefixes"
   assert.ok(!pathIsInsidePackage("/n/node_modules/pi-web-access-lean2/x.ts", "pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/n/node_modules/@ssk_dev/index.ts", "@ssk_dev/pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/tmp/somewhere.ts", "read"));
+});
+
+test("childLoadoutReport reports a healthy loadout even when the allowlist excludes its tools", () => {
+  // Regression (observed false negative): the research child loaded and kept
+  // the knob packages, but the caller's `tools` allowlist excluded their
+  // tools, so the old report — computed from the allowlist-filtered
+  // `getAllTools()` — printed `NO knob packages registered`. The report must
+  // reflect the LOADOUT (loader-kept extension tools), not the session's
+  // allowlist-filtered tool set, and word itself as a loadout status that
+  // cannot be misread as a run failure.
+  const lines = childLoadoutReport({
+    knob: ["npm:@ssk_dev/pi-web-access-lean", "npm:@upstash/context7-pi"],
+    keptExtensionTools: ["web_access", "resolve-library-id", "query-docs"],
+    sessionToolNames: ["read", "bash", "grep", "find"],
+    allowlist: ["read", "bash", "grep", "find"],
+  });
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("[loadout] ok · loaded 3 knob tools: web_access, resolve-library-id, query-docs"));
+  assert.ok(lines[0].includes("run continues"));
+  assert.ok(!lines[0].includes("no tools loaded"));
+  assert.ok(!lines[0].includes("warn"));
+});
+
+test("childLoadoutReport flags a genuinely missing loadout, naming the packages and decoupling it from run status", () => {
+  const lines = childLoadoutReport({
+    knob: ["npm:@ssk_dev/pi-web-access-lean", "npm:@upstash/context7-pi"],
+    keptExtensionTools: [],
+    sessionToolNames: ["read"],
+    allowlist: ["read"],
+  });
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("[loadout] warn · no tools loaded from knob packages"));
+  assert.ok(lines[0].includes("npm:@ssk_dev/pi-web-access-lean"));
+  assert.ok(lines[0].includes("npm:@upstash/context7-pi"));
+  assert.ok(lines[0].includes("run continues"));
+});
+
+test("childLoadoutReport reports allowlisted tools missing from the session (drift)", () => {
+  const lines = childLoadoutReport({
+    knob: ["npm:@ssk_dev/pi-web-access-lean"],
+    keptExtensionTools: ["web_access"],
+    sessionToolNames: ["read", "bash"],
+    allowlist: ["read", "web_access"],
+  });
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].includes("[loadout] ok · loaded 1 knob tools: web_access"));
+  assert.ok(lines[1].includes("allowlist missing from loadout: web_access"));
+});
+
+test("childLoadoutReport with an empty knob emits no loadout line but still checks drift", () => {
+  const lines = childLoadoutReport({
+    knob: [],
+    keptExtensionTools: ["web_access"],
+    sessionToolNames: ["read", "bash"],
+    allowlist: ["read", "web_access"],
+  });
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("allowlist missing from loadout: web_access"));
+});
+
+test("runStageLine formats a timestamped run-stage line with optional detail", () => {
+  const bare = runStageLine("prompt started");
+  assert.match(bare, /^\[run\] \d{2}:\d{2}:\d{2} prompt started\n$/);
+  const withDetail = runStageLine("session created", "model=provider/id");
+  assert.match(withDetail, /^\[run\] \d{2}:\d{2}:\d{2} session created · model=provider\/id\n$/);
 });
 
 test("resolveTools keeps bash when the registry has it, even on win32 (Git Bash honored)", () => {

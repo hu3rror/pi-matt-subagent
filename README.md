@@ -122,6 +122,17 @@ This list is a **curated trust surface, not a promise that every query-style too
 
 **Error shapes and remedies.** When a declared tool cannot be loaded (package not installed, knob-disabled, or platform-impossible — e.g. `powershell` off-Windows), the run still starts but the tool is absent from the child, the research tool's returned text and the run log carry a `⚠ Declared but not loaded: …` drift note, and the researcher prompt only lists tools it actually has. The symptom of ignoring the note: the researcher model guesses tool names and loops. Fix by installing the package, pointing the knob at it, or removing the tool from the role.
 
+**Reading a research run's log — what each line means.** The per-run log (`logPath`, tail via `/subagents tail <id>`) mixes four kinds of content; only one of them is the run's outcome:
+
+| Line | Source | It says | It does NOT say |
+|---|---|---|---|
+| `[loadout] ok/warn …` | loadout self-check (first lines) | whether the knob packages' tools were **loaded** | run success/failure |
+| `[run] HH:MM:SS …` | stage lines (`session created`, `prompt started`, `terminal: <status>`) | what the run is **doing now** | — |
+| model text | researcher output | research **progress** | — |
+| research-status push | terminal push card | the run's **authoritative outcome** (`succeeded` / `failed` / `terminated` / `aborted`) | — |
+
+A loadout line is a loadout status, never a run status: the researcher still runs, and the `terminal:` stage line (or the push card) is the outcome to judge by. Healthy signals: the push card arrives with `succeeded`, the findings file is written, and the log keeps growing. Trouble signals: the run stays `running` with no new log lines for a long stretch (the wall-clock cap then resolves it `terminated`), or the push card reports `failed`/`aborted`. Every executed tool call is also audited to `toolcalls.jsonl` next to the log — the ground truth for what actually ran.
+
 ## Project layout
 
 ```

@@ -964,6 +964,65 @@ export function pathIsInsidePackage(filePath: string, pkgName: string): boolean 
 }
 
 /**
+ * The research child's loadout self-report lines (issue #37), computed from
+ * the LOADOUT TRUTH — the tools registered by the knob-package extensions the
+ * loader filter actually kept — plus the allowlist-side drift check. The
+ * child session's own `getAllTools()` is allowlist-filtered (pi's
+ * `createAgentSession` drops non-allowlisted tools from the session registry),
+ * so reporting on it misreads a caller-restricted `tools` list as a package
+ * load failure (observed: `NO knob packages registered` while the packages
+ * were installed and the loader kept them). `keptExtensionTools` must come
+ * from the loader's kept extensions, never from the session.
+ */
+export function childLoadoutReport(input: {
+  /** The knob package specs in effect for the run. */
+  knob: string[];
+  /** Tool names registered by knob-package extensions the loader kept. */
+  keptExtensionTools: string[];
+  /** The child session's actual tool names (allowlist-filtered). */
+  sessionToolNames: string[];
+  /** The `--tools` allowlist the caller requested. */
+  allowlist: string[];
+}): string[] {
+  const lines: string[] = [];
+  if (input.knob.length > 0) {
+    const knobTools = [...new Set(input.keptExtensionTools)];
+    // Both branches word themselves as a LOADOUT status and explicitly
+    // decouple from run status: a loadout line must never read as a run
+    // failure (the researcher still runs, and the research-status push is the
+    // authoritative outcome).
+    lines.push(
+      knobTools.length > 0
+        ? `[loadout] ok · loaded ${knobTools.length} knob tools: ${knobTools.join(", ")} — run continues; final status via the research-status push\n`
+        : `[loadout] warn · no tools loaded from knob packages (${input.knob.join(
+            ", ",
+          )}) — check they are installed and named correctly — run continues; final status via the research-status push\n`,
+    );
+  }
+  const childAll = new Set(input.sessionToolNames);
+  const missing = input.allowlist.filter((t) => !childAll.has(t));
+  if (missing.length > 0) {
+    lines.push(`[child-loadout] allowlist missing from loadout: ${missing.join(", ")}\n`);
+  }
+  return lines;
+}
+
+/**
+ * One timestamped run-stage line for the research run log (shared by the
+ * child-session factory and the runner's terminal push, so the log's progress
+ * lines can never drift in format between the two writers). Stage lines give
+ * `/subagents tail` a live "what is it doing now" signal and anchor any
+ * loadout line in a run context, instead of leaving a single line to be
+ * misread as the run's outcome.
+ */
+export function runStageLine(stage: string, detail?: string): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hh = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `[run] ${hh} ${stage}${detail ? ` · ${detail}` : ""}\n`;
+}
+
+/**
  * Resolves role tool names for a subagent's `--tools` allowlist (issue #37,
  * registry-driven shell mapping). With a tool registry (`availableToolNames`,
  * probed via `pi.getAllTools()` by the extension), the shell and platform

@@ -42,6 +42,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import {
   buildDispatchArgs,
   buildSubagentEnv,
+  childLoadoutReport,
   createRunRegistry,
   buildResearchFullParams,
   configToLimits,
@@ -65,6 +66,7 @@ import {
   parseSubagentsArgs,
   packageNameOfSpec,
   pathIsInsidePackage,
+  runStageLine,
   planRunThinking,
   readLogTail,
   researchStatusContent,
@@ -218,6 +220,11 @@ export function createResearchChildSession(opts: {
       // simply never appear in the base's extensions, so the filter drops
       // them harmlessly (the drift report surfaces the consequence).
       const knob = opts.extensions;
+      // One predicate shared by the loader filter below and the loadout
+      // self-report after creation, so the two sides of the knob match can
+      // never drift (same guarantee `pathIsInsidePackage` gives the probe).
+      const isKnobPackage = (e: { sourceInfo?: { path?: string } }) =>
+        (knob ?? []).some((k) => pathIsInsidePackage(e.sourceInfo?.path ?? "", packageNameOfSpec(k)));
       const loader = new DefaultResourceLoader({
         cwd: opts.cwd,
         agentDir: getAgentDir(),
@@ -226,9 +233,7 @@ export function createResearchChildSession(opts: {
           ? {
               extensionsOverride: (base) => ({
                 ...base,
-                extensions: base.extensions.filter((e) =>
-                  knob.some((k) => pathIsInsidePackage(e.sourceInfo.path, packageNameOfSpec(k))),
-                ),
+                extensions: base.extensions.filter((e) => isKnobPackage(e)),
               }),
             }
           : {}),
@@ -254,29 +259,33 @@ export function createResearchChildSession(opts: {
       session = created.session;
       researchChildren.add(session);
       // issue #37 — a loadout self-report as the child's FIRST output line(s):
-      // the knob-package tools actually registered, and any allowlist names
-      // missing from the loadout. Tee'd into the per-run log before the
-      // session ever prompts, so a loadout regression (a package that no
-      // longer loads, a renamed/retired tool) surfaces at start time instead
-      // of as model-side tool-not-found loops.
-      if (knob && knob.length > 0) {
-        const knobTools = session
-          .getAllTools()
-          .filter((t) => knob.some((k) => pathIsInsidePackage(t.sourceInfo.path, packageNameOfSpec(k))))
-          .map((t) => t.name);
-        if (knobTools.length > 0) {
-          pushChunk(`[child-loadout] knob packages registered: ${knobTools.join(", ")}\n`);
-        } else {
-          pushChunk(
-            "[child-loadout] NO knob packages registered — check that researchChildExtensions packages are installed and named correctly\n",
-          );
-        }
+      // the knob-package tools the loader filter actually kept, and any
+      // allowlist names missing from the session. Tee'd into the per-run log
+      // before the session ever prompts, so a loadout regression (a package
+      // that no longer loads, a renamed/retired tool) surfaces at start time
+      // instead of as model-side tool-not-found loops. The knob line reports
+      // the LOADOUT (what the loader kept), not the session's allowlist-
+      // filtered `getAllTools()`: a caller that restricts `tools` must not
+      // misread a healthy loadout as a package failure (observed false
+      // negative: `NO knob packages registered` with the packages installed
+      // and kept by the filter).
+      const knobExtensions = loader.getExtensions().extensions.filter((e) => isKnobPackage(e));
+      const keptKnobTools = knobExtensions.flatMap((e) => [...e.tools.keys()]);
+      for (const line of childLoadoutReport({
+        knob: knob ?? [],
+        keptExtensionTools: keptKnobTools,
+        sessionToolNames: session.getAllTools().map((t) => t.name),
+        allowlist: opts.tools ?? [],
+      })) {
+        pushChunk(line);
       }
-      const childAll = new Set(session.getAllTools().map((t) => t.name));
-      const missing = (opts.tools ?? []).filter((t) => !childAll.has(t));
-      if (missing.length > 0) {
-        pushChunk(`[child-loadout] allowlist missing from loadout: ${missing.join(", ")}\n`);
-      }
+      const modelRef = opts.model as { provider?: string; id?: string } | undefined;
+      pushChunk(
+        runStageLine(
+          "session created",
+          modelRef?.provider && modelRef.id ? `model=${modelRef.provider}/${modelRef.id}` : "model inherited",
+        ),
+      );
       const unsubscribe = session.subscribe((event) => {
         if (event.type === "message_end" && event.message) {
           const text = assistantTextOfMessage(event.message);
@@ -291,6 +300,7 @@ export function createResearchChildSession(opts: {
       });
       try {
         if (abortController.signal.aborted) throw new Error("research child aborted before start");
+        pushChunk(runStageLine("prompt started"));
         await session.prompt(opts.task);
       } finally {
         unsubscribe();
@@ -1411,6 +1421,10 @@ export default function (pi: ExtensionAPI) {
             // instruction to read the findings file (ADR 0013).
             onExit: (info) => {
               researchAborts.delete(runId);
+              // The terminal stage line lands in the run log BEFORE the tail
+              // is read, so the lastOutput that gets pushed and shown in the
+              // run snapshot already carries the run's outcome.
+              fs.appendFileSync(handle.logPath, runStageLine("terminal", info.status));
               const lastOutput = readLogTail(handle.logPath);
               updateRun(runId, { status: info.status, lastOutput: lastOutput || undefined });
               // A short-lived process can tear the session context down while

@@ -122,6 +122,17 @@ pi install <path-to-this-repo>
 
 **报错形态与处置**。当声明的工具无法装载（包未安装、被 knob 关闭、或平台不可能——例如非 Windows 上的 `powershell`），运行照常启动但该工具不会出现在子会话里：research 工具返回文本与运行日志会带一条 `⚠ Declared but not loaded: …` 漂移提示，researcher 的 prompt 只列出它真正拥有的工具。忽略提示的症状：researcher 模型瞎猜工具名然后死循环。处置：安装该包、把 knob 指向它、或从角色上删掉该工具。
 
+**如何阅读 research 运行日志——每一行是什么**。每次运行的日志（`logPath`，用 `/subagents tail <id>` 看尾部）混着四类内容，其中只有一类是运行结果：
+
+| 行 | 来源 | 说明什么 | 不等于什么 |
+|---|---|---|---|
+| `[loadout] ok/warn …` | 装载自检（日志首行起） | knob 包的工具是否**装载**成功 | 运行成败 |
+| `[run] HH:MM:SS …` | 阶段线（`session created`、`prompt started`、`terminal: <状态>`） | 运行**现在在干什么** | — |
+| 模型正文 | researcher 输出 | 研究**进度** | — |
+| research-status 推送卡 | 终态推送 | 运行的**权威结果**（`succeeded`/`failed`/`terminated`/`aborted`） | — |
+
+装载行只是装载状态、永远不是运行状态：researcher 照常运行，`terminal:` 阶段线（或推送卡）才是评判依据。正常信号：推送卡到达且为 `succeeded`、findings 文件已写出、日志持续增长。异常信号：长时间停在 `running` 且日志无新行（wall-clock 上限到点会以 `terminated` 收场），或推送卡报 `failed`/`aborted`。每次工具调用还会审计写入日志旁的 `toolcalls.jsonl`——真正跑过什么的最底实据。
+
 ## 项目结构
 
 ```

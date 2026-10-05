@@ -54,6 +54,11 @@ export default function (pi: ExtensionAPI) {
     if (event.reason !== "startup" || started) return;
     started = true;
     log(`session_start reason=${event.reason} cwd=${ctx.cwd} hasUI=${ctx.hasUI} model=${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(none)"}`);
+    // Capture the cwd/model once: gates 5/5b can outlive the session
+    // (session_shutdown fires gate 4 before they finish), and a captured ctx
+    // would then be stale.
+    const sessionCwd = ctx.cwd;
+    const sessionModel = ctx.model;
 
     void (async () => {
       // Gate 1 — spawn + complete a real in-process research child.
@@ -143,49 +148,79 @@ export default function (pi: ExtensionAPI) {
         log("PUSH-E2E FAIL: gate 1");
       }
 
-      // Gate 5 — issue #37: the curated knob loadout. A child built with the
-      // default researchChildExtensions must actually register the query
-      // packages and self-report them in its first output line, and nothing
-      // the loadout promised (the default role's declared query tools) may be
-      // missing. This is the regression guard for the round-1 incident (child
-      // with built-ins only: tool names mismatched / loadout filter drifted).
-      try {
-        const declared = EMBEDDED_ROLES.researcher.tools ?? [];
-        for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
-          if (!declared.includes(q)) throw new Error(`default researcher role no longer declares ${q} — update gate 5`);
+      // Gates 5 / 5b — issue #37: the curated knob loadout. A child built
+      // with the default researchChildExtensions must actually register the
+      // query packages and self-report them (loader truth, not the caller's
+      // allowlist-filtered session tools) as its first output line, with no
+      // drift and no warn. Gate 5 is the round-1 regression guard (child with
+      // built-ins only: tool names mismatched / loadout filter drifted); gate
+      // 5b pins the allowlist-excluding case that was misreported as `NO knob
+      // packages registered`. One shared helper keeps the two gates from
+      // drifting apart.
+      const runLoadoutGate = async (opts: {
+        label: string;
+        tools: string[];
+        assertStageLines?: boolean;
+        okMessage: string;
+        failMessage: string;
+      }) => {
+        try {
+          const child = createResearchChildSession({
+            cwd: sessionCwd,
+            model: sessionModel,
+            thinkingLevel: "off",
+            extensions: [...DEFAULT_RESEARCH_CHILD_EXTENSIONS],
+            tools: opts.tools,
+            systemPrompt: "You are a loadout check. Reply with exactly: pong",
+            task: "Reply with exactly: pong",
+            findingsPath: path.join(os.tmpdir(), `push-e2e-knob-${opts.label}-findings.md`),
+          });
+          children.push(child);
+          let out = "";
+          void (async () => {
+            for await (const chunk of child.output) out += chunk;
+          })().catch(() => {});
+          await child.done;
+          const firstLine = out.split("\n")[0] ?? "";
+          log(`(${opts.label}) knob child first line: ${JSON.stringify(firstLine)}`);
+          const ok =
+            firstLine.includes("[loadout] ok · loaded 3 knob tools:") &&
+            ["web_access", "query-docs", "resolve-library-id"].every((t) => firstLine.includes(t)) &&
+            !out.includes("[child-loadout] allowlist missing from loadout:") &&
+            !out.includes("[loadout] warn") &&
+            // Stage lines: the log must show created/prompt so a loadout line
+            // never sits alone; the terminal stage is written by the research
+            // tool's onExit and is out of scope here (direct child, no runner).
+            (!opts.assertStageLines ||
+              (out.includes("[run] ") && out.includes("session created") && out.includes("prompt started")));
+          log(ok ? `PUSH-E2E OK: gate ${opts.label} (${opts.okMessage})` : `PUSH-E2E FAIL: gate ${opts.label} (${opts.failMessage})`);
+        } catch (err) {
+          log(`(${opts.label}) knob loadout child FAILED: ${(err as Error).message}`);
+          log(`PUSH-E2E FAIL: gate ${opts.label}`);
         }
-        const knobChild = createResearchChildSession({
-          cwd: ctx.cwd,
-          model: ctx.model,
-          thinkingLevel: "off",
-          extensions: [...DEFAULT_RESEARCH_CHILD_EXTENSIONS],
-          tools: declared,
-          systemPrompt: "You are a loadout check. Reply with exactly: pong",
-          task: "Reply with exactly: pong",
-          findingsPath: path.join(os.tmpdir(), "push-e2e-knob-findings.md"),
-        });
-        children.push(knobChild);
-        let out = "";
-        void (async () => {
-          for await (const chunk of knobChild.output) out += chunk;
-        })().catch(() => {});
-        await knobChild.done;
-        const firstLine = out.split("\n")[0] ?? "";
-        log(`(5) knob child first line: ${JSON.stringify(firstLine)}`);
-        const ok =
-          firstLine.includes("[child-loadout] knob packages registered:") &&
-          ["web_access", "query-docs", "resolve-library-id"].every((t) => firstLine.includes(t)) &&
-          !out.includes("[child-loadout] allowlist missing from loadout:") &&
-          !out.includes("[child-loadout] NO knob packages registered");
-        log(
-          ok
-            ? "PUSH-E2E OK: gate 5 (curated knob loadout registers the declared query tools)"
-            : "PUSH-E2E FAIL: gate 5 (child-loadout line above shows which tool/package drifted)",
-        );
-      } catch (err) {
-        log(`(5) knob loadout child FAILED: ${(err as Error).message}`);
-        log("PUSH-E2E FAIL: gate 5");
+      };
+
+      const declared = EMBEDDED_ROLES.researcher.tools ?? [];
+      for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
+        if (!declared.includes(q)) throw new Error(`default researcher role no longer declares ${q} — update gate 5`);
       }
+      await runLoadoutGate({
+        label: "5",
+        tools: declared,
+        assertStageLines: true,
+        okMessage: "curated knob loadout registers the declared query tools; stage lines present",
+        failMessage: "child-loadout line above shows which tool/package drifted",
+      });
+
+      // Gate 5b — platform-stable allowlist that still excludes the knob
+      // tools: `bash` would resolve to `powershell` on a bash-less win32 host
+      // and fire the drift line, failing the gate despite a correct loadout.
+      await runLoadoutGate({
+        label: "5b",
+        tools: ["read", "grep", "find"],
+        okMessage: "loadout report reflects the loader, not the allowlist",
+        failMessage: "loadout line above shows the regression",
+      });
     })().catch((err) => {
       log(`push-e2e async body errored: ${(err as Error).stack ?? (err as Error).message}`);
     });
