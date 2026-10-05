@@ -1,6 +1,8 @@
 # No-drift model-facing slimming, with a structural help-on-demand entry point (Variant A)
 
-> [ZH] 模型可见面瘦身（Variant A）：description 改为"精简但全保留"、schema 只删字段描述冗词，合计 token 从 1147 降到实测 959（pi 0.99.2，Seam E）；完整教学文本以 `SUBAGENT_HELP_TEXT` / `RESEARCH_HELP_TEXT` 常量原样保留并配防腐化测试，作为 ADR 0012 挂起的 help-on-demand 的结构性入口（不接任何模型可见路径、description 无悬空 help 指引）；B（help 机制本身）与 C（deferred/tool_search）再次挂起并记录理由。基线常量与 README 数字由 `scripts/benchmark-tools.ts` 重测更新，×1.2 回归守卫与 surface contract tests 形状不变。
+> **Note (ADR 0022)**: this ADR's Decision lists the full-schema hidden parameters as `model` / `thinkingOverride` / `maxWallClockMs` — that set reflects the surface at the time. ADR 0022 moved the per-run `model` override into both tools' public schemas; the remaining hidden set is `thinkingOverride` (`subagent`) and `maxWallClockMs` (`research`). The slimming decision itself is unaffected.
+
+> [ZH] 模型可见面瘦身（Variant A）：description 改为"精简但全保留"、schema 只删字段描述冗词，合计 token 从 1147 降到实测 959（pi 0.99.2，Seam E）；完整教学文本以 `SUBAGENT_HELP_TEXT` / `RESEARCH_HELP_TEXT` 常量原样保留并配防腐化测试，作为 ADR 0012 挂起的 help-on-demand 的结构性入口（不接任何模型可见路径、description 无悬空 help 指引）；B（help 机制本身）与 C（deferred/tool_search）再次挂起并记录理由。基线常量与 README 数字由 `scripts/benchmark-tools.ts` 重测更新，×1.2 回归守卫与 surface contract tests 形状不变。**ADR 0022 修订**：`model` 已迁入公开 schema，本 ADR 的隐藏参数枚举相应过期（瘦身决策不受影响）。
 
 ADR 0011 deferred help-on-demand schema slimming until a measured token baseline existed; ADR 0012 recorded that stance. The baseline has existed since 2026-09-22 (subagent 630 / research 517). This ADR re-opens the question with measured numbers, adopts the no-drift slimming path (Variant A), and keeps a structural entry point so the deferred option can be wired later without re-authoring — and so a future maintainer never mistakes that entry point for dead code.
 
