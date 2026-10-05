@@ -110,7 +110,7 @@ _Avoid_: throw 为载体, 假成功（未完成调用却成功标记）
 _Avoid_: 无 schema 声明却返回结构化字段，声明后成功分支不带回
 
 **input-JSON**:
-两个工具各带的可选 `input` 字段的契约（ADR 0011，ADR 0022 修订）：值必须是 JSON 对象字符串，携带仍对公开 schema 隐藏但运行时已支持的参数（`subagent`: `thinkingOverride`；`research`: `maxWallClockMs`）。单次运行的 `model` 覆盖自 ADR 0022 起是公开字段（两个工具皆是），不再经 `input`——合并规则 `{...parsed, ...direct}` 不变，`input` 里旧式携带 `model` 的调用仍可合并通过（向后兼容，仅不再 hidden）。合并规则沿用轻量 subagents 门面的通用做法：直接字段覆盖 JSON 同名键（`{...parsed, ...direct}`）；缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
+两个工具各带的可选 `input` 字段的契约（ADR 0011，ADR 0022 修订）：值必须是 JSON 对象字符串，携带仍对公开 schema 隐藏但运行时已支持的参数（`subagent`: `thinkingOverride`；`research`: `maxWallClockMs`）。单次运行的 `model` 覆盖自 ADR 0022 起是公开字段（两个工具皆是），不再经 `input`——合并/校验语义不变（`{...parsed, ...direct}`），`input` 里旧式携带 `model` 的调用仍可合并通过（向后兼容，仅不再 hidden）。缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
 _Avoid_: input param, JSON escape hatch
 
 **token benchmark（token 基准）**:

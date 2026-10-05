@@ -384,12 +384,13 @@ export function formatConfigOverview(status: ConfigStatus, configPath: string, e
 //   Single source of truth for both tools' model-facing parameter schemas,
 //   shared by the extension (registration + dispatch validation) and the
 //   contract tests (Seam D). The public schemas are the frozen surface plus
-//   one optional `input` field; the full schemas add the hidden parameters
-//   (`model` / `thinkingOverride`) the runtime dispatch layer already
-//   supports but the public schema hides. Merge semantics follow the
-//   lightweight-subagents-facade pattern: direct fields override same-name
-//   JSON keys (`{ ...parsed, ...direct }`), absent/empty `input` is a
-//   passthrough, and a non-object or unparseable value raises a
+//   one optional `input` field; the full schemas add the remaining hidden
+//   parameters (`thinkingOverride` / `maxWallClockMs`) the runtime dispatch
+//   layer already supports but the public schema hides. The per-run `model`
+//   override is a public field on both tools (ADR 0022). Merge semantics
+//   follow the lightweight-subagents-facade pattern: direct fields override
+//   same-name JSON keys (`{ ...parsed, ...direct }`), absent/empty `input` is
+//   a passthrough, and a non-object or unparseable value raises a
 //   model-visible tool error. After merging, the object is validated against
 //   the full contract; failures are summarized with field paths.
 // ---------------------------------------------------------------------------
@@ -409,6 +410,8 @@ const ChainItem = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory" })),
 });
 
+const ModelOverrideField = Type.Optional(Type.String({ description: "Model override for this run (provider/id)." }));
+
 const SubagentPublicFields = {
   agent: Type.Optional(Type.String({ description: "Agent name (single mode)" })),
   task: Type.Optional(Type.String({ description: "Task for the agent (single mode)" })),
@@ -420,14 +423,9 @@ const SubagentPublicFields = {
       description: "Thinking level for the whole call (single, parallel, or chain); applies to every run.",
     }),
   ),
-  // ADR 0022 — the per-run model override moved from the hidden `input` set
-  // into the public schema: a hidden channel no other main model reliably
-  // discovers (the channel's whole point was to slim the surface, but a
-  // dropped override silently falls back to the config default, which is the
-  // failure this field exists to prevent). Direct field or `input` JSON both
-  // merge the same way ({...parsed, ...direct}), so `input`-based callers
-  // keep working.
-  model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
+  // ADR 0022 — public per-run model override (was hidden in `input`); direct
+  // field or `input` JSON both merge, so legacy callers keep working.
+  model: ModelOverrideField,
   cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
 };
 
@@ -441,7 +439,7 @@ const ResearchPublicFields = {
   agentScope: Type.Optional(AgentScopeSchema),
   thinkingLevel: Type.Optional(ThinkingLevelSchema),
   // ADR 0022 — same move as `subagent`'s model override: public field now.
-  model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
+  model: ModelOverrideField,
 };
 
 const SUBAGENT_INPUT_DESCRIPTION =
