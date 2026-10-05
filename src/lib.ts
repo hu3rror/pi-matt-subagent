@@ -420,6 +420,14 @@ const SubagentPublicFields = {
       description: "Thinking level for the whole call (single, parallel, or chain); applies to every run.",
     }),
   ),
+  // ADR 0022 — the per-run model override moved from the hidden `input` set
+  // into the public schema: a hidden channel no other main model reliably
+  // discovers (the channel's whole point was to slim the surface, but a
+  // dropped override silently falls back to the config default, which is the
+  // failure this field exists to prevent). Direct field or `input` JSON both
+  // merge the same way ({...parsed, ...direct}), so `input`-based callers
+  // keep working.
+  model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
   cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
 };
 
@@ -432,13 +440,15 @@ const ResearchPublicFields = {
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
   agentScope: Type.Optional(AgentScopeSchema),
   thinkingLevel: Type.Optional(ThinkingLevelSchema),
+  // ADR 0022 — same move as `subagent`'s model override: public field now.
+  model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
 };
 
 const SUBAGENT_INPUT_DESCRIPTION =
-  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), thinkingOverride (thinking level).";
+  "JSON string of hidden params; direct fields override same-name keys. Hidden: thinkingOverride (thinking level).";
 
 const RESEARCH_INPUT_DESCRIPTION =
-  "JSON string of hidden params; direct fields override same-name keys. Hidden: model (provider/id), maxWallClockMs (cap in ms; may only tighten the 45-min default).";
+  "JSON string of hidden params; direct fields override same-name keys. Hidden: maxWallClockMs (cap in ms; may only tighten the 45-min default).";
 
 /** `subagent`'s registered (public) parameter schema — what the model sees. */
 export const SUBAGENT_TOOL_PARAMS = Type.Object({
@@ -453,22 +463,21 @@ export const RESEARCH_TOOL_PARAMS = Type.Object({
 });
 
 /** Hidden parameters `subagent` accepts through `input` (runtime-supported, schema-hidden). */
-export const SUBAGENT_INPUT_KEYS = ["model", "thinkingOverride"] as const;
+export const SUBAGENT_INPUT_KEYS = ["thinkingOverride"] as const;
 
 /** Hidden parameters `research` accepts through `input` (runtime-supported, schema-hidden). */
-export const RESEARCH_INPUT_KEYS = ["model", "maxWallClockMs"] as const;
+export const RESEARCH_INPUT_KEYS = ["maxWallClockMs"] as const;
 
 /**
- * The full `subagent` dispatch contract: the public fields plus the hidden
- * parameters. The merged params object is validated against this before
- * dispatch; it is never registered as the model-facing schema. Unlike the
- * public schema (which stays as it always was), unknown keys are rejected
- * here so a mistyped `input` fails loudly.
+ * The full `subagent` dispatch contract: the public fields (now including the
+ * per-run `model` override, ADR 0022) plus the remaining hidden parameter
+ * `thinkingOverride`. The merged params object is validated against this
+ * before dispatch; it is never registered as the model-facing schema.
+ * Unknown keys are rejected here so a mistyped `input` fails loudly.
  */
 export const SUBAGENT_FULL_PARAMS = Type.Object(
   {
     ...SubagentPublicFields,
-    model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
     thinkingOverride: Type.Optional(ThinkingLevelSchema),
   },
   { additionalProperties: false },
@@ -480,13 +489,13 @@ export const SUBAGENT_FULL_PARAMS = Type.Object(
  * the code default (so the surface-contract tests pin that bound); the
  * extension builds one per dispatch from the effective config ceiling so
  * raising it is honored without /reload, and a per-call `maxWallClockMs` may
- * only tighten (≤ the configured ceiling).
+ * only tighten (≤ the configured ceiling). The per-run `model` override is a
+ * public field (ADR 0022), carried in by the `ResearchPublicFields` spread.
  */
 export function buildResearchFullParams(maxCeilingMs: number): TObject {
   return Type.Object(
     {
       ...ResearchPublicFields,
-      model: Type.Optional(Type.String({ description: "Model override for this run (provider/id)." })),
       maxWallClockMs: Type.Optional(
         Type.Integer({
           minimum: 1,

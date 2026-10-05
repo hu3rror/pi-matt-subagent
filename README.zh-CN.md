@@ -18,7 +18,7 @@
 - **后台 research** —— 进程内第二会话在后台把带引用的调研结果写入文件，你继续干活；完成状态（`succeeded` / `failed` / `terminated` / `aborted`）推回你的会话——不用轮询。
 - **六个内置角色** —— `standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`，和 skills 里描述的角色一致。
 - **四个斜杠命令** —— `/code-review <ref>`、`/design-it-twice <candidate>`、`/research <question>`，加上用于运行管理的 `/subagents`。
-- **单次运行覆盖** —— 通过隐藏的 `input` 字段为某一次运行指定不同的模型或思考级别。
+- **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型，或通过 `thinkingLevel`（整个调用）与 `input.thinkingOverride`（规范字段）钉住思考级别。
 - **实时运行管理** —— 页脚计数器（`⧗ N subagents running`），用 `/subagents` 跟踪、停止或查看运行。
 
 ## 安装
@@ -50,10 +50,7 @@ pi install <path-to-this-repo>
 | `subagent` | **阻塞式** | 运行单个 / 并行 / 链式 subagent。在所有 subagent 完成前不返回；完整结果一次性回到一个工具结果里。`chain` 支持 `{previous}` 占位符，把上一步的输出传给下一步。 |
 | `research` | **后台式** | 进程内第二会话把带引用的调研结果写入文件后立即返回，完成状态推回你的会话——不用轮询。 |
 
-两者都接受可选的 `input` 字段：一个承载公开 schema 之外高级参数的 JSON 对象字符串。
-
-- `subagent` 接受 `model` 和 `thinkingOverride`（单次运行的模型和思考级别）。
-- `research` 接受 `model` 和 `maxWallClockMs`（运行时长上限，只能收紧默认值，默认 60 分钟）。
+两者都接受可选的 `input` 字段：一个承载仍对公开 schema 隐藏的参数的 JSON 对象字符串（`subagent` 的 `thinkingOverride`；`research` 的 `maxWallClockMs`——运行时长上限，只能收紧默认值，默认 60 分钟）。**单次运行的 `model` 覆盖是两个工具上的公开字段**（ADR 0022——隐藏通道被证明不可靠：模型会漏掉它，运行静默回退到配置的默认模型）。
 
 直接字段优先于同名 JSON 键；非法 JSON 会抛出清晰的模型可见错误，合并后的参数在派发前会按完整契约校验。
 
@@ -61,7 +58,8 @@ pi install <path-to-this-repo>
 {
   "task": "review the diff since HEAD~1 for standards compliance",
   "agent": "standards-reviewer",
-  "input": "{\"model\": \"sensenova/deepseek-v4-pro\", \"thinkingOverride\": \"high\"}"
+  "model": "sensenova/sensenova-6.8-flash-lite",
+  "thinkingLevel": "max"
 }
 ```
 
@@ -155,4 +153,4 @@ npm test          # 单元测试，不需要 pi 运行时
 npm run typecheck # 扩展、lib 和脚本的类型检查
 ```
 
-扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献（`subagent` / `research` 约 557 / 448 tokens），并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。
+扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献（`subagent` / `research` 约 573 / 464 tokens），并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。

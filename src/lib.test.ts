@@ -2224,8 +2224,21 @@ test("mergeToolParams merges input JSON under the direct params (direct fields w
   });
   assert.equal(merged.task, "direct task", "direct field wins over the same-name JSON key");
   assert.equal(merged.agent, "researcher");
-  assert.equal(merged.model, "anthropic/claude-x", "hidden params are routed into the merged object");
+  assert.equal(merged.model, "anthropic/claude-x", "legacy input-carried model still routes into the merged object (ADR 0022 backward compatibility)");
   assert.equal(merged.thinkingOverride, "low");
+});
+
+test("mergeToolParams accepts model as a public direct field (ADR 0022)", () => {
+  const direct: Record<string, unknown> = {
+    agent: "researcher",
+    task: "T",
+    model: "sensenova/sensenova-6.8-flash-lite",
+    thinkingLevel: "max",
+  };
+  const merged = mergeToolParams({ direct, fullSchema: SUBAGENT_FULL_PARAMS });
+  assert.equal(merged.model, "sensenova/sensenova-6.8-flash-lite", "the public model field passes through the full contract");
+  assert.equal(merged.thinkingLevel, "max");
+  assert.equal(merged.input, undefined, "no input key is invented");
 });
 
 test("mergeToolParams passes through when input is absent or empty", () => {
@@ -2348,30 +2361,30 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
 // Per-tool tokens of description + serialized parameter schema, measured
-// with pi 1.0.2 on 2026-10-04 (re-verified during the 0.99.1 → 1.0.2
-// devDeps bump; the ADR 0020 call-level description already brought the
-// measured surface to 557, and the baseline constant is updated here to
-// match the recorded + re-measured numbers; see ADR 0021).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 557, research: 448 };
+// with pi 1.0.2 on 2026-10-05. ADR 0022 moved the per-run `model` override
+// into the public schema (+16 tokens per tool, honest-wording input
+// description); the baseline constant is updated here to the re-measured
+// numbers (see ADR 0021 for the prior 557/448 record).
+const TOKEN_BASELINE: Record<string, number> = { subagent: 573, research: 464 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
 });
 
-test("subagent schema keeps its public fields and gains the input field", () => {
+test("subagent schema keeps its public fields, gains the input field and the model override", () => {
   const props = Object.keys(SUBAGENT_TOOL_PARAMS.properties ?? {});
   assert.deepEqual(
     new Set(props),
-    new Set(["agent", "task", "tasks", "chain", "agentScope", "thinkingLevel", "cwd", "input"]),
+    new Set(["agent", "task", "tasks", "chain", "agentScope", "thinkingLevel", "cwd", "model", "input"]),
   );
   assert.deepEqual(SUBAGENT_TOOL_PARAMS.required ?? [], [], "subagent has no required parameters");
 });
 
-test("research schema keeps its public fields and gains the input field, budget fields gone", () => {
+test("research schema keeps its public fields, gains the input field and the model override, budget fields gone", () => {
   const props = Object.keys(RESEARCH_TOOL_PARAMS.properties ?? {});
   assert.deepEqual(
     new Set(props),
-    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "input"]),
+    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "model", "input"]),
   );
   assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
 });
@@ -2408,8 +2421,8 @@ test("hidden parameters live only in the full schemas, never in the public ones"
     }
     assert.ok(!fullProps.includes("input"), `${contract.name} full schema consumes the transport field`);
   }
-  assert.deepEqual(SUBAGENT_INPUT_KEYS, ["model", "thinkingOverride"]);
-  assert.deepEqual(RESEARCH_INPUT_KEYS, ["model", "maxWallClockMs"]);
+  assert.deepEqual(SUBAGENT_INPUT_KEYS, ["thinkingOverride"]);
+  assert.deepEqual(RESEARCH_INPUT_KEYS, ["maxWallClockMs"]);
 });
 
 test("the registered descriptions match the frozen surface", () => {

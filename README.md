@@ -18,7 +18,7 @@ A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent inst
 - **Background research** — an in-process second session writes cited findings to a file while you keep working; the completion state (`succeeded` / `failed` / `terminated` / `aborted`) is pushed into your context — no polling.
 - **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder` — the same jobs the skills describe.
 - **Four slash commands** — `/code-review <ref>`, `/design-it-twice <candidate>`, `/research <question>`, and `/subagents` for run management.
-- **Per-run overrides** — pick a different model or thinking level for one run via the hidden `input` field.
+- **Per-run overrides** — pin one run's model via the public `model` field, or its thinking level via `thinkingLevel` (the whole call) or `input.thinkingOverride` (canonical).
 - **Live run management** — a footer counter (`⧗ N subagents running`); `/subagents` to follow, stop, or inspect runs.
 
 ## Install
@@ -50,10 +50,7 @@ Everything here is model-facing — you describe the job, the main agent makes t
 | `subagent` | **blocking** | Runs single / parallel / chain subagents. Does not return until every subagent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
 | `research` | **background** | Runs an in-process second session that writes cited findings to a file, returns immediately, and pushes the completion into your context — no polling. |
 
-Both accept an optional `input` field: a JSON object string carrying advanced parameters the public schema hides.
-
-- `subagent` accepts `model` and `thinkingOverride` (per-run model and thinking level).
-- `research` accepts `model` and `maxWallClockMs` (a wall-clock cap that may only tighten the 60-minute default).
+Both accept an optional `input` field: a JSON object string carrying the parameters still hidden from the public schema (`thinkingOverride` for `subagent`; `maxWallClockMs` for `research`, a wall-clock cap that may only tighten the 60-minute default). The per-run `model` override is a **public field** on both tools (ADR 0022 — a hidden channel proved unreliable: models dropped it and the run silently fell back to the configured default).
 
 Direct fields override same-name JSON keys; invalid JSON raises a clear model-visible error, and the merged parameters are validated against the full contract before dispatch.
 
@@ -61,7 +58,8 @@ Direct fields override same-name JSON keys; invalid JSON raises a clear model-vi
 {
   "task": "review the diff since HEAD~1 for standards compliance",
   "agent": "standards-reviewer",
-  "input": "{\"model\": \"sensenova/deepseek-v4-pro\", \"thinkingOverride\": \"high\"}"
+  "model": "sensenova/sensenova-6.8-flash-lite",
+  "thinkingLevel": "max"
 }
 ```
 
@@ -159,4 +157,4 @@ npm test          # unit tests, no pi runtime needed
 npm run typecheck # extension + lib + scripts typecheck
 ```
 
-The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~557 / ~448 tokens for `subagent` / `research`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
+The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~573 / ~464 tokens for `subagent` / `research`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
