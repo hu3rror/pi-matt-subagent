@@ -1,0 +1,48 @@
+# CI guardrail workflow — runs on every push to main and every PR against main.
+# Covers what publish.yml (tag-only) does not: daily pushes and PRs get
+# typecheck + tests. publish.yml keeps the same two gates on the release path.
+# The repo has no lint script, so check stays at typecheck + tests.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read # minimal; check only reads the tree
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24 # same as publish.yml
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      # `node --test src/*.test.ts` exits 0 with zero tests when the glob
+      # matches nothing (verified locally on Windows cmd and in bash). Fail
+      # loudly instead: mirror the exact glob the test script uses.
+      - name: "Guard: test glob must match at least one file"
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(src/*.test.ts)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no test files matched the src/*.test.ts glob — npm test would silently run 0 tests"
+            exit 1
+          fi
+          echo "matched ${#files[@]} test file(s): ${files[*]}"
