@@ -2364,7 +2364,7 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
 // with pi 1.0.2 on 2026-10-05. ADR 0022 moved the per-run `model` override
 // into the public schema (+16 tokens per tool, honest-wording input
 // description); the baseline constant is updated here to the re-measured
-// numbers (see ADR 0021 for the prior 557/448 record).
+// numbers (prior pi 1.0.2 record: 557/448).
 const TOKEN_BASELINE: Record<string, number> = { subagent: 573, research: 464 };
 
 test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {

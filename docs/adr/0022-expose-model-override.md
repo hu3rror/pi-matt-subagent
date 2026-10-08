@@ -26,7 +26,7 @@ A hidden channel that models demonstrably drop is worse than no override at all:
 
 Seam E (pi 1.0.2, `node scripts/benchmark-tools.ts`, ceil(chars/4)):
 
-| Tool | Before (ADR 0021) | After | Δ |
+| Tool | Before (pi 1.0.2) | After | Δ |
 | --- | --- | --- | --- |
 | `subagent` | 557 | 573 | +16 |
 | `research` | 448 | 464 | +16 |
