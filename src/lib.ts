@@ -116,6 +116,9 @@ export interface RoleDefault {
   thinkingLevel?: ThinkingLevel;
 }
 
+/** The editable field of a `roleDefaults.<role>` entry (issue #39). */
+export type RoleDefaultField = "model" | "thinkingLevel";
+
 /** `roleDefaults`: `{ "<role>": { model?, thinkingLevel? } }`. */
 export type RoleDefaults = Record<string, RoleDefault>;
 
@@ -324,6 +327,15 @@ export function parseConfigSetValue(
 ): { ok: true; value: ConfigValue } | { ok: false; reason: string } {
   const spec = configKeySpec(key);
   if (!spec) return { ok: false, reason: `unknown config key "${key}"` };
+  if (spec.kind === "roleDefaults") {
+    // The nested knob is edited exclusively through dotted keys; without this
+    // branch the bare key would fall through to the thinking-level error
+    // below and mislead (issue #39 revision).
+    return {
+      ok: false,
+      reason: "roleDefaults is edited with dotted keys: roleDefaults.<role>.thinkingLevel|model <value>",
+    };
+  }
   if (spec.kind === "number") {
     const n = Number(rawValue);
     if (!Number.isInteger(n) || n < 1) {
@@ -351,7 +363,7 @@ export function parseConfigSetValue(
  * surface for the nested knob, issue #39). Returns undefined for anything
  * that is not exactly the three-part form with a known field.
  */
-export function parseRoleDefaultsKey(key: string): { role: string; field: "model" | "thinkingLevel" } | undefined {
+export function parseRoleDefaultsKey(key: string): { role: string; field: RoleDefaultField } | undefined {
   const parts = key.split(".");
   if (parts.length !== 3 || parts[0] !== "roleDefaults") return undefined;
   const role = parts[1].trim();
@@ -367,7 +379,7 @@ export function parseRoleDefaultsKey(key: string): { role: string; field: "model
  * dispatch knobs' clearing rule).
  */
 export function parseRoleDefaultFieldValue(
-  field: "model" | "thinkingLevel",
+  field: RoleDefaultField,
   rawValue: string,
 ): { ok: true; value: string | ThinkingLevel | undefined } | { ok: false; reason: string } {
   const trimmed = rawValue.trim();
@@ -385,7 +397,7 @@ export function parseRoleDefaultFieldValue(
 export function setRoleDefaultField(
   cfg: EffectiveConfig,
   role: string,
-  field: "model" | "thinkingLevel",
+  field: RoleDefaultField,
   value: string | ThinkingLevel | undefined,
 ): EffectiveConfig {
   const roleDefaults: RoleDefaults = { ...(cfg.roleDefaults ?? {}) };
@@ -481,15 +493,16 @@ export function configToLimits(cfg: EffectiveConfig): ConfigBlockingLimits {
 }
 
 /**
- * The set `roleDefaults.<field>` entries of a roleDefaults map as
- * `{ key, value }` pairs (key without the `roleDefaults.` prefix) — shared by
- * the config view line, the config menu entries, and the command
- * autocomplete, so the three surfaces cannot drift.
+ * The set roleDefaults entries as `{ key, value }` pairs with fully-prefixed
+ * dotted keys (`roleDefaults.<role>.<field>`) — shared by the config view
+ * line, the config menu entries, and the command autocomplete, so the three
+ * surfaces cannot drift. The menu/autocomplete key on them directly; the view
+ * line strips the prefix (its label already names the knob).
  */
 export function roleDefaultFields(roleDefaults: RoleDefaults | undefined): Array<{ key: string; value: string }> {
   return Object.entries(roleDefaults ?? {}).flatMap(([role, e]) => [
-    ...(e.thinkingLevel !== undefined ? [{ key: `${role}.thinkingLevel`, value: e.thinkingLevel }] : []),
-    ...(e.model !== undefined ? [{ key: `${role}.model`, value: e.model }] : []),
+    ...(e.thinkingLevel !== undefined ? [{ key: `roleDefaults.${role}.thinkingLevel`, value: e.thinkingLevel }] : []),
+    ...(e.model !== undefined ? [{ key: `roleDefaults.${role}.model`, value: e.model }] : []),
   ]);
 }
 
@@ -511,8 +524,13 @@ export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
   if (spec?.kind === "roleDefaults") {
     // Show every set field as `role.field=value` so the overview doubles as
     // the per-role settings view (issue #39), not just an "(inherit)" marker.
+    // roleDefaultFields returns fully-prefixed keys; the label already names
+    // the knob, so only the per-field part is shown after the prefix.
     const fields = roleDefaultFields(status.effective.roleDefaults);
-    const entries = fields.map((f) => `${f.key}=${f.value}`);
+    const entries = fields.map((f) => {
+      const fieldKey = f.key.slice("roleDefaults.".length);
+      return `${fieldKey}=${f.value}`;
+    });
     return `${key} = ${entries.length > 0 ? entries.join(", ") : "(inherit)"} [${marker}]`;
   }
   const raw = getConfigValue(status.effective, key);
@@ -1722,28 +1740,12 @@ export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | 
 }
 
 /**
- * The strict inherited-minus-one step (issue #39): one tier down in
- * `THINKING_LEVELS` (off < minimal < low < medium < high < xhigh < max);
- * `off` stays `off`. This is the decision-source default when no explicit
- * layer decides; the capability-layer clamp (upstream `clampThinkingLevel`,
- * upward-first) then applies on top of whatever this produced. An unknown
- * level passes through unchanged (garbage in, garbage out — the caller's
- * level always comes from the session, which is validated).
- */
-export function stepDownThinkingLevel(level: ThinkingLevel): ThinkingLevel {
-  const idx = THINKING_LEVELS.indexOf(level);
-  if (idx <= 0) return level;
-  return THINKING_LEVELS[idx - 1];
-}
-
-/**
- * Decides the thinking level for a subagent's pi invocation.
- * Decision-source priority (issue #39; the order lives in the ADR 0005 note
- * and is pinned by the S8 tests): per-call override > `roleDefaults` per-role
- * tier > config default > role preset > inherited-minus-one
- * (`stepDownThinkingLevel`). The `hasModel` short-circuit skips only the
- * inherited-minus-one layer — a model-pinned role never inherits-minus-one,
- * but explicit layers still apply and win.
+ * Decides the thinking level for a subagent's pi invocation. Priority (issue
+ * #39; the order lives in the ADR 0005 note, pinned by the S8 tests): per-
+ * call override > `roleDefaults` tier > config default > role preset >
+ * inherited (the main-session level, passed through as-is). `hasModel` (a
+ * role-pinned model, frontmatter/embedded or `roleDefaults.<role>.model`)
+ * skips only the inherited layer — explicit layers still apply and win.
  */
 export function resolveThinkingLevel(opts: {
   roleLevel?: string;
@@ -1754,22 +1756,28 @@ export function resolveThinkingLevel(opts: {
   configLevel?: string;
 }): string | undefined {
   if (opts.override) return opts.override;
-  // Decision layers (issue #39): roleDefaults > config default > role preset.
   const explicit = opts.roleDefaultLevel ?? opts.configLevel ?? opts.roleLevel;
   if (opts.hasModel) return explicit;
-  if (explicit) return explicit;
-  // Inherited-minus-one is the last layer, skipped for model-pinned roles.
-  return opts.inherited === undefined ? undefined : stepDownThinkingLevel(opts.inherited as ThinkingLevel);
+  return explicit ?? opts.inherited;
 }
 
 /**
- * Resolves one run's thinking level (ADR 0005/0018/0020 + issue #39): a
+ * Resolves one run's thinking level (issue #39, ADR 0005/0018/0020): a
  * per-task/per-step `thinkingLevel` (ADR 0020) wins over the call-level
  * override; the decision layers then order `roleDefaults` tier > config
- * default > role preset > inherited-minus-one.
- */export function resolveDispatchThinking(
+ * default > role preset > inherited (plain, as-is). A role is model-pinned
+ * (`hasModel`) by its own `model` or a `roleDefaults.<role>.model` — either
+ * skips only the inherited layer.
+ */
+export function resolveDispatchThinking(
   agent: AgentConfig | undefined,
-  d: { thinkingLevel?: string; thinkingOverride?: string; configLevel?: string; roleDefaultLevel?: string },
+  d: {
+    thinkingLevel?: string;
+    thinkingOverride?: string;
+    configLevel?: string;
+    roleDefaultLevel?: string;
+    roleDefaultModel?: string;
+  },
   taskLevel?: string,
 ): string | undefined {
   return resolveThinkingLevel({
@@ -1777,7 +1785,7 @@ export function resolveThinkingLevel(opts: {
     roleDefaultLevel: d.roleDefaultLevel,
     override: taskLevel ?? d.thinkingOverride,
     inherited: d.thinkingLevel,
-    hasModel: Boolean(agent?.model),
+    hasModel: Boolean(agent?.model || d.roleDefaultModel),
     configLevel: d.configLevel,
   });
 }
@@ -2449,13 +2457,26 @@ export type SubagentsCommand =
   | { action: "tail"; id: string }
   | { action: "prune" }
   | { action: "config"; verb: "show" }
-  | { action: "config"; verb: "set"; key: string; value: string }
-  | { action: "config"; verb: "reset"; key?: string }
+  | { action: "config"; verb: "set"; key: ConfigSetKey; value: string }
+  | { action: "config"; verb: "reset"; key?: ConfigSetKey }
   | { action: "invalid"; reason: string };
 
 /** True for a top-level config key (also accepts `roleDefaults.<role>.<field>` dotted keys). */
 export function isConfigKey(key: string): key is ConfigKey {
   return (CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * A config key the /subagents config surface accepts (set/reset/menu): a
+ * top-level knob or the dotted `roleDefaults.<role>.<field>` form. Replaces
+ * unchecked `string` handling at the surface so a dotted key can never reach
+ * a top-level knob function (issue #39 revision).
+ */
+export type ConfigSetKey = ConfigKey | `roleDefaults.${string}.${RoleDefaultField}`;
+
+/** True for a config key the set/reset surface accepts. */
+export function isConfigSetKey(key: string): key is ConfigSetKey {
+  return isConfigKey(key) || parseRoleDefaultsKey(key) !== undefined;
 }
 
 /** Parses the /subagents argument string into a command the handler can dispatch. */
@@ -2481,7 +2502,7 @@ export function parseSubagentsArgs(args: string): SubagentsCommand {
     if (rest[0] === "reset") {
       if (rest.length === 1) return { action: "config", verb: "reset" };
       if (rest.length === 2) {
-        if (!isConfigKey(rest[1]) && !parseRoleDefaultsKey(rest[1])) {
+        if (!isConfigSetKey(rest[1])) {
           return { action: "invalid", reason: `unknown config key "${rest[1]}"` };
         }
         return { action: "config", verb: "reset", key: rest[1] };
@@ -2491,7 +2512,7 @@ export function parseSubagentsArgs(args: string): SubagentsCommand {
     if (rest[0] === "set") {
       if (rest.length < 3) return { action: "invalid", reason: "config set requires a key and a value" };
       const key = rest[1];
-      if (!isConfigKey(key) && !parseRoleDefaultsKey(key)) {
+      if (!isConfigSetKey(key)) {
         return { action: "invalid", reason: `unknown config key "${rest[1]}"` };
       }
       const value = rest.slice(2).join(" ");

@@ -58,6 +58,8 @@ import {
   formatRunSnapshot,
   getPiInvocation,
   isActiveRunStatus,
+  isConfigKey,
+  isConfigSetKey,
   isTerminalRunStatus,
   mergeToolParams,
   omitConfigKey,
@@ -94,7 +96,7 @@ import {
   type AgentScope,
   type AgentSource,
   type AgentFrontmatter,
-  type ConfigKey,
+  type ConfigSetKey,
   type ConfigStatus,
   type FrontmatterParser,
   type ResearchHandle,
@@ -507,7 +509,7 @@ async function confirmProjectAgents(
 // ---------------------------------------------------------------------------
 
 interface DispatchDefaults {
-  /** Per-call model override (merged.model); a role-pinned model still outranks it (historical blocking order). */
+  /** Per-call model override (merged.model); first in the model chain (issue #39 revision). */
   model?: string;
   /** Extension-config default model (dispatchDefaultModel). */
   configModel?: string;
@@ -588,9 +590,12 @@ async function runSingleAgent(
   // Issue #39 — roleDefaults per-role customization feeds both chains; the
   // layer order lives in the ADR 0005 note and is pinned by the S8 tests.
   const roleDefault = dispatchDefaults.roleDefaults?.[agent.name];
+  // Model chain (issue #39 revision): per-call override > role-pinned model >
+  // roleDefaults model > config default > inherited session model — blocking
+  // now matches research (the historical pin-first order is gone).
   const model =
-    agent.model ??
     dispatchDefaults.model ??
+    agent.model ??
     roleDefault?.model ??
     dispatchDefaults.configModel ??
     dispatchDefaults.inheritedModel;
@@ -601,6 +606,7 @@ async function runSingleAgent(
       thinkingOverride: dispatchDefaults.thinkingOverride,
       configLevel: dispatchDefaults.configLevel,
       roleDefaultLevel: roleDefault?.thinkingLevel,
+      roleDefaultModel: roleDefault?.model,
     },
     agentTask.thinkingLevel,
   );
@@ -919,7 +925,16 @@ export default function (pi: ExtensionAPI) {
     const p = configPath();
     ctx.ui.notify(formatConfigOverview(readConfigStatus(), p, configFileExists()), "info");
   };
-  const setConfig = async (ctx: SubagentsUi, key: string, value: string) => {
+  // Shared feedback label for `config set/reset`: a dotted roleDefaults key
+  // labels the whole knob (its per-field view already names the field); every
+  // other key labels itself. Callers validate the key first, so the guard
+  // below only serves the type system (ConfigSetKey is ConfigKey | dotted).
+  const configLabelForKey = (key: ConfigSetKey, status: ConfigStatus): string => {
+    if (parseRoleDefaultsKey(key)) return configKeyLabel("roleDefaults", status);
+    if (!isConfigKey(key)) return `unknown config key "${key}"`;
+    return configKeyLabel(key, status);
+  };
+  const setConfig = async (ctx: SubagentsUi, key: ConfigSetKey, value: string) => {
     // Issue #39 — a dotted `roleDefaults.<role>.<field>` key edits the nested
     // knob; every other key goes through the top-level pipeline unchanged.
     const roleKey = parseRoleDefaultsKey(key);
@@ -931,17 +946,23 @@ export default function (pi: ExtensionAPI) {
       }
       const next = setRoleDefaultField(readConfigStatus().effective, roleKey.role, roleKey.field, parsed.value);
       await writeConfig(serializeConfig(next));
-      ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel("roleDefaults", readConfigStatus())}`, "info");
+      ctx.ui.notify(`config set ${key} \u2192 ${configLabelForKey(key, readConfigStatus())}`, "info");
       return;
     }
-    const parsed = parseConfigSetValue(key as ConfigKey, value);
+    if (!isConfigKey(key)) {
+      // Unreachable after parseSubagentsArgs/menu validation: every other
+      // ConfigSetKey member is a dotted roleDefaults key, handled above.
+      ctx.ui.notify(`unknown config key "${key}"`, "error");
+      return;
+    }
+    const parsed = parseConfigSetValue(key, value);
     if (!parsed.ok) {
       ctx.ui.notify(parsed.reason, "error");
       return;
     }
-    const next = setConfigValue(readConfigStatus().effective, key as ConfigKey, parsed.value);
+    const next = setConfigValue(readConfigStatus().effective, key, parsed.value);
     await writeConfig(serializeConfig(next));
-    ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key as ConfigKey, readConfigStatus())}`, "info");
+    ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key, readConfigStatus())}`, "info");
   };
   const resetConfig = async (ctx: SubagentsUi) => {
     await writeConfig(serializeConfig(defaultConfig()));
@@ -952,7 +973,7 @@ export default function (pi: ExtensionAPI) {
   // newer versions survive); the read-back falls to default/inherit, so the
   // view labels it [default]. A missing file stays untouched (no write =
   // no lazy creation).
-  const resetConfigKey = async (ctx: SubagentsUi, key: string) => {
+  const resetConfigKey = async (ctx: SubagentsUi, key: ConfigSetKey) => {
     const p = configPath();
     if (!configFileExists()) {
       ctx.ui.notify(`config reset ${key}: already at default`, "info");
@@ -964,10 +985,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     await writeConfig(next);
-    const label = parseRoleDefaultsKey(key)
-      ? configKeyLabel("roleDefaults", readConfigStatus())
-      : configKeyLabel(key as ConfigKey, readConfigStatus());
-    ctx.ui.notify(`config reset ${key} → ${label}`, "info");
+    ctx.ui.notify(`config reset ${key} → ${configLabelForKey(key, readConfigStatus())}`, "info");
   };
   const configMenu = async (ctx: SubagentsUi) => {
     const opts: string[] = CONFIG_KEYS.map((k) => configKeyLabel(k, readConfigStatus()));
@@ -985,8 +1003,10 @@ export default function (pi: ExtensionAPI) {
     // its own selectable entry (choosing it resets just that field), plus a
     // free-text "set" entry for adding new role/field combinations.
     if (key === "roleDefaults") {
+      // roleDefaultFields returns fully-prefixed dotted keys, so each entry
+      // is already the reset key (`choice2.split(" = ")[0]` below).
       const entries = roleDefaultFields(readConfigStatus().effective.roleDefaults).map(
-        (f) => `roleDefaults.${f.key} = ${f.value}`,
+        (f) => `${f.key} = ${f.value}`,
       );
       const MENU_RD_SET = "Set roleDefaults.<role>.<field>…";
       const MENU_RD_BACK = "\u2190 Back";
@@ -997,13 +1017,16 @@ export default function (pi: ExtensionAPI) {
         if (raw === undefined) return;
         const trimmed = raw.trim();
         const space = trimmed.lastIndexOf(" ");
-        if (space < 0 || !parseRoleDefaultsKey(trimmed.slice(0, space))) {
+        const dotted = trimmed.slice(0, space);
+        if (space < 0 || !parseRoleDefaultsKey(dotted) || !isConfigSetKey(dotted)) {
           ctx.ui.notify(`expected "roleDefaults.<role>.<field> <value>", got "${raw}"`, "error");
           return;
         }
-        return setConfig(ctx, trimmed.slice(0, space), trimmed.slice(space + 1));
+        return setConfig(ctx, dotted, trimmed.slice(space + 1));
       }
-      return resetConfigKey(ctx, choice2.split(" = ")[0]);
+      const resetKey = choice2.split(" = ")[0];
+      if (!isConfigSetKey(resetKey)) return;
+      return resetConfigKey(ctx, resetKey);
     }
     // Per-key actions: setting enters the kind-driven input below; resetting
     // drops just this knob back to default/inherit.
@@ -1094,15 +1117,17 @@ export default function (pi: ExtensionAPI) {
           suggestions = match(SUB_VERBS).map((v) => suggest(`config ${v}`, v));
         } else if (fixed.length === 2 && (fixed[1] === "set" || fixed[1] === "reset")) {
           // Issue #39 — existing roleDefaults fields autocomplete as dotted
-          // keys alongside the top-level knobs.
+          // keys (fully-prefixed by roleDefaultFields) alongside the top-level
+          // knobs.
           const keys: string[] = [
             ...CONFIG_KEYS,
-            ...roleDefaultFields(readConfigStatus().effective.roleDefaults).map((f) => `roleDefaults.${f.key}`),
+            ...roleDefaultFields(readConfigStatus().effective.roleDefaults).map((f) => f.key),
           ];
           suggestions = match(keys).map((k) => suggest(`config ${fixed[1]} ${k}`, k));
         } else if (fixed.length === 3 && fixed[1] === "set") {
-          const key = fixed[2] as ConfigKey;
-          const spec = (CONFIG_KEYS as readonly string[]).includes(key) ? configKeySpec(key) : undefined;
+          const key = fixed[2];
+          const specKey = CONFIG_KEYS.find((k) => k === key);
+          const spec = specKey ? configKeySpec(specKey) : undefined;
           // A dotted roleDefaults key gets field-aware value suggestions too.
           const roleKey = parseRoleDefaultsKey(key);
           if (roleKey?.field === "thinkingLevel") {
@@ -1186,10 +1211,9 @@ export default function (pi: ExtensionAPI) {
       // Extension config (ADR 0018): read once per call, reused for this run.
       const config = readConfigStatus().effective;
       const dispatchDefaults: DispatchDefaults = {
-        // Model chain (blocking): role-pinned model > per-call override >
-        // roleDefaults model > config default > inherited session model
-        // (issue #39 inserts roleDefaults above the config default; the
-        // role-pin-vs-override order is historical). Thinking is resolved
+        // Model chain (blocking, issue #39 revision): per-call override >
+        // role-pinned model > roleDefaults model > config default > inherited
+        // session model — the same order as research. Thinking is resolved
         // separately in runSingleAgent (roleDefaults is per-agent).
         model: merged.model,
         configModel: config.dispatchDefaultModel,
@@ -1483,6 +1507,7 @@ export default function (pi: ExtensionAPI) {
         thinkingLevel: ctx.thinkingLevel,
         configLevel: config.dispatchDefaultThinkingLevel,
         roleDefaultLevel: roleDefault?.thinkingLevel,
+        roleDefaultModel: roleDefault?.model,
       });
       const { effective: thinking, requested: requestedThinking } = planForRun(requested, childModel);
 

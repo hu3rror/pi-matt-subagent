@@ -18,7 +18,7 @@
 - **后台 research** —— 进程内第二会话在后台把带引用的调研结果写入文件，你继续干活；完成状态（`succeeded` / `failed` / `terminated` / `aborted`）推回你的会话——不用轮询。
 - **六个内置角色** —— `standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`，和 skills 里描述的角色一致。
 - **四个斜杠命令** —— `/code-review <ref>`、`/design-it-twice <candidate>`、`/research <question>`，加上用于运行管理的 `/subagents`。
-- **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型；思考力度是确定性的（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承减一），`set-thinking-level` 工具是模型改变它的唯一可见通道。
+- **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型；思考力度是确定性的（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承主会话档位（原样）），`set-thinking-level` 工具是模型改变它的唯一可见通道。
 - **实时运行管理** —— 页脚计数器（`⧗ N subagents running`），用 `/subagents` 跟踪、停止或查看运行。
 
 ## 安装
@@ -63,7 +63,7 @@ pi install <path-to-this-repo>
 }
 ```
 
-思考力度不是参数：每次运行都通过决策层级（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承减一，再经模型能力钳制）解析，或由模型通过 `set-thinking-level` 执行显式指令。仍传 `thinkingLevel` 的旧式调用会以 unknown-parameter 错误响亮失败。
+思考力度不是参数：每次运行都通过决策层级（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承主会话档位（原样），再经模型能力钳制）解析，或由模型通过 `set-thinking-level` 执行显式指令。仍传 `thinkingLevel` 的旧式调用会以 unknown-parameter 错误响亮失败。
 
 模型名按 `provider/id` 形式解析自 `~/.pi/agent/models.json` 注册表；无法解析的名称会大声失败，运行不会启动。
 
@@ -78,7 +78,7 @@ pi install <path-to-this-repo>
 
 插件内置六个角色。`~/.pi/agent/agents/` 下的用户 agent 和 `.pi/agents/` 下的项目 agent 按名称覆盖内置角色（项目 agent 需要信任确认）。
 
-思考力度通过两个正交层级确定性解析。决策源层级是 **单任务/单步 `thinkingLevel` > 单次调用覆盖（`input.thinkingOverride`）> `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> 角色预设 > 继承减一**（主会话级别严格降一档，`off < minimal < low < medium < high < xhigh < max`，`off` 保持 `off`）。结果再经过目标模型的能力钳制（`clampThinkingLevel`，向上优先）——请求档与生效档双记录，被钳制时显示如 `high (req: xhigh)`。公开的 `thinkingLevel` 参数已移除（它是随机性的来源）；模型改变力度的唯一可见通道是 `set-thinking-level` 工具，仅在用户明确要求不同深度时调用。钉了模型的角色只跳过继承减一这一层。
+思考力度通过两个正交层级确定性解析。决策源层级是 **单任务/单步 `thinkingLevel` > 单次调用覆盖（`input.thinkingOverride`）> `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> 角色预设 > 继承**（主会话档位**原样透传**——你声明的深度如 `xhigh` 会原样传给无预置角色）。结果再经过目标模型的能力钳制（`clampThinkingLevel`，向上优先）——请求档与生效档双记录，被钳制时显示如 `high (req: xhigh)`。公开的 `thinkingLevel` 参数已移除（它是随机性的来源）；模型改变力度的唯一可见通道是 `set-thinking-level` 工具，仅在用户明确要求不同深度时调用。钉了模型的角色（frontmatter/embedded 或 `roleDefaults.<role>.model`）只跳过继承层。派发模型两个工具一致按 per-call 优先解析——per-call 覆盖 > 角色钉的模型 > `roleDefaults` 模型 > 配置默认 > 继承主会话模型。
 
 ## 配置
 
@@ -93,7 +93,7 @@ pi install <path-to-this-repo>
 | `researchChildExtensions` | （默认两包） | research 子会话装载的 npm 包：默认 `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`；只有在 JSON 文件里显式写成空数组才彻底禁用扩展 |
 | `logTailBytes` | 4096 | `/subagents tail` 读取日志的字节上限 |
 | `dispatchDefaultModel` | （继承） | 调用和角色都未指定时的默认 `provider/id` |
-| `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对六个内置角色生效，不再是死配置）；未设时 → 继承减一 |
+| `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对六个内置角色生效，不再是死配置）；未设时 → 继承主会话档位（原样） |
 | `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
 
 通过 `/subagents config` 操作：

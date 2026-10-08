@@ -57,8 +57,8 @@ import {
   resolveDispatchThinking,
   resolveThinkingLevel,
   resolveTools,
+  roleDefaultFields,
   SET_THINKING_LEVEL_PARAMS,
-  stepDownThinkingLevel,
   THINKING_LEVELS,
   runBackgroundResearch,
   serializeConfig,
@@ -1102,21 +1102,10 @@ test("runBackgroundResearch unrefs the wall-clock timer so it never holds the ho
   assert.equal(unrefCalls, 1, "the wall-clock timer must be unref'd");
 });
 
-// S8 — stepDownThinkingLevel (issue #39): the strict inherited-minus-one step.
-test("stepDownThinkingLevel steps one tier down and keeps off at off", () => {
-  assert.equal(stepDownThinkingLevel("off"), "off");
-  assert.equal(stepDownThinkingLevel("minimal"), "off");
-  assert.equal(stepDownThinkingLevel("low"), "minimal");
-  assert.equal(stepDownThinkingLevel("medium"), "low");
-  assert.equal(stepDownThinkingLevel("high"), "medium");
-  assert.equal(stepDownThinkingLevel("xhigh"), "high");
-  assert.equal(stepDownThinkingLevel("max"), "xhigh");
-});
-
 // S8 — resolveThinkingLevel (issue #39 priority): per-call override >
-// roleDefaults tier > config default > role preset > inherited-minus-one.
-// The `hasModel` short-circuit skips only the inherited-minus-one layer.
-test("resolveThinkingLevel skips only the inherited-minus-one layer for model-pinned agents", () => {
+// roleDefaults tier > config default > role preset > inherited (plain).
+// The `hasModel` short-circuit skips only the inherited layer.
+test("resolveThinkingLevel skips only the inherited layer for model-pinned agents", () => {
   // explicit layers survive: roleDefaults, config, and preset levels beat the model's default
   assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), "medium");
   assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low", inherited: "high" }), "low");
@@ -1126,7 +1115,7 @@ test("resolveThinkingLevel skips only the inherited-minus-one layer for model-pi
     resolveThinkingLevel({ hasModel: true, roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high", inherited: "xhigh" }),
     "low",
   );
-  // nothing explicit: the model-pinned shortcut still returns undefined (no minus-one)
+  // nothing explicit: the model-pinned shortcut still returns undefined (the pin skips the inherited layer)
   assert.equal(resolveThinkingLevel({ hasModel: true, inherited: "high" }), undefined);
   assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
 });
@@ -1154,16 +1143,17 @@ test("resolveThinkingLevel orders the explicit layers roleDefaults > config > pr
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", roleLevel: "high" }), "medium", "config beats the role preset (no longer dead config)");
 });
 
-test("resolveThinkingLevel defaults to inherited-minus-one when no layer decides", () => {
-  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "medium");
+test("resolveThinkingLevel passes the inherited level through as-is (plain inheritance)", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
   assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "off" }), "off", "off stays off");
-  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "minimal" }), "off");
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "minimal" }), "minimal");
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "xhigh" }), "xhigh", "declared depth propagates");
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
 });
 
 // S8b — resolveDispatchThinking (ADR 0020 + issue #39): the per-task/per-step
 // layer sits above the call-level override; the decision layers then order
-// roleDefaults > config > preset > inherited-minus-one.
+// roleDefaults > config > preset > inherited (plain).
 test("resolveDispatchThinking prefers the per-task level over the call-level override", () => {
   const agent = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
   assert.equal(
@@ -1201,7 +1191,7 @@ test("resolveDispatchThinking per-task level wins even for model-pinned roles", 
   );
 });
 
-test("resolveDispatchThinking orders the decision layers and applies inherited-minus-one last", () => {
+test("resolveDispatchThinking orders the decision layers and applies plain inheritance last", () => {
   const preset = { name: "r", description: "", systemPrompt: "", thinkingLevel: "medium", source: "embedded" as const };
   assert.equal(
     resolveDispatchThinking(preset, { thinkingLevel: "xhigh", configLevel: "low", roleDefaultLevel: "off" }),
@@ -1219,12 +1209,32 @@ test("resolveDispatchThinking orders the decision layers and applies inherited-m
     "role preset applies when no higher layer is set",
   );
   const bare = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
-  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "high" }), "medium", "inherited high minus one");
+  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "high" }), "high", "inherited high passes through as-is");
+  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "xhigh" }), "xhigh", "declared depth propagates");
   assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "off" }), "off", "inherited off stays off");
   assert.equal(resolveDispatchThinking(bare, {}), undefined, "no inherited level, nothing resolved");
   const pinned = { name: "r", description: "", systemPrompt: "", model: "sensenova/deepseek-v4-flash", source: "embedded" as const };
-  assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high" }), undefined, "pinned skips the minus-one layer");
+  assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high" }), undefined, "pinned skips the inherited layer");
   assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high", roleDefaultLevel: "low" }), "low", "pinned still honors roleDefaults");
+});
+
+test("resolveDispatchThinking treats a roleDefaults-pinned model like a role-pinned one (hasModel widening)", () => {
+  const bare = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(bare, { thinkingLevel: "high", roleDefaultModel: "openai/gpt-x" }),
+    undefined,
+    "a roleDefaults-pinned model skips the inherited layer like a frontmatter/embedded pin",
+  );
+  assert.equal(
+    resolveDispatchThinking(bare, { thinkingLevel: "high", roleDefaultModel: "openai/gpt-x", roleDefaultLevel: "low" }),
+    "low",
+    "explicit layers still apply and win alongside a roleDefaults model pin",
+  );
+  assert.equal(
+    resolveDispatchThinking(bare, { thinkingLevel: "high" }),
+    "high",
+    "a role with no model pin at all still plain-inherits",
+  );
 });
 
 // S8c — ADR 0020 data path: per-task thinkingLevel must pass both schemas
@@ -2119,6 +2129,14 @@ test("parseConfigSetValue accepts a thinking level and clears via empty/inherit"
   assert.equal(parseConfigSetValue("dispatchDefaultThinkingLevel", "bogus").ok, false);
 });
 
+test("parseConfigSetValue rejects the bare roleDefaults key with a dotted-keys message", () => {
+  const bad = parseConfigSetValue("roleDefaults", `{ "a": { "thinkingLevel": "low" } }`);
+  assert.equal(bad.ok, false, "the nested knob must not be settable through the bare key");
+  if (!bad.ok) assert.match(bad.reason, /dotted/i, "the error must point at the dotted-key surface");
+  const inherit = parseConfigSetValue("roleDefaults", "inherit");
+  assert.equal(inherit.ok, false, "even inherit must not clear the whole nested knob via the bare key");
+});
+
 // S22b — roleDefaults (issue #39): a per-role { model?, thinkingLevel? }
 // nested knob. Valid entries apply; a structurally-invalid entry degrades to
 // that role's absence (ADR 0018 per-key philosophy, one level nested); the
@@ -2258,6 +2276,14 @@ test("configKeyLabel and formatConfigOverview surface roleDefaults per role", ()
   const unset = configKeyLabel("roleDefaults", parseConfigFile(undefined));
   assert.ok(unset.includes("(inherit)"));
   assert.ok(unset.includes("[default]"));
+});
+
+test("roleDefaultFields returns fully-prefixed dotted keys (roleDefaults.<role>.<field>)", () => {
+  const fields = roleDefaultFields({ "fact-finder": { thinkingLevel: "off", model: "openai/gpt-x" } });
+  assert.deepEqual(fields, [
+    { key: "roleDefaults.fact-finder.thinkingLevel", value: "off" },
+    { key: "roleDefaults.fact-finder.model", value: "openai/gpt-x" },
+  ]);
 });
 
 test("serializeConfig writes the set keys and round-trips; unset dispatch knobs are omitted, not null", () => {
