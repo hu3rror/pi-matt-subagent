@@ -18,7 +18,7 @@
 - **后台 research** —— 进程内第二会话在后台把带引用的调研结果写入文件，你继续干活；完成状态（`succeeded` / `failed` / `terminated` / `aborted`）推回你的会话——不用轮询。
 - **六个内置角色** —— `standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`，和 skills 里描述的角色一致。
 - **四个斜杠命令** —— `/code-review <ref>`、`/design-it-twice <candidate>`、`/research <question>`，加上用于运行管理的 `/subagents`。
-- **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型，或通过 `thinkingLevel`（整个调用）与 `input.thinkingOverride`（规范字段）钉住思考级别。
+- **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型；思考力度是确定性的（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承减一），`set-thinking-level` 工具是模型改变它的唯一可见通道。
 - **实时运行管理** —— 页脚计数器（`⧗ N subagents running`），用 `/subagents` 跟踪、停止或查看运行。
 
 ## 安装
@@ -49,6 +49,7 @@ pi install <path-to-this-repo>
 | --- | --- | --- |
 | `subagent` | **阻塞式** | 运行单个 / 并行 / 链式 subagent。在所有 subagent 完成前不返回；完整结果一次性回到一个工具结果里。`chain` 支持 `{previous}` 占位符，把上一步的输出传给下一步。 |
 | `research` | **后台式** | 进程内第二会话把带引用的调研结果写入文件后立即返回，完成状态推回你的会话——不用轮询。 |
+| `set-thinking-level` | **会话级** | 把主会话的思考级别设为本会话余下部分（上游 `pi.setThinkingLevel`，仅会话级、绝不持久化；新会话从你的全局默认开始）。模型改变思考力度的唯一可见通道——只在用户明确要求不同深度时调用。 |
 
 两者都接受可选的 `input` 字段：一个承载仍对公开 schema 隐藏的参数的 JSON 对象字符串（`subagent` 的 `thinkingOverride`；`research` 的 `maxWallClockMs`——运行时长上限，只能收紧默认值，默认 60 分钟）。**单次运行的 `model` 覆盖是两个工具上的公开字段**（ADR 0022——隐藏通道被证明不可靠：模型会漏掉它，运行静默回退到配置的默认模型）。
 
@@ -58,10 +59,11 @@ pi install <path-to-this-repo>
 {
   "task": "review the diff since HEAD~1 for standards compliance",
   "agent": "standards-reviewer",
-  "model": "sensenova/sensenova-6.8-flash-lite",
-  "thinkingLevel": "max"
+  "model": "sensenova/sensenova-6.8-flash-lite"
 }
 ```
+
+思考力度不是参数：每次运行都通过决策层级（单任务 > 单次调用覆盖 > 按角色定制 > 配置默认 > 角色预设 > 继承减一，再经模型能力钳制）解析，或由模型通过 `set-thinking-level` 执行显式指令。仍传 `thinkingLevel` 的旧式调用会以 unknown-parameter 错误响亮失败。
 
 模型名按 `provider/id` 形式解析自 `~/.pi/agent/models.json` 注册表；无法解析的名称会大声失败，运行不会启动。
 
@@ -76,7 +78,7 @@ pi install <path-to-this-repo>
 
 插件内置六个角色。`~/.pi/agent/agents/` 下的用户 agent 和 `.pi/agents/` 下的项目 agent 按名称覆盖内置角色（项目 agent 需要信任确认）。
 
-派发优先级：单次调用覆盖 > 角色声明 > 配置默认值 > 主会话继承。
+思考力度通过两个正交层级确定性解析。决策源层级是 **单任务/单步 `thinkingLevel` > 单次调用覆盖（`input.thinkingOverride`）> `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> 角色预设 > 继承减一**（主会话级别严格降一档，`off < minimal < low < medium < high < xhigh < max`，`off` 保持 `off`）。结果再经过目标模型的能力钳制（`clampThinkingLevel`，向上优先）——请求档与生效档双记录，被钳制时显示如 `high (req: xhigh)`。公开的 `thinkingLevel` 参数已移除（它是随机性的来源）；模型改变力度的唯一可见通道是 `set-thinking-level` 工具，仅在用户明确要求不同深度时调用。钉了模型的角色只跳过继承减一这一层。
 
 ## 配置
 
@@ -91,18 +93,22 @@ pi install <path-to-this-repo>
 | `researchChildExtensions` | （默认两包） | research 子会话装载的 npm 包：默认 `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`；只有在 JSON 文件里显式写成空数组才彻底禁用扩展 |
 | `logTailBytes` | 4096 | `/subagents tail` 读取日志的字节上限 |
 | `dispatchDefaultModel` | （继承） | 调用和角色都未指定时的默认 `provider/id` |
-| `dispatchDefaultThinkingLevel` | （继承） | 调用和角色都未指定时的默认思考级别 |
+| `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对六个内置角色生效，不再是死配置）；未设时 → 继承减一 |
+| `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
 
 通过 `/subagents config` 操作：
 
 ```
 /subagents config set maxConcurrency 6
 /subagents config set dispatchDefaultThinkingLevel low
+/subagents config set roleDefaults.standards-reviewer.thinkingLevel low
+/subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset
 ```
 
-`set` 把生效值写入文件；`reset` 移除单个键（回到该键的默认值）或整个文件。非法条目会把对应键回退为默认值，并在配置视图中标记 `[degraded]`。
+`set` 把生效值写入文件；`reset` 移除单个键（回到该键的默认值）或整个文件。点分 `roleDefaults.<role>.<field>` 键编辑嵌套旋钮；reset 点分键只移除该字段（清空的角色自动剪除）。非法条目会把对应键回退为默认值，并在配置视图中标记 `[degraded]`。
 
 ## Research 子会话扩展（信任面维护）
 
@@ -153,4 +159,4 @@ npm test          # 单元测试，不需要 pi 运行时
 npm run typecheck # 扩展、lib 和脚本的类型检查
 ```
 
-扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献（`subagent` / `research` 约 573 / 464 tokens），并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。
+扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献（`subagent` / `research` / `set-thinking-level` 约 482 / 398 / 104 tokens），并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。

@@ -2,6 +2,8 @@
 
 > **Supersedes** the hidden-`model` half of ADR 0011. The per-run `model` override is now a public field on both `subagent` and `research`; the `input` channel keeps only `thinkingOverride` (`subagent`) and `maxWallClockMs` (`research`). The merge/validation contract (ADR 0011) is untouched, and `input`-based `model` callers keep working (merged and validated as before — just no longer hidden).
 
+> **Updated by issue #39**: the public `thinkingLevel` field is removed from both tools; `model` stays public. The hidden `input` set is unchanged (`thinkingOverride` / `maxWallClockMs`). The model chain gains a per-role slot: `roleDefaults.<role>.model` sits where the config default sits (roleDefaults model > config default model > inherited session model).
+
 > [ZH] 事故驱动反转：会话里口头要求"用指定模型 + 指定思考强度跑 subagent"被主模型漏掉——隐藏通道（`input` 里的 `model`）对主模型不可靠：sensenova-6.8-flash-lite 主会话 4 次 subagent 调用 0 次使用该通道，明确要求的 model 覆盖静默回退到 config 默认（`matt-subagent.json` 的 `dispatchDefaultModel`），且"max think"被降成 xhigh 落地。`model` 改为两个工具的公开字段（+16 token/工具，Seam E 实测 573/464，距 ×1.2 守卫上限 688/557 仍远）；`input` 仅剩 `thinkingOverride` / `maxWallClockMs`；`input` 里旧式 `model` 经 `{...parsed, ...direct}` 合并仍通过校验（向后兼容，只是不再 hidden）。
 
 ## Why the reversal

@@ -2,6 +2,8 @@
 
 > **Updated by issue #37 (subagent tool fidelity).** The knob set grew from seven to eight with `researchChildExtensions` (optional; absent → the curated two-package default; explicit `[]` in the JSON file → no extensions). It is extension-package-level by design: loading (extensions) and activation (role tool declarations) stay separate concerns. The copy below describes the original seven.
 
+> **Updated by issue #39 (deterministic thinking levels).** The knob set grows to nine with `roleDefaults` — a nested `{ "<role>": { model?, thinkingLevel? } }` object edited through dotted `roleDefaults.<role>.<field>` keys. `dispatchDefaultThinkingLevel` is promoted above the role-preset layer: it now reaches the six embedded roles instead of sitting below every tier as dead config. `roleDefaults.<role>.thinkingLevel` wins over the config default and the role preset; `roleDefaults.<role>.model` feeds the model chain where the config default sits (roleDefaults model > config default model > inherited session model). The copy below describes the original seven.
+
 The subagents extension's behavioral knobs (blocking limits, the research wall-clock cap, the `/subagents tail` byte limit, and the model / thinking level a run falls back to) were hard-coded constants. We add a user-level, on-disk extension config (`~/.pi/agent/extensions/matt-subagent.json`) with seven knobs, surfaced through `/subagents config` plus a menu entry, so a user can retune without editing or forking source.
 
 ## Decision

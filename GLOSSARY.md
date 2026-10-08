@@ -13,7 +13,7 @@ blocking 子进程环境里的纯公告变量 `PI_SUBAGENT_PARENT_SESSION`（got
 _Avoid_: child marker, PI_SUBAGENT_CHILD, 环境注入变量
 
 **role**:
-一个命名了的 subagent 模板：固定的 system prompt、工具集、可选 model。每次运行的具体任务由调用方在 `task` 里给出。
+一个命名了的 subagent 模板：固定的 system prompt、工具集、可选 model；每次运行的具体任务由调用方在 `task` 里给出。自 issue #39 起，role 还可经 `roleDefaults` 配置按角色定制 `model`/`thinkingLevel`（压过内置 preset 与 config 默认，见 config knob）。
 _Avoid_: subagent（与「执行实例」混淆时，用 role 指模板、subagent 指实例）
 
 **blocking**:
@@ -86,19 +86,19 @@ _Avoid_: 管理面板, panel
 _Avoid_: status panel, 面板
 
 **dispatch thinking level（派发思考档位）**:
-一次 subagent 运行在派发前解析出的档位意图，优先级为 per-task/per-step level > per-call override > role 声明 > 配置默认（extension config）> 继承主会话（ADR 0005 经 ADR 0018/0020 扩展）。per-task/per-step level 是未在模型面 schema 声明、经 pi 透传原样读到的字段（pi 校验只拒不剥，ADR 0020）——模型把它放在调用级或任务级都生效，非法值在派发前响亮报错（parallel 为 `Invalid thinkingLevel on tasks[i]`、chain 为 `steps[i]`）。`hasModel`（role 自带 model）的短路只跳过继承层，role/config 显式档位仍生效（ADR 0018）。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
+一次 subagent 运行在派发前解析出的档位意图。决策源层级（issue #39 取代 ADR 0005/0018/0020 的旧序）为 per-task/per-step level > per-call override（`input.thinkingOverride`）> `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> role preset（embedded/frontmatter 档位）> **inherited-minus-one**（主会话档位严格降一档，off 保持 off）。公开 `thinkingLevel` 参数已从两个工具移除（随机性来源），`set-thinking-level` 工具是模型改变档位的唯一可见通道。per-task/per-step level 是未在模型面 schema 声明、经 pi 透传原样读到的字段（pi 校验只拒不剥，ADR 0020），非法值在派发前响亮报错（parallel 为 `Invalid thinkingLevel on tasks[i]`、chain 为 `steps[i]`）。`hasModel`（role 自带 model）的短路只跳过继承减一这一层，roleDefaults/config/preset 显式档位仍生效。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
 **clamp（档位钳制）**:
-按目标模型能力映射表把请求的档位落到该模型实际使用的档位（不支持 reasoning 的模型只有 `off`）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。模型声明「支持」某档（映射到字符串）时 clamp 不介入——降级发生在 API 层；只有映射为 `null`（如 kimi-k3 的 `minimal`/`xhigh`）或无 reasoning 才触发 clamp，且 pi-ai 先向上找再向下找（kimi-k3 请求 `minimal`→`low` 抬升、请求 `xhigh`→`max`）。clamp 语义是「模型能力映射」，不是「主会话档位减一」。档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
+按目标模型能力映射表把请求的档位落到该模型实际使用的档位（不支持 reasoning 的模型只有 `off`）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。模型声明「支持」某档（映射到字符串）时 clamp 不介入——降级发生在 API 层；只有映射为 `null`（如 kimi-k3 的 `minimal`/`xhigh`）或无 reasoning 才触发 clamp，且 pi-ai 先向上找再向下找（kimi-k3 请求 `minimal`→`low` 抬升、请求 `xhigh`→`max`）。clamp 语义是「模型能力映射」，不是「主会话档位减一」——后者是决策源层自己的规则（见 inherited-minus-one，issue #39）：能力层从不做减一，决策层从不按模型能力换算。档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
 _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 
 **extension config（扩展配置）**:
-本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，七个 config knob，惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
+本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，九个 config knob（issue #37 加 `researchChildExtensions`，issue #39 加 `roleDefaults`），惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`；`roleDefaults` 嵌套对象按 role 条目逐项降级），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
 _Avoid_: 设置面板, 配置文件（笼统）
 
 **config knob（配置旋钮）**:
-extension config 暴露的单个可调项，v1 七个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存），`config reset` 重建全默认。
+extension config 暴露的单个可调项，v1 九个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
 _Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:
@@ -110,7 +110,7 @@ _Avoid_: throw 为载体, 假成功（未完成调用却成功标记）
 _Avoid_: 无 schema 声明却返回结构化字段，声明后成功分支不带回
 
 **input-JSON**:
-两个工具各带的可选 `input` 字段的契约（ADR 0011，ADR 0022 修订）：值必须是 JSON 对象字符串，携带仍对公开 schema 隐藏但运行时已支持的参数（`subagent`: `thinkingOverride`；`research`: `maxWallClockMs`）。单次运行的 `model` 覆盖自 ADR 0022 起是公开字段（两个工具皆是），不再经 `input`——合并/校验语义不变（`{...parsed, ...direct}`），`input` 里旧式携带 `model` 的调用仍可合并通过（向后兼容，仅不再 hidden）。缺失/空 `input` 直通；非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
+两个工具各带的可选 `input` 字段的契约（ADR 0011，ADR 0022 修订）：值必须是 JSON 对象字符串，携带仍对公开 schema 隐藏但运行时已支持的参数（`subagent`: `thinkingOverride`；`research`: `maxWallClockMs`）。单次运行的 `model` 覆盖自 ADR 0022 起是公开字段（两个工具皆是），不再经 `input`——合并/校验语义不变（`{...parsed, ...direct}`），`input` 里旧式携带 `model` 的调用仍可合并通过（向后兼容，仅不再 hidden）。缺失/空 `input` 直通（返回原参数不变；issue #39 起该路径同样按完整契约校验——携带已移除的公开 `thinkingLevel` 的旧调用在此以 unknown parameter 响亮失败，而不是静默忽略）。非法 JSON 或非对象抛模型可见错误（ADR 0011 loud 契约，ADR 0016 明文例外）。合并后按完整契约（公开 + 隐藏，`additionalProperties: false`）定向校验，错误按字段路径（如 `/model`）报出。
 _Avoid_: input param, JSON escape hatch
 
 **token benchmark（token 基准）**:

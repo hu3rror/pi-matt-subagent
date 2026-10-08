@@ -1,5 +1,5 @@
 /**
- * Seam E — real-pi token benchmark for the two tools' model-facing surface.
+ * Seam E — real-pi token benchmark for the tools' model-facing surface.
  *
  * Usage: `node scripts/benchmark-tools.ts`
  *
@@ -80,13 +80,13 @@ const date = new Date().toISOString().slice(0, 10);
 console.log("Token benchmark (Seam E)");
 console.log(`pi ${version} · measured ${date} · empty config, before_agent_start, ceil(chars/4)`);
 console.log("");
-for (const name of ["subagent", "research"]) {
+for (const name of ["subagent", "research", "set-thinking-level"]) {
   const m = measured[name];
   console.log(`- ${name}: ${m.tokens} tokens (${m.chars} chars)`);
 }
 console.log("");
 console.log("Guard baselines (paste into src/lib.test.ts TOKEN_BASELINE):");
-for (const name of ["subagent", "research"]) {
+for (const name of ["subagent", "research", "set-thinking-level"]) {
   console.log(
     `  ${name}: ${measured[name].tokens},  ceiling (× ${TOKEN_GUARD_MULTIPLIER}): ${Math.ceil(measured[name].tokens * TOKEN_GUARD_MULTIPLIER)}`,
   );
@@ -95,5 +95,6 @@ console.log("");
 console.log("README table rows:");
 console.log(`| \`subagent\` | description + parameter schema | **${measured.subagent.tokens}** |`);
 console.log(`| \`research\` | description + parameter schema | **${measured.research.tokens}** |`);
+console.log(`| \`set-thinking-level\` | description + parameter schema | **${measured["set-thinking-level"].tokens}** |`);
 console.log("");
 console.log("Measured with pi " + version + " in a separate temporary process with empty working directory and configuration.");

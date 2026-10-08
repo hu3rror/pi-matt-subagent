@@ -2,6 +2,8 @@
 
 > **Extends** ADR-0005 (thinking-level resolution priority): the per-task/per-step `thinkingLevel` field is honored even though no model-facing schema declares it.
 
+> **Updated by issue #39**: the call-level public `thinkingLevel` parameter is removed from both tools (the randomness source); the per-task/per-step pass-through and `input.thinkingOverride` keep working as the deliberate escape hatches. The priority the per-task layer feeds becomes per-task/per-step > per-call override > `roleDefaults` > config default > role preset > inherited-minus-one.
+
 A code-review re-run asked for high thinking; the model placed `thinkingLevel: "high"` inside each `tasks[]` item instead of at the call top level. The schema declares no such per-task field, so the call validated and ran, but the field never reached dispatch: both review subagents silently ran at their role-declared default (`medium`), and the requested `high` was lost. Investigation established why pi tolerated the field: pi validates tool-call arguments with a **check-only** contract (`Value.Convert` + `Validator.Check` — reject on mismatch, never strip), so unknown properties inside array items without `additionalProperties: false` pass validation **untouched** and reach the extension's `execute` verbatim. Confirmed two ways: reading the bundled pi source (`validateToolArguments` in the v1.0.0 bundle) and a throwaway real-pi probe (a lenient probe tool echoed the unknown nested key back byte-for-byte; a strict twin with `additionalProperties: false` had the whole call rejected with a field-path error). Because the field reaches the tool intact, the extension can honor it without declaring it in the model-facing schema.
 
 ## Decision

@@ -63,6 +63,8 @@ import {
   omitConfigKey,
   parseConfigFile,
   parseConfigSetValue,
+  parseRoleDefaultFieldValue,
+  parseRoleDefaultsKey,
   parseSubagentsArgs,
   packageNameOfSpec,
   pathIsInsidePackage,
@@ -74,11 +76,15 @@ import {
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
   resolveDispatchThinking,
+  roleDefaultFields,
   runBackgroundResearch,
   RUN_STATUS_ICONS,
   scopeAllowsProject,
   serializeConfig,
   setConfigValue,
+  setRoleDefaultField,
+  SET_THINKING_LEVEL_DESCRIPTION,
+  SET_THINKING_LEVEL_PARAMS,
   splitModelRef,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_TOOL_DESCRIPTION,
@@ -94,6 +100,7 @@ import {
   type ResearchHandle,
   type ResearchChildSession,
   type ResearchStatusDetails,
+  type RoleDefaults,
   type RunEntry,
   type RunPatch,
   type RunRegistry,
@@ -500,11 +507,18 @@ async function confirmProjectAgents(
 // ---------------------------------------------------------------------------
 
 interface DispatchDefaults {
+  /** Per-call model override (merged.model); a role-pinned model still outranks it (historical blocking order). */
   model?: string;
+  /** Extension-config default model (dispatchDefaultModel). */
+  configModel?: string;
+  /** Inherited main-session model (provider/id), the last model default. */
+  inheritedModel?: string;
   thinkingLevel?: string;
   thinkingOverride?: string;
-  /** Extension-config default thinking level (ADR 0018): sits between the role and the main-session level. */
+  /** Extension-config default thinking level (ADR 0018, promoted by issue #39): sits between roleDefaults and the role preset. */
   configLevel?: string;
+  /** Per-role customization (issue #39): `roleDefaults.<role>` wins over the config default and the role preset. */
+  roleDefaults?: RoleDefaults;
   /** Parent session id threaded to the spawn env (subagent marker). */
   parentSessionId?: string;
 }
@@ -571,8 +585,25 @@ async function runSingleAgent(
     };
   }
 
-  const model = agent.model ?? dispatchDefaults.model;
-  const requested = resolveDispatchThinking(agent, dispatchDefaults, agentTask.thinkingLevel);
+  // Issue #39 — roleDefaults per-role customization feeds both chains; the
+  // layer order lives in the ADR 0005 note and is pinned by the S8 tests.
+  const roleDefault = dispatchDefaults.roleDefaults?.[agent.name];
+  const model =
+    agent.model ??
+    dispatchDefaults.model ??
+    roleDefault?.model ??
+    dispatchDefaults.configModel ??
+    dispatchDefaults.inheritedModel;
+  const requested = resolveDispatchThinking(
+    agent,
+    {
+      thinkingLevel: dispatchDefaults.thinkingLevel,
+      thinkingOverride: dispatchDefaults.thinkingOverride,
+      configLevel: dispatchDefaults.configLevel,
+      roleDefaultLevel: roleDefault?.thinkingLevel,
+    },
+    agentTask.thinkingLevel,
+  );
   const resolvedModel = model ? resolveModel(model) : undefined;
   const { effective: thinking, requested: requestedThinking } = planForRun(requested, resolvedModel);
 
@@ -888,15 +919,29 @@ export default function (pi: ExtensionAPI) {
     const p = configPath();
     ctx.ui.notify(formatConfigOverview(readConfigStatus(), p, configFileExists()), "info");
   };
-  const setConfig = async (ctx: SubagentsUi, key: ConfigKey, value: string) => {
-    const parsed = parseConfigSetValue(key, value);
+  const setConfig = async (ctx: SubagentsUi, key: string, value: string) => {
+    // Issue #39 — a dotted `roleDefaults.<role>.<field>` key edits the nested
+    // knob; every other key goes through the top-level pipeline unchanged.
+    const roleKey = parseRoleDefaultsKey(key);
+    if (roleKey) {
+      const parsed = parseRoleDefaultFieldValue(roleKey.field, value);
+      if (!parsed.ok) {
+        ctx.ui.notify(parsed.reason, "error");
+        return;
+      }
+      const next = setRoleDefaultField(readConfigStatus().effective, roleKey.role, roleKey.field, parsed.value);
+      await writeConfig(serializeConfig(next));
+      ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel("roleDefaults", readConfigStatus())}`, "info");
+      return;
+    }
+    const parsed = parseConfigSetValue(key as ConfigKey, value);
     if (!parsed.ok) {
       ctx.ui.notify(parsed.reason, "error");
       return;
     }
-    const next = setConfigValue(readConfigStatus().effective, key, parsed.value);
+    const next = setConfigValue(readConfigStatus().effective, key as ConfigKey, parsed.value);
     await writeConfig(serializeConfig(next));
-    ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key, readConfigStatus())}`, "info");
+    ctx.ui.notify(`config set ${key} \u2192 ${configKeyLabel(key as ConfigKey, readConfigStatus())}`, "info");
   };
   const resetConfig = async (ctx: SubagentsUi) => {
     await writeConfig(serializeConfig(defaultConfig()));
@@ -907,7 +952,7 @@ export default function (pi: ExtensionAPI) {
   // newer versions survive); the read-back falls to default/inherit, so the
   // view labels it [default]. A missing file stays untouched (no write =
   // no lazy creation).
-  const resetConfigKey = async (ctx: SubagentsUi, key: ConfigKey) => {
+  const resetConfigKey = async (ctx: SubagentsUi, key: string) => {
     const p = configPath();
     if (!configFileExists()) {
       ctx.ui.notify(`config reset ${key}: already at default`, "info");
@@ -919,7 +964,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     await writeConfig(next);
-    ctx.ui.notify(`config reset ${key} → ${configKeyLabel(key, readConfigStatus())}`, "info");
+    const label = parseRoleDefaultsKey(key)
+      ? configKeyLabel("roleDefaults", readConfigStatus())
+      : configKeyLabel(key as ConfigKey, readConfigStatus());
+    ctx.ui.notify(`config reset ${key} → ${label}`, "info");
   };
   const configMenu = async (ctx: SubagentsUi) => {
     const opts: string[] = CONFIG_KEYS.map((k) => configKeyLabel(k, readConfigStatus()));
@@ -933,6 +981,30 @@ export default function (pi: ExtensionAPI) {
     }
     const key = CONFIG_KEYS.find((k) => choice.startsWith(`${k} =`));
     if (!key) return;
+    // Issue #39 — the roleDefaults knob is grouped by role: each set field is
+    // its own selectable entry (choosing it resets just that field), plus a
+    // free-text "set" entry for adding new role/field combinations.
+    if (key === "roleDefaults") {
+      const entries = roleDefaultFields(readConfigStatus().effective.roleDefaults).map(
+        (f) => `roleDefaults.${f.key} = ${f.value}`,
+      );
+      const MENU_RD_SET = "Set roleDefaults.<role>.<field>…";
+      const MENU_RD_BACK = "\u2190 Back";
+      const choice2 = await ctx.ui.select("roleDefaults (per role)", [...entries, MENU_RD_SET, MENU_RD_BACK]);
+      if (!choice2 || choice2 === MENU_RD_BACK) return;
+      if (choice2 === MENU_RD_SET) {
+        const raw = await ctx.ui.input("roleDefaults set", "e.g. roleDefaults.standards-reviewer.thinkingLevel low");
+        if (raw === undefined) return;
+        const trimmed = raw.trim();
+        const space = trimmed.lastIndexOf(" ");
+        if (space < 0 || !parseRoleDefaultsKey(trimmed.slice(0, space))) {
+          ctx.ui.notify(`expected "roleDefaults.<role>.<field> <value>", got "${raw}"`, "error");
+          return;
+        }
+        return setConfig(ctx, trimmed.slice(0, space), trimmed.slice(space + 1));
+      }
+      return resetConfigKey(ctx, choice2.split(" = ")[0]);
+    }
     // Per-key actions: setting enters the kind-driven input below; resetting
     // drops just this knob back to default/inherit.
     const MENU_CONFIG_SET = "Set value…";
@@ -1021,10 +1093,32 @@ export default function (pi: ExtensionAPI) {
         if (fixed.length === 1) {
           suggestions = match(SUB_VERBS).map((v) => suggest(`config ${v}`, v));
         } else if (fixed.length === 2 && (fixed[1] === "set" || fixed[1] === "reset")) {
-          suggestions = match([...CONFIG_KEYS]).map((k) => suggest(`config ${fixed[1]} ${k}`, k));
+          // Issue #39 — existing roleDefaults fields autocomplete as dotted
+          // keys alongside the top-level knobs.
+          const keys: string[] = [
+            ...CONFIG_KEYS,
+            ...roleDefaultFields(readConfigStatus().effective.roleDefaults).map((f) => `roleDefaults.${f.key}`),
+          ];
+          suggestions = match(keys).map((k) => suggest(`config ${fixed[1]} ${k}`, k));
         } else if (fixed.length === 3 && fixed[1] === "set") {
           const key = fixed[2] as ConfigKey;
           const spec = (CONFIG_KEYS as readonly string[]).includes(key) ? configKeySpec(key) : undefined;
+          // A dotted roleDefaults key gets field-aware value suggestions too.
+          const roleKey = parseRoleDefaultsKey(key);
+          if (roleKey?.field === "thinkingLevel") {
+            suggestions = THINKING_LEVELS.filter((l) => l.startsWith(partial)).map((l) =>
+              suggest(`config set ${key} ${l}`, l),
+            );
+          } else if (roleKey?.field === "model") {
+            const items = availableModels
+              .filter((m) => m.ref.startsWith(partial))
+              .map((m) => ({
+                value: `config set ${key} ${m.ref}`,
+                label: m.ref,
+                description: `provider: ${m.provider}`,
+              }));
+            return items.length > 0 ? items : null;
+          }
           if (spec?.kind === "model") {
             const items = availableModels
               .filter((m) => m.ref.startsWith(partial))
@@ -1092,15 +1186,20 @@ export default function (pi: ExtensionAPI) {
       // Extension config (ADR 0018): read once per call, reused for this run.
       const config = readConfigStatus().effective;
       const dispatchDefaults: DispatchDefaults = {
-        // Model: a role-declared model pins the run (kept); otherwise the
-        // default chain is per-call override > config default > inherited
-        // session model. Thinking is resolved separately (config layer).
-        model: merged.model ?? (config.dispatchDefaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined)),
+        // Model chain (blocking): role-pinned model > per-call override >
+        // roleDefaults model > config default > inherited session model
+        // (issue #39 inserts roleDefaults above the config default; the
+        // role-pin-vs-override order is historical). Thinking is resolved
+        // separately in runSingleAgent (roleDefaults is per-agent).
+        model: merged.model,
+        configModel: config.dispatchDefaultModel,
+        inheritedModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinkingLevel: ctx.thinkingLevel,
-        // input.thinkingOverride is the canonical per-run override field; the
-        // public `thinkingLevel` param maps to the same slot (ADR 0011).
-        thinkingOverride: merged.thinkingOverride ?? merged.thinkingLevel,
+        // input.thinkingOverride is the canonical per-run override field
+        // (the public `thinkingLevel` param is gone since issue #39).
+        thinkingOverride: merged.thinkingOverride,
         configLevel: config.dispatchDefaultThinkingLevel,
+        roleDefaults: config.roleDefaults,
         parentSessionId: ctx.sessionManager.getSessionId(),
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
@@ -1358,11 +1457,13 @@ export default function (pi: ExtensionAPI) {
 
       // The in-process child needs a Model object, not a provider/id string.
       // Precedence: per-call `model` override > role-declared researcher model >
-      // config default > inherited main session model. An unresolvable override
-      // (any source) fails loudly.
+      // roleDefaults model > config default > inherited main session model
+      // (issue #39 inserts roleDefaults where the config default sits). An
+      // unresolvable override (any source) fails loudly.
       const resolveSubagentModel = makeModelResolver(ctx.modelRegistry);
       let childModel: Model<any> | undefined = ctx.model;
-      const rawModel = merged.model ?? researcher?.model ?? config.dispatchDefaultModel;
+      const roleDefault = config.roleDefaults?.["researcher"];
+      const rawModel = merged.model ?? researcher?.model ?? roleDefault?.model ?? config.dispatchDefaultModel;
       if (rawModel) {
         const found = resolveSubagentModel(rawModel);
         if (!found) {
@@ -1380,8 +1481,8 @@ export default function (pi: ExtensionAPI) {
 
       const requested = resolveDispatchThinking(researcher, {
         thinkingLevel: ctx.thinkingLevel,
-        thinkingOverride: merged.thinkingLevel,
         configLevel: config.dispatchDefaultThinkingLevel,
+        roleDefaultLevel: roleDefault?.thinkingLevel,
       });
       const { effective: thinking, requested: requestedThinking } = planForRun(requested, childModel);
 
@@ -1525,6 +1626,48 @@ export default function (pi: ExtensionAPI) {
       const first = result.content?.[0];
       const text = first?.type === "text" ? first.text : "(no output)";
       return new Text(h ? text : theme.fg("muted", text), 0, 0);
+    },
+  });
+
+  pi.registerTool({
+    name: "set-thinking-level",
+    label: "Set thinking level",
+    description: SET_THINKING_LEVEL_DESCRIPTION,
+    parameters: SET_THINKING_LEVEL_PARAMS,
+
+    async execute(_toolCallId, params, _signal, _onUpdate) {
+      // Issue #39 — the ONLY model-visible channel for changing subagent
+      // thinking effort. Session-scoped by design: upstream `setThinkingLevel`
+      // persists only when `options.persist` is true, and it must never be
+      // passed here — a fresh session starts from the user's global default
+      // (US5). Upstream handles clamping to the current model, the
+      // `thinking_level_change` log entry, the `thinking_level_select` event,
+      // and the TUI display.
+      pi.setThinkingLevel(params.level as ThinkingLevel);
+      const current = pi.getThinkingLevel();
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Main session thinking level set to ${params.level} (effective for this session: ${current}).`,
+          },
+        ],
+        details: undefined,
+      };
+    },
+
+    renderCall(args, theme, _context) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("set-thinking-level ")) + theme.fg("accent", args.level ?? "..."),
+        0,
+        0,
+      );
+    },
+
+    renderResult(result, _opts, theme, _context) {
+      const first = result.content?.[0];
+      const text = first?.type === "text" ? first.text : "(no output)";
+      return new Text(text, 0, 0);
     },
   });
 }

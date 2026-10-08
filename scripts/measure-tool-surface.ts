@@ -1,10 +1,10 @@
 /**
  * Seam E measurement extension (dev-only, not shipped): hooked at
- * before_agent_start, captures the registered model-facing surface of the two
- * tools (`subagent`, `research`) exactly as the extension registered it, and
- * writes the per-tool char/token numbers to MEASURE_OUT. Tokens are the
- * fixed ceil(chars / 4) proxy shared with the regression guard
- * (`estimateToolSurfaceTokens` in src/lib.ts). Loaded by
+ * before_agent_start, captures the registered model-facing surface of the
+ * three tools (`subagent`, `research`, `set-thinking-level`) exactly as the
+ * extension registered it, and writes the per-tool char/token numbers to
+ * MEASURE_OUT. Tokens are the fixed ceil(chars / 4) proxy shared with the
+ * regression guard (`estimateToolSurfaceTokens` in src/lib.ts). Loaded by
  * scripts/benchmark-tools.ts in a separate empty-config pi process.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,7 +16,7 @@ export default function (pi: ExtensionAPI) {
     if (!out) return;
     const all = pi.getAllTools();
     const result: Record<string, { chars: number; tokens: number }> = {};
-    for (const name of ["subagent", "research"]) {
+    for (const name of ["subagent", "research", "set-thinking-level"]) {
       const tool = all.find((t) => t.name === name);
       if (!tool) {
         result[name] = { chars: -1, tokens: -1 };

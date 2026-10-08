@@ -18,7 +18,7 @@ A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent inst
 - **Background research** — an in-process second session writes cited findings to a file while you keep working; the completion state (`succeeded` / `failed` / `terminated` / `aborted`) is pushed into your context — no polling.
 - **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder` — the same jobs the skills describe.
 - **Four slash commands** — `/code-review <ref>`, `/design-it-twice <candidate>`, `/research <question>`, and `/subagents` for run management.
-- **Per-run overrides** — pin one run's model via the public `model` field, or its thinking level via `thinkingLevel` (the whole call) or `input.thinkingOverride` (canonical).
+- **Per-run overrides** — pin one run's model via the public `model` field; thinking effort is deterministic (per-task > per-call override > per-role customization > config default > role preset > inherited-minus-one), with the `set-thinking-level` tool as the only model-visible channel for changing it.
 - **Live run management** — a footer counter (`⧗ N subagents running`); `/subagents` to follow, stop, or inspect runs.
 
 ## Install
@@ -49,6 +49,7 @@ Everything here is model-facing — you describe the job, the main agent makes t
 | --- | --- | --- |
 | `subagent` | **blocking** | Runs single / parallel / chain subagents. Does not return until every subagent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
 | `research` | **background** | Runs an in-process second session that writes cited findings to a file, returns immediately, and pushes the completion into your context — no polling. |
+| `set-thinking-level` | **session** | Sets the main session's thinking level for the rest of the session (upstream `pi.setThinkingLevel`, session-scoped, never persisted; a fresh session starts from your global default). The only model-visible channel for changing thinking effort — call it only when the user explicitly asks for a different depth. |
 
 Both accept an optional `input` field: a JSON object string carrying the parameters still hidden from the public schema (`thinkingOverride` for `subagent`; `maxWallClockMs` for `research`, a wall-clock cap that may only tighten the 60-minute default). The per-run `model` override is a **public field** on both tools (ADR 0022 — a hidden channel proved unreliable: models dropped it and the run silently fell back to the configured default).
 
@@ -58,10 +59,11 @@ Direct fields override same-name JSON keys; invalid JSON raises a clear model-vi
 {
   "task": "review the diff since HEAD~1 for standards compliance",
   "agent": "standards-reviewer",
-  "model": "sensenova/sensenova-6.8-flash-lite",
-  "thinkingLevel": "max"
+  "model": "sensenova/sensenova-6.8-flash-lite"
 }
 ```
+
+Thinking effort is not a parameter: every run resolves it through the decision hierarchy (per-task > per-call override > per-role customization > config default > role preset > inherited-minus-one, then the model-capability clamp), or the model applies an explicit instruction via `set-thinking-level`. A legacy call that still passes `thinkingLevel` fails loudly with an unknown-parameter error.
 
 Model names resolve against your `~/.pi/agent/models.json` registry as `provider/id`; an unresolvable name fails loudly and the run never starts.
 
@@ -76,7 +78,7 @@ Model names resolve against your `~/.pi/agent/models.json` registry as `provider
 
 Six bundled roles come with the plugin. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation).
 
-Dispatch precedence: per-call override > role declaration > config default > main-session inheritance.
+Thinking effort resolves deterministically through two orthogonal layers. The decision-source hierarchy is **per-task/per-step `thinkingLevel` > per-call override (`input.thinkingOverride`) > `roleDefaults` per-role tier > config default (`dispatchDefaultThinkingLevel`) > role preset > inherited-minus-one** (the main-session level, strictly one tier down in `off < minimal < low < medium < high < xhigh < max`; `off` stays `off`). The result then passes through the target model's capability clamp (`clampThinkingLevel`, upward-first) — requested vs effective are both recorded, and a clamp shows as `high (req: xhigh)`. The public `thinkingLevel` parameter is gone (it was the randomness source); the only model-visible channel for changing effort is the `set-thinking-level` tool, called only when the user explicitly asks for a different depth. Model-pinned roles skip only the inherited-minus-one layer.
 
 ## Configuration
 
@@ -91,18 +93,22 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `researchChildExtensions` | (curated) | npm packages loaded into a research child: default `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`; only an explicit empty array disables extensions |
 | `logTailBytes` | 4096 | Byte cap for `/subagents tail` log reads |
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
-| `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level when neither the call nor the role specifies one |
+| `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the six embedded roles, no longer dead config); absent → inherited-minus-one |
+| `roleDefaults` | (inherit) | Per-role dispatch customization: `{ "<role>": { model?, thinkingLevel? } }`. `roleDefaults.<role>.thinkingLevel` beats the config default and the role's own preset; `roleDefaults.<role>.model` beats the config default model. Edit via dotted keys: `config set roleDefaults.standards-reviewer.thinkingLevel low` |
 
 Drive it from `/subagents config`:
 
 ```
 /subagents config set maxConcurrency 6
 /subagents config set dispatchDefaultThinkingLevel low
+/subagents config set roleDefaults.standards-reviewer.thinkingLevel low
+/subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset
 ```
 
-`set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
+`set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Dotted `roleDefaults.<role>.<field>` keys edit the nested knob; resetting a dotted key removes just that field (an emptied role prunes itself). Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
 
 ## Research child extensions (trust surface)
 
@@ -134,7 +140,7 @@ A loadout line is a loadout status, never a run status: the researcher still run
 ## Project layout
 
 ```
-extensions/subagent.ts         pi extension: registers the two tools, the run-registry UI,
+extensions/subagent.ts         pi extension: registers the three tools, the run-registry UI,
                                and the in-process research child-session factory
 src/lib.ts                     pure logic — roles, tool schemas (single source of truth),
                                input merge/validation, tool-name resolution, the research
@@ -157,4 +163,4 @@ npm test          # unit tests, no pi runtime needed
 npm run typecheck # extension + lib + scripts typecheck
 ```
 
-The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~573 / ~464 tokens for `subagent` / `research`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
+The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~482 / ~398 / ~104 tokens for `subagent` / `research` / `set-thinking-level`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.

@@ -41,6 +41,8 @@ import {
   omitConfigKey,
   parseConfigFile,
   parseConfigSetValue,
+  parseRoleDefaultFieldValue,
+  parseRoleDefaultsKey,
   parseSubagentsArgs,
   planRunThinking,
   readLogTail,
@@ -55,9 +57,13 @@ import {
   resolveDispatchThinking,
   resolveThinkingLevel,
   resolveTools,
+  SET_THINKING_LEVEL_PARAMS,
+  stepDownThinkingLevel,
+  THINKING_LEVELS,
   runBackgroundResearch,
   serializeConfig,
   setConfigValue,
+  setRoleDefaultField,
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
@@ -1096,13 +1102,31 @@ test("runBackgroundResearch unrefs the wall-clock timer so it never holds the ho
   assert.equal(unrefCalls, 1, "the wall-clock timer must be unref'd");
 });
 
-// S8 — resolveThinkingLevel
-test("resolveThinkingLevel skips only the inherited layer for model-pinned agents", () => {
-  // explicit layers survive: role and config levels beat the model's default
+// S8 — stepDownThinkingLevel (issue #39): the strict inherited-minus-one step.
+test("stepDownThinkingLevel steps one tier down and keeps off at off", () => {
+  assert.equal(stepDownThinkingLevel("off"), "off");
+  assert.equal(stepDownThinkingLevel("minimal"), "off");
+  assert.equal(stepDownThinkingLevel("low"), "minimal");
+  assert.equal(stepDownThinkingLevel("medium"), "low");
+  assert.equal(stepDownThinkingLevel("high"), "medium");
+  assert.equal(stepDownThinkingLevel("xhigh"), "high");
+  assert.equal(stepDownThinkingLevel("max"), "xhigh");
+});
+
+// S8 — resolveThinkingLevel (issue #39 priority): per-call override >
+// roleDefaults tier > config default > role preset > inherited-minus-one.
+// The `hasModel` short-circuit skips only the inherited-minus-one layer.
+test("resolveThinkingLevel skips only the inherited-minus-one layer for model-pinned agents", () => {
+  // explicit layers survive: roleDefaults, config, and preset levels beat the model's default
   assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), "medium");
   assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low", inherited: "high" }), "low");
-  assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", configLevel: "low", inherited: "high" }), "medium");
-  // nothing explicit: the model-pinned shortcut still returns undefined
+  assert.equal(resolveThinkingLevel({ hasModel: true, roleDefaultLevel: "off", inherited: "high" }), "off");
+  // roleDefaults > config > preset even for pinned models
+  assert.equal(
+    resolveThinkingLevel({ hasModel: true, roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high", inherited: "xhigh" }),
+    "low",
+  );
+  // nothing explicit: the model-pinned shortcut still returns undefined (no minus-one)
   assert.equal(resolveThinkingLevel({ hasModel: true, inherited: "high" }), undefined);
   assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
 });
@@ -1111,21 +1135,35 @@ test("resolveThinkingLevel honors the per-call override even for model-pinned ag
   // the escape hatch beats everything, including a pinned model
   assert.equal(resolveThinkingLevel({ hasModel: true, override: "low" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: true, override: "low", roleLevel: "medium", inherited: "high" }), "low");
+  assert.equal(resolveThinkingLevel({ hasModel: true, override: "low", roleDefaultLevel: "off", configLevel: "medium" }), "low");
 });
 
-test("resolveThinkingLevel prefers a per-call override over role and inherited levels", () => {
+test("resolveThinkingLevel prefers a per-call override over every decision layer", () => {
   assert.equal(resolveThinkingLevel({ hasModel: false, override: "low", roleLevel: "medium", inherited: "high" }), "low");
+  assert.equal(
+    resolveThinkingLevel({ hasModel: false, override: "off", roleDefaultLevel: "high", configLevel: "xhigh", roleLevel: "max", inherited: "max" }),
+    "off",
+  );
 });
 
-test("resolveThinkingLevel falls back to the role level, then the inherited level", () => {
-  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", inherited: "high" }), "medium");
+test("resolveThinkingLevel orders the explicit layers roleDefaults > config > preset", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", inherited: "high" }), "medium", "preset applies when nothing above it is set");
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "low", inherited: "high" }), "low");
-  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleDefaultLevel: "off", inherited: "high" }), "off");
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high" }), "low", "roleDefaults beats config and preset");
+  assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", roleLevel: "high" }), "medium", "config beats the role preset (no longer dead config)");
+});
+
+test("resolveThinkingLevel defaults to inherited-minus-one when no layer decides", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "medium");
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "off" }), "off", "off stays off");
+  assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "minimal" }), "off");
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
 });
 
-// S8b — resolveDispatchThinking (ADR 0020): the per-task/per-step layer sits
-// above the call-level override; both beat role/config/inherited layers.
+// S8b — resolveDispatchThinking (ADR 0020 + issue #39): the per-task/per-step
+// layer sits above the call-level override; the decision layers then order
+// roleDefaults > config > preset > inherited-minus-one.
 test("resolveDispatchThinking prefers the per-task level over the call-level override", () => {
   const agent = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
   assert.equal(
@@ -1140,17 +1178,12 @@ test("resolveDispatchThinking prefers the per-task level over the call-level ove
   );
 });
 
-test("resolveDispatchThinking per-task level beats role and config layers and inheritance", () => {
+test("resolveDispatchThinking per-task level beats every decision layer", () => {
   const agent = { name: "r", description: "", systemPrompt: "", thinkingLevel: "medium", source: "embedded" as const };
   assert.equal(
-    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", configLevel: "low" }, "off"),
-    "off",
-    "per-task wins over role tier and config default",
-  );
-  assert.equal(
-    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", configLevel: "low" }),
-    "medium",
-    "role tier wins over the config default when no override is present",
+    resolveDispatchThinking(agent, { thinkingLevel: "xhigh", configLevel: "low", roleDefaultLevel: "off" }, "high"),
+    "high",
+    "per-task wins over roleDefaults, config, and preset",
   );
 });
 
@@ -1166,6 +1199,32 @@ test("resolveDispatchThinking per-task level wins even for model-pinned roles", 
     undefined,
     "model-pinned role with nothing explicit still passes no level",
   );
+});
+
+test("resolveDispatchThinking orders the decision layers and applies inherited-minus-one last", () => {
+  const preset = { name: "r", description: "", systemPrompt: "", thinkingLevel: "medium", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(preset, { thinkingLevel: "xhigh", configLevel: "low", roleDefaultLevel: "off" }),
+    "off",
+    "roleDefaults wins over config and preset",
+  );
+  assert.equal(
+    resolveDispatchThinking(preset, { thinkingLevel: "xhigh", configLevel: "low" }),
+    "low",
+    "config default beats the role preset (dispatchDefaultThinkingLevel is live)",
+  );
+  assert.equal(
+    resolveDispatchThinking(preset, { thinkingLevel: "xhigh" }),
+    "medium",
+    "role preset applies when no higher layer is set",
+  );
+  const bare = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
+  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "high" }), "medium", "inherited high minus one");
+  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "off" }), "off", "inherited off stays off");
+  assert.equal(resolveDispatchThinking(bare, {}), undefined, "no inherited level, nothing resolved");
+  const pinned = { name: "r", description: "", systemPrompt: "", model: "sensenova/deepseek-v4-flash", source: "embedded" as const };
+  assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high" }), undefined, "pinned skips the minus-one layer");
+  assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high", roleDefaultLevel: "low" }), "low", "pinned still honors roleDefaults");
 });
 
 // S8c — ADR 0020 data path: per-task thinkingLevel must pass both schemas
@@ -2060,6 +2119,147 @@ test("parseConfigSetValue accepts a thinking level and clears via empty/inherit"
   assert.equal(parseConfigSetValue("dispatchDefaultThinkingLevel", "bogus").ok, false);
 });
 
+// S22b — roleDefaults (issue #39): a per-role { model?, thinkingLevel? }
+// nested knob. Valid entries apply; a structurally-invalid entry degrades to
+// that role's absence (ADR 0018 per-key philosophy, one level nested); the
+// whole knob is flagged degraded when anything inside it was dropped.
+test("parseConfigFile decodes roleDefaults per-role entries", () => {
+  const s = parseConfigFile(
+    JSON.stringify({
+      roleDefaults: {
+        "standards-reviewer": { thinkingLevel: "low" },
+        researcher: { model: "openai/gpt-x", thinkingLevel: "high" },
+        "fact-finder": {},
+      },
+    }),
+  );
+  assert.deepEqual(s.effective.roleDefaults, {
+    "standards-reviewer": { thinkingLevel: "low" },
+    researcher: { model: "openai/gpt-x", thinkingLevel: "high" },
+    "fact-finder": {},
+  });
+  assert.ok(s.present.has("roleDefaults"));
+  assert.ok(!s.degraded.has("roleDefaults"));
+});
+
+test("parseConfigFile tolerates unknown roles and degrades only invalid role entries", () => {
+  const s = parseConfigFile(
+    JSON.stringify({
+      roleDefaults: {
+        "standards-reviewer": { thinkingLevel: "low" },
+        bogus: { thinkingLevel: "turbo" },
+        "bad-shape": "not-an-object",
+        researcher: { model: "", thinkingLevel: "high" },
+      },
+    }),
+  );
+  const rd = s.effective.roleDefaults ?? {};
+  assert.deepEqual(rd["standards-reviewer"], { thinkingLevel: "low" }, "valid entry survives");
+  assert.ok(!("bogus" in rd), "invalid-level entry degrades away");
+  assert.ok(!("bad-shape" in rd), "non-object entry degrades away");
+  assert.ok(!("researcher" in rd), "entry with an invalid field degrades away");
+  assert.ok(s.present.has("roleDefaults"), "the knob is still present (valid parts applied)");
+  assert.ok(s.degraded.has("roleDefaults"), "partial degrade flags the knob");
+});
+
+test("parseConfigFile rejects a non-object roleDefaults value entirely", () => {
+  for (const v of ["low", 7, ["standards-reviewer"]] as const) {
+    const s = parseConfigFile(JSON.stringify({ roleDefaults: v }));
+    assert.equal(s.effective.roleDefaults, undefined, JSON.stringify(v));
+    assert.ok(s.degraded.has("roleDefaults"), JSON.stringify(v));
+  }
+});
+
+test("roleDefaults null is the inherit marker for the optional knob", () => {
+  const s = parseConfigFile(JSON.stringify({ roleDefaults: null }));
+  assert.equal(s.effective.roleDefaults, undefined);
+  assert.ok(s.present.has("roleDefaults"));
+  assert.ok(!s.degraded.has("roleDefaults"));
+});
+
+test("parseRoleDefaultsKey accepts only the three-part dotted form", () => {
+  assert.deepEqual(parseRoleDefaultsKey("roleDefaults.standards-reviewer.thinkingLevel"), {
+    role: "standards-reviewer",
+    field: "thinkingLevel",
+  });
+  assert.deepEqual(parseRoleDefaultsKey("roleDefaults.researcher.model"), { role: "researcher", field: "model" });
+  assert.equal(parseRoleDefaultsKey("roleDefaults..thinkingLevel"), undefined);
+  assert.equal(parseRoleDefaultsKey("roleDefaults.x.turbo"), undefined, "unknown field");
+  assert.equal(parseRoleDefaultsKey("roleDefaults.x"), undefined, "too short");
+  assert.equal(parseRoleDefaultsKey("roleDefaults.x.model.extra"), undefined, "too long");
+  assert.equal(parseRoleDefaultsKey("maxConcurrency"), undefined, "plain key is not a roleDefaults key");
+});
+
+test("parseRoleDefaultFieldValue validates per-field values and clears with empty/inherit", () => {
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "low"), { ok: true, value: "low" });
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "inherit"), { ok: true, value: undefined });
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", ""), { ok: true, value: undefined });
+  assert.equal(parseRoleDefaultFieldValue("thinkingLevel", "turbo").ok, false);
+  assert.deepEqual(parseRoleDefaultFieldValue("model", "openai/gpt-x"), { ok: true, value: "openai/gpt-x" });
+  assert.deepEqual(parseRoleDefaultFieldValue("model", "inherit"), { ok: true, value: undefined });
+  assert.deepEqual(parseRoleDefaultFieldValue("model", ""), { ok: true, value: undefined });
+});
+
+test("setRoleDefaultField sets and clears fields immutably, pruning empty roles", () => {
+  const base = defaultConfig();
+  const withLow = setRoleDefaultField(base, "standards-reviewer", "thinkingLevel", "low");
+  assert.deepEqual(withLow.roleDefaults, { "standards-reviewer": { thinkingLevel: "low" } });
+  assert.equal(base.roleDefaults, undefined, "source untouched");
+  const withModel = setRoleDefaultField(withLow, "standards-reviewer", "model", "openai/gpt-x");
+  assert.deepEqual(withModel.roleDefaults, { "standards-reviewer": { thinkingLevel: "low", model: "openai/gpt-x" } });
+  const cleared = setRoleDefaultField(withModel, "standards-reviewer", "thinkingLevel", undefined);
+  assert.deepEqual(cleared.roleDefaults, { "standards-reviewer": { model: "openai/gpt-x" } });
+  const pruned = setRoleDefaultField(cleared, "standards-reviewer", "model", undefined);
+  assert.equal(pruned.roleDefaults, undefined, "empty role entry prunes the whole knob");
+});
+
+test("serializeConfig omits an unset roleDefaults and round-trips a set one", () => {
+  assert.ok(!serializeConfig(defaultConfig()).includes("roleDefaults"));
+  const cfg = setRoleDefaultField(defaultConfig(), "fact-finder", "thinkingLevel", "off");
+  const text = serializeConfig(cfg);
+  const back = parseConfigFile(text);
+  assert.deepEqual(back.effective.roleDefaults, { "fact-finder": { thinkingLevel: "off" } });
+  assert.ok(back.present.has("roleDefaults"));
+});
+
+test("omitConfigKey removes the whole roleDefaults key and preserves siblings", () => {
+  const text = JSON.stringify({ maxConcurrency: 6, roleDefaults: { a: { thinkingLevel: "low" } }, futureKey: 1 });
+  const out = omitConfigKey(text, "roleDefaults");
+  assert.ok(out);
+  const parsed = JSON.parse(out);
+  assert.ok(!("roleDefaults" in parsed));
+  assert.equal(parsed.maxConcurrency, 6);
+  assert.equal(parsed.futureKey, 1);
+});
+
+test("omitConfigKey removes one nested roleDefaults field and prunes empty roles", () => {
+  const text = JSON.stringify({
+    roleDefaults: { researcher: { model: "openai/gpt-x", thinkingLevel: "high" }, "fact-finder": { thinkingLevel: "low" } },
+  });
+  const one = omitConfigKey(text, "roleDefaults.researcher.thinkingLevel");
+  assert.ok(one);
+  assert.deepEqual(JSON.parse(one).roleDefaults, {
+    researcher: { model: "openai/gpt-x" },
+    "fact-finder": { thinkingLevel: "low" },
+  });
+  const prune = omitConfigKey(one, "roleDefaults.researcher.model");
+  assert.ok(prune);
+  assert.deepEqual(JSON.parse(prune).roleDefaults, { "fact-finder": { thinkingLevel: "low" } });
+  const all = omitConfigKey(JSON.stringify({ roleDefaults: { a: { thinkingLevel: "low" } } }), "roleDefaults.a.thinkingLevel");
+  assert.ok(all);
+  assert.ok(!("roleDefaults" in JSON.parse(all)), "pruning the last field drops the empty role and the knob");
+});
+
+test("configKeyLabel and formatConfigOverview surface roleDefaults per role", () => {
+  const s = parseConfigFile(JSON.stringify({ roleDefaults: { "fact-finder": { thinkingLevel: "off" } } }));
+  const label = configKeyLabel("roleDefaults", s);
+  assert.ok(label.includes("fact-finder.thinkingLevel=off"));
+  assert.ok(label.includes("[customized]"));
+  const unset = configKeyLabel("roleDefaults", parseConfigFile(undefined));
+  assert.ok(unset.includes("(inherit)"));
+  assert.ok(unset.includes("[default]"));
+});
+
 test("serializeConfig writes the set keys and round-trips; unset dispatch knobs are omitted, not null", () => {
   const cfg = { ...defaultConfig(), maxConcurrency: 10, dispatchDefaultThinkingLevel: "low" as const };
   const text = serializeConfig(cfg);
@@ -2134,8 +2334,8 @@ test("buildResearchFullParams ties the maxWallClockMs maximum to the given ceili
   );
 });
 
-test("resolveThinkingLevel inserts the config level between role and inherited", () => {
-  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", configLevel: "low", inherited: "high" }), "medium");
+test("resolveThinkingLevel orders config above the role preset (issue #39 promotion)", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: "medium", configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: false, roleLevel: undefined, configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: false, override: "off", configLevel: "low", inherited: "high" }), "off");
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", inherited: "high" }), "medium");
@@ -2143,7 +2343,8 @@ test("resolveThinkingLevel inserts the config level between role and inherited",
   assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: undefined }), undefined, "nothing explicit stays unforced");
 });
 
-test("parseSubagentsArgs parses the config sub-verb forms", () => {
+
+test("parseSubagentsArgs parses the config sub-verb forms and roleDefaults dotted keys", () => {
   assert.deepEqual(parseSubagentsArgs("config"), { action: "config", verb: "show" });
   assert.deepEqual(parseSubagentsArgs("config show"), { action: "config", verb: "show" });
   assert.deepEqual(parseSubagentsArgs("config reset"), { action: "config", verb: "reset" });
@@ -2175,6 +2376,19 @@ test("parseSubagentsArgs parses the config sub-verb forms", () => {
   });
   assert.equal(parseSubagentsArgs("config reset nope").action, "invalid");
   assert.equal(parseSubagentsArgs("config reset a b").action, "invalid");
+  assert.deepEqual(parseSubagentsArgs("config set roleDefaults.standards-reviewer.thinkingLevel low"), {
+    action: "config",
+    verb: "set",
+    key: "roleDefaults.standards-reviewer.thinkingLevel",
+    value: "low",
+  });
+  assert.deepEqual(parseSubagentsArgs("config reset roleDefaults.researcher.model"), {
+    action: "config",
+    verb: "reset",
+    key: "roleDefaults.researcher.model",
+  });
+  assert.equal(parseSubagentsArgs("config reset roleDefaults.x.turbo").action, "invalid", "unknown dotted field");
+  assert.equal(parseSubagentsArgs("config set roleDefaults.x nope").action, "invalid", "dotted key needs three parts");
 });
 
 test("formatConfigOverview marks each key default/customized/degraded and shows the path", () => {
@@ -2233,11 +2447,9 @@ test("mergeToolParams accepts model as a public direct field (ADR 0022)", () => 
     agent: "researcher",
     task: "T",
     model: "sensenova/sensenova-6.8-flash-lite",
-    thinkingLevel: "max",
   };
   const merged = mergeToolParams({ direct, fullSchema: SUBAGENT_FULL_PARAMS });
   assert.equal(merged.model, "sensenova/sensenova-6.8-flash-lite", "the public model field passes through the full contract");
-  assert.equal(merged.thinkingLevel, "max");
   assert.equal(merged.input, undefined, "no input key is invented");
 });
 
@@ -2365,17 +2577,57 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
 // into the public schema (+16 tokens per tool, honest-wording input
 // description); the baseline constant is updated here to the re-measured
 // numbers (prior pi 1.0.2 record: 557/448).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 573, research: 464 };
+const TOKEN_BASELINE: Record<string, number> = { subagent: 482, research: 398, "set-thinking-level": 104 };
 
-test("TOOL_CONTRACTS covers exactly the two frozen tool surfaces", () => {
-  assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research"]);
+test("TOOL_CONTRACTS covers exactly the three frozen tool surfaces", () => {
+  assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research", "set-thinking-level"]);
+});
+
+test("set-thinking-level requires the level enum and rejects values outside the union", () => {
+  for (const level of THINKING_LEVELS) {
+    assert.ok(Value.Check(SET_THINKING_LEVEL_PARAMS, { level }), level);
+  }
+  assert.ok(!Value.Check(SET_THINKING_LEVEL_PARAMS, {}), "level is required");
+  assert.ok(!Value.Check(SET_THINKING_LEVEL_PARAMS, { level: "turbo" }), "not a thinking level");
+});
+
+test("thinkingLevel survives only as the per-task pass-through field", () => {
+  // the model-facing schemas no longer declare the top-level thinkingLevel
+  assert.ok(!("thinkingLevel" in SUBAGENT_TOOL_PARAMS.properties!), "subagent public schema dropped it");
+  assert.ok(!("thinkingLevel" in RESEARCH_TOOL_PARAMS.properties!), "research public schema dropped it");
+  // a legacy top-level call still passes pi's lenient public validation (pi
+  // never strips unknown keys) but must fail the full dispatch contract loudly
+  assert.ok(Value.Check(SUBAGENT_TOOL_PARAMS, { agent: "a", task: "t", thinkingLevel: "high" }));
+  assert.ok(!Value.Check(SUBAGENT_FULL_PARAMS, { agent: "a", task: "t", thinkingLevel: "high" }));
+  // the per-task/per-step pass-through (ADR 0020) survives both schemas
+  assert.ok(Value.Check(SUBAGENT_FULL_PARAMS, { tasks: [{ agent: "a", task: "t", thinkingLevel: "high" }] }));
+  assert.ok(Value.Check(SUBAGENT_FULL_PARAMS, { chain: [{ agent: "a", task: "t", thinkingLevel: "xhigh" }] }));
+});
+
+test("full-contract validation rejects a legacy call carrying thinkingLevel", () => {
+  assert.throws(
+    () =>
+      mergeToolParams({
+        direct: { agent: "standards-reviewer", task: "t", thinkingLevel: "high" },
+        fullSchema: SUBAGENT_FULL_PARAMS,
+      }),
+    /thinkingLevel.*unknown parameter/,
+  );
+  assert.throws(
+    () =>
+      mergeToolParams({
+        direct: { task: "t", findingsPath: "f.md", thinkingLevel: "high" },
+        fullSchema: buildResearchFullParams(DEFAULT_RESEARCH_WALL_CLOCK_MS),
+      }),
+    /thinkingLevel.*unknown parameter/,
+  );
 });
 
 test("subagent schema keeps its public fields, gains the input field and the model override", () => {
   const props = Object.keys(SUBAGENT_TOOL_PARAMS.properties ?? {});
   assert.deepEqual(
     new Set(props),
-    new Set(["agent", "task", "tasks", "chain", "agentScope", "thinkingLevel", "cwd", "model", "input"]),
+    new Set(["agent", "task", "tasks", "chain", "agentScope", "cwd", "model", "input"]),
   );
   assert.deepEqual(SUBAGENT_TOOL_PARAMS.required ?? [], [], "subagent has no required parameters");
 });
@@ -2384,7 +2636,7 @@ test("research schema keeps its public fields, gains the input field and the mod
   const props = Object.keys(RESEARCH_TOOL_PARAMS.properties ?? {});
   assert.deepEqual(
     new Set(props),
-    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "thinkingLevel", "model", "input"]),
+    new Set(["task", "findingsPath", "cwd", "tools", "agentScope", "model", "input"]),
   );
   assert.deepEqual(RESEARCH_TOOL_PARAMS.required ?? [], ["task", "findingsPath"]);
 });
