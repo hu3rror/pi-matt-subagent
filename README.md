@@ -18,7 +18,7 @@ A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent inst
 - **Background research** — an in-process second session writes cited findings to a file while you keep working; the completion state (`succeeded` / `failed` / `terminated` / `aborted`) is pushed into your context — no polling.
 - **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder` — the same jobs the skills describe.
 - **Four slash commands** — `/code-review <ref>`, `/design-it-twice <candidate>`, `/research <question>`, and `/subagents` for run management.
-- **Per-run overrides** — pin one run's model via the public `model` field; thinking effort is deterministic (per-task > per-call override > per-role customization > config default > role preset > inherited main-session level, as-is), with the `set-thinking-level` tool as the only model-visible channel for changing it.
+- **Per-run overrides** — pin one run's model via the public `model` field; thinking effort is deterministic (per-task > per-call override > conversationally-declared session level > per-role customization > config default > role preset > inherited main-session level, as-is), with the `set-thinking-level` tool as the only model-visible channel for changing it.
 - **Live run management** — a footer counter (`⧗ N subagents running`); `/subagents` to follow, stop, or inspect runs.
 
 ## Install
@@ -49,7 +49,7 @@ Everything here is model-facing — you describe the job, the main agent makes t
 | --- | --- | --- |
 | `subagent` | **blocking** | Runs single / parallel / chain subagents. Does not return until every subagent finishes; full results come back in one tool result. `chain` supports a `{previous}` placeholder that passes one step's output into the next. |
 | `research` | **background** | Runs an in-process second session that writes cited findings to a file, returns immediately, and pushes the completion into your context — no polling. |
-| `set-thinking-level` | **session** | Sets the main session's thinking level for the rest of the session (upstream `pi.setThinkingLevel`, session-scoped, never persisted; a fresh session starts from your global default). The only model-visible channel for changing thinking effort — call it only when the user explicitly asks for a different depth. |
+| `set-thinking-level` | **session** | Sets the main session's thinking level for the rest of the session (upstream `pi.setThinkingLevel`, session-scoped, never persisted; a fresh session starts from your global default). The only model-visible channel for changing thinking effort — call it only when the user explicitly asks for a different depth. While set, the requested level is also the **declared level** subagent dispatch honors above config defaults and per-role pins (issue #40). |
 
 Both accept an optional `input` field: a JSON object string carrying the parameters still hidden from the public schema (`thinkingOverride` for `subagent`; `maxWallClockMs` for `research`, a wall-clock cap that may only tighten the 60-minute default). The per-run `model` override is a **public field** on both tools (ADR 0022 — a hidden channel proved unreliable: models dropped it and the run silently fell back to the configured default).
 
@@ -63,7 +63,7 @@ Direct fields override same-name JSON keys; invalid JSON raises a clear model-vi
 }
 ```
 
-Thinking effort is not a parameter: every run resolves it through the decision hierarchy (per-task > per-call override > per-role customization > config default > role preset > inherited main-session level, then the model-capability clamp), or the model applies an explicit instruction via `set-thinking-level`. A legacy call that still passes `thinkingLevel` fails loudly with an unknown-parameter error.
+Thinking effort is not a parameter: every run resolves it through the decision hierarchy (per-task > per-call override > conversationally-declared session level > per-role customization > config default > role preset > inherited main-session level, then the model-capability clamp), or the model applies an explicit instruction via `set-thinking-level`. A legacy call that still passes `thinkingLevel` fails loudly with an unknown-parameter error.
 
 Model names resolve against your `~/.pi/agent/models.json` registry as `provider/id`; an unresolvable name fails loudly and the run never starts.
 
@@ -78,7 +78,7 @@ Model names resolve against your `~/.pi/agent/models.json` registry as `provider
 
 Six bundled roles come with the plugin. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation).
 
-Thinking effort resolves deterministically through two orthogonal layers. The decision-source hierarchy is **per-task/per-step `thinkingLevel` > per-call override (`input.thinkingOverride`) > `roleDefaults` per-role tier > config default (`dispatchDefaultThinkingLevel`) > role preset > inherited** (the main-session level, passed through **as-is** — a declared depth like `xhigh` propagates to preset-less roles). The result then passes through the target model's capability clamp (`clampThinkingLevel`, upward-first) — requested vs effective are both recorded, and a clamp shows as `high (req: xhigh)`. The public `thinkingLevel` parameter is gone (it was the randomness source); the only model-visible channel for changing effort is the `set-thinking-level` tool, called only when the user explicitly asks for a different depth. Model-pinned roles (frontmatter/embedded or `roleDefaults.<role>.model`) skip only the inherited layer. The dispatch model resolves per-call-first — per-call override > role-pinned model > `roleDefaults` model > config default > inherited session model — for both tools.
+Thinking effort resolves deterministically through two orthogonal layers. The decision-source hierarchy is **per-task/per-step `thinkingLevel` > per-call override (`input.thinkingOverride`) > declared (the conversationally-declared session level — the requested level of the last `set-thinking-level` call, read from the session transcript, sticky across model switches and session continuation) > `roleDefaults` per-role tier > config default (`dispatchDefaultThinkingLevel`) > role preset > inherited** (the main-session level, passed through **as-is** — a declared depth like `xhigh` propagates to preset-less roles). The result then passes through the target model's capability clamp (`clampThinkingLevel`, upward-first) — requested vs effective are both recorded, and a clamp shows as `high (req: xhigh)`. The public `thinkingLevel` parameter is gone (it was the randomness source); the only model-visible channel for changing effort is the `set-thinking-level` tool, called only when the user explicitly asks for a different depth. Model-pinned roles (frontmatter/embedded or `roleDefaults.<role>.model`) skip only the inherited layer. The dispatch model resolves per-call-first — per-call override > role-pinned model > `roleDefaults` model > config default > inherited session model — for both tools.
 
 ## Configuration
 

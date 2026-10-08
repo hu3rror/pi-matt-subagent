@@ -38,6 +38,9 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
+/** The tool whose calls carry a conversational thinking declaration (A-axis, issue #40). */
+export const SET_THINKING_LEVEL_TOOL = "set-thinking-level";
+
 export function scopeAllowsProject(scope: AgentScope): boolean {
   return scope === "project" || scope === "both";
 }
@@ -1741,11 +1744,11 @@ export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | 
 
 /**
  * Decides the thinking level for a subagent's pi invocation. Priority (issue
- * #39; the order lives in the ADR 0005 note, pinned by the S8 tests): per-
- * call override > `roleDefaults` tier > config default > role preset >
- * inherited (the main-session level, passed through as-is). `hasModel` (a
- * role-pinned model, frontmatter/embedded or `roleDefaults.<role>.model`)
- * skips only the inherited layer — explicit layers still apply and win.
+ * #39 + A-axis): per-call override > declared (conversational, A-axis) >
+ * `roleDefaults` tier > config default > role preset > inherited (the main-
+ * session level, passed through as-is). `hasModel` (a role-pinned model,
+ * frontmatter/embedded or `roleDefaults.<role>.model`) skips only the
+ * inherited layer — explicit layers still apply and win.
  */
 export function resolveThinkingLevel(opts: {
   roleLevel?: string;
@@ -1754,20 +1757,21 @@ export function resolveThinkingLevel(opts: {
   inherited?: string;
   hasModel: boolean;
   configLevel?: string;
+  declaredLevel?: string;
 }): string | undefined {
   if (opts.override) return opts.override;
-  const explicit = opts.roleDefaultLevel ?? opts.configLevel ?? opts.roleLevel;
+  const explicit = opts.declaredLevel ?? opts.roleDefaultLevel ?? opts.configLevel ?? opts.roleLevel;
   if (opts.hasModel) return explicit;
   return explicit ?? opts.inherited;
 }
 
 /**
- * Resolves one run's thinking level (issue #39, ADR 0005/0018/0020): a
- * per-task/per-step `thinkingLevel` (ADR 0020) wins over the call-level
- * override; the decision layers then order `roleDefaults` tier > config
- * default > role preset > inherited (plain, as-is). A role is model-pinned
- * (`hasModel`) by its own `model` or a `roleDefaults.<role>.model` — either
- * skips only the inherited layer.
+ * Resolves one run's thinking level (issue #39 + A-axis, ADR 0005/0018/0020):
+ * a per-task/per-step `thinkingLevel` (ADR 0020) wins over the call-level
+ * override; the decision layers then order declared > `roleDefaults` tier >
+ * config default > role preset > inherited (plain, as-is). A role is
+ * model-pinned (`hasModel`) by its own `model` or a `roleDefaults.<role>.model`
+ * — either skips only the inherited layer.
  */
 export function resolveDispatchThinking(
   agent: AgentConfig | undefined,
@@ -1777,6 +1781,7 @@ export function resolveDispatchThinking(
     configLevel?: string;
     roleDefaultLevel?: string;
     roleDefaultModel?: string;
+    declaredLevel?: string;
   },
   taskLevel?: string,
 ): string | undefined {
@@ -1787,7 +1792,52 @@ export function resolveDispatchThinking(
     inherited: d.thinkingLevel,
     hasModel: Boolean(agent?.model || d.roleDefaultModel),
     configLevel: d.configLevel,
+    declaredLevel: d.declaredLevel,
   });
+}
+
+/**
+ * The minimal session-entry shape the pure layer reads. The extension passes
+ * `ctx.sessionManager.getEntries()`; kept structural so lib.ts stays runtime-
+ * free (the upstream entry union is much wider — see the pi session-manager
+ * types).
+ */
+export interface DeclaredLevelEntry {
+  type?: string;
+  message?: {
+    content?: ReadonlyArray<{
+      type?: string;
+      name?: string;
+      arguments?: Record<string, unknown>;
+    }>;
+  };
+  [key: string]: unknown;
+}
+
+/**
+ * The conversationally-declared thinking level (A-axis): the requested level
+ * of the last `set-thinking-level` call in the session transcript. The tool
+ * call is the one first-class "who declared it" signal — upstream session
+ * events carry no source, and a model switch recomputes the session level
+ * (US17), so "declared" must not be read from the level itself. Derived from
+ * the transcript (the session file), the declaration is sticky across model
+ * switches and session continuation, and stays session-scoped (no config
+ * persistence). Invalid levels are skipped; a later invalid call does not
+ * erase an earlier valid declaration.
+ */
+export function findDeclaredThinkingLevel(entries: ReadonlyArray<DeclaredLevelEntry>): string | undefined {
+  let declared: string | undefined;
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    const content = entry.message?.content;
+    if (!content) continue;
+    for (const block of content) {
+      if (block.type !== "toolCall" || block.name !== SET_THINKING_LEVEL_TOOL) continue;
+      const level = block.arguments?.level;
+      if (isThinkingLevel(level)) declared = level;
+    }
+  }
+  return declared;
 }
 
 /**

@@ -54,6 +54,7 @@ import {
   discoverAgents,
   effectiveResearchChildExtensions,
   emptyUsage,
+  findDeclaredThinkingLevel,
   formatConfigOverview,
   formatRunSnapshot,
   getPiInvocation,
@@ -98,6 +99,7 @@ import {
   type AgentFrontmatter,
   type ConfigSetKey,
   type ConfigStatus,
+  type DeclaredLevelEntry,
   type FrontmatterParser,
   type ResearchHandle,
   type ResearchChildSession,
@@ -521,6 +523,8 @@ interface DispatchDefaults {
   configLevel?: string;
   /** Per-role customization (issue #39): `roleDefaults.<role>` wins over the config default and the role preset. */
   roleDefaults?: RoleDefaults;
+  /** Conversationally-declared thinking level (A-axis, issue #40): the last `set-thinking-level` call; sits above roleDefaults. */
+  declaredLevel?: string;
   /** Parent session id threaded to the spawn env (subagent marker). */
   parentSessionId?: string;
 }
@@ -555,6 +559,22 @@ const planForRun = (requested: string | undefined, model: Model<any> | undefined
   const planned = model ? planRunThinking(requested, clampForModel(model)) : undefined;
   return { effective: planned?.actual ?? requested, requested: planned?.requested };
 };
+
+/**
+ * The conversationally-declared thinking level (A-axis, issue #40), read from
+ * the active session branch per dispatch: the transcript is the single source
+ * of truth, so the declaration is sticky across model switches and session
+ * continuation (the `set-thinking-level` tool itself is unchanged — the
+ * declared value is its `arguments.level`). No cache: upstream leaf ids
+ * advance on every append (a cache keyed on them is always cold) and branch
+ * switches do not change the entry count, so any cache key would trade
+ * correctness for nothing — the branch walk is negligible next to a subagent
+ * dispatch. The structural shape read here mirrors upstream SessionEntry /
+ * SessionMessageEntry toolCall blocks.
+ */
+const readDeclaredLevel = (ctx: {
+  sessionManager: { getBranch(): unknown[] };
+}) => findDeclaredThinkingLevel(ctx.sessionManager.getBranch() as unknown as DeclaredLevelEntry[]);
 
 // ---------------------------------------------------------------------------
 // Blocking runner
@@ -607,6 +627,7 @@ async function runSingleAgent(
       configLevel: dispatchDefaults.configLevel,
       roleDefaultLevel: roleDefault?.thinkingLevel,
       roleDefaultModel: roleDefault?.model,
+      declaredLevel: dispatchDefaults.declaredLevel,
     },
     agentTask.thinkingLevel,
   );
@@ -1224,6 +1245,7 @@ export default function (pi: ExtensionAPI) {
         thinkingOverride: merged.thinkingOverride,
         configLevel: config.dispatchDefaultThinkingLevel,
         roleDefaults: config.roleDefaults,
+        declaredLevel: readDeclaredLevel(ctx),
         parentSessionId: ctx.sessionManager.getSessionId(),
       };
       const discovery = discoverAgents(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME, agentScope, parseAgentFrontmatter);
@@ -1508,6 +1530,7 @@ export default function (pi: ExtensionAPI) {
         configLevel: config.dispatchDefaultThinkingLevel,
         roleDefaultLevel: roleDefault?.thinkingLevel,
         roleDefaultModel: roleDefault?.model,
+        declaredLevel: readDeclaredLevel(ctx),
       });
       const { effective: thinking, requested: requestedThinking } = planForRun(requested, childModel);
 

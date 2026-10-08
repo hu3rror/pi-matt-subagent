@@ -26,6 +26,7 @@ import {
   EMBEDDED_ROLES,
   emptyUsage,
   estimateToolSurfaceTokens,
+  findDeclaredThinkingLevel,
   formatBlockingToolError,
   formatConfigOverview,
   formatModelSegment,
@@ -1102,8 +1103,8 @@ test("runBackgroundResearch unrefs the wall-clock timer so it never holds the ho
   assert.equal(unrefCalls, 1, "the wall-clock timer must be unref'd");
 });
 
-// S8 — resolveThinkingLevel (issue #39 priority): per-call override >
-// roleDefaults tier > config default > role preset > inherited (plain).
+// S8 — resolveThinkingLevel (issue #39 priority + A-axis): per-call override >
+// declared > roleDefaults tier > config default > role preset > inherited (plain).
 // The `hasModel` short-circuit skips only the inherited layer.
 test("resolveThinkingLevel skips only the inherited layer for model-pinned agents", () => {
   // explicit layers survive: roleDefaults, config, and preset levels beat the model's default
@@ -1143,6 +1144,30 @@ test("resolveThinkingLevel orders the explicit layers roleDefaults > config > pr
   assert.equal(resolveThinkingLevel({ hasModel: false, configLevel: "medium", roleLevel: "high" }), "medium", "config beats the role preset (no longer dead config)");
 });
 
+test("resolveThinkingLevel places the declared level above roleDefaults, config, and preset", () => {
+  assert.equal(
+    resolveThinkingLevel({ hasModel: false, declaredLevel: "xhigh", roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high", inherited: "off" }),
+    "xhigh",
+    "declared beats roleDefaults, config, preset, and inherited",
+  );
+  assert.equal(resolveThinkingLevel({ hasModel: false, declaredLevel: "off", roleLevel: "high", inherited: "xhigh" }), "off", "declared off wins over preset and inherited");
+  assert.equal(resolveThinkingLevel({ hasModel: false, declaredLevel: "low", configLevel: "high", inherited: "xhigh" }), "low", "declared beats the config default");
+  assert.equal(resolveThinkingLevel({ hasModel: false, roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high" }), "low", "declared absent: roleDefaults resumes (unchanged order)");
+});
+
+test("resolveThinkingLevel keeps the per-call override above the declared level", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: false, override: "low", declaredLevel: "xhigh", inherited: "off" }), "low");
+  assert.equal(
+    resolveThinkingLevel({ hasModel: false, override: "off", declaredLevel: "max", roleDefaultLevel: "high", configLevel: "xhigh", roleLevel: "medium" }),
+    "off",
+  );
+});
+
+test("resolveThinkingLevel applies the declared level to model-pinned roles (hasModel skips only inherited)", () => {
+  assert.equal(resolveThinkingLevel({ hasModel: true, declaredLevel: "xhigh", inherited: "off" }), "xhigh", "declared is an explicit layer: pinned roles receive it");
+  assert.equal(resolveThinkingLevel({ hasModel: true, declaredLevel: "low", roleDefaultLevel: "high" }), "low", "declared beats roleDefaults even for pinned roles");
+});
+
 test("resolveThinkingLevel passes the inherited level through as-is (plain inheritance)", () => {
   assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "high" }), "high");
   assert.equal(resolveThinkingLevel({ hasModel: false, inherited: "off" }), "off", "off stays off");
@@ -1151,9 +1176,65 @@ test("resolveThinkingLevel passes the inherited level through as-is (plain inher
   assert.equal(resolveThinkingLevel({ hasModel: false }), undefined);
 });
 
-// S8b — resolveDispatchThinking (ADR 0020 + issue #39): the per-task/per-step
+const toolCallBlock = (name: string, args: Record<string, unknown>) => ({
+  type: "toolCall" as const,
+  id: "c",
+  name,
+  arguments: args,
+});
+const messageEntryWith = (content: Array<{ type?: string; name?: string; arguments?: Record<string, unknown> }>) => ({
+  type: "message" as const,
+  message: { role: "assistant", content },
+});
+
+// S8c — findDeclaredThinkingLevel (A-axis): the declared level is the last
+// set-thinking-level call's requested level, read from the session transcript.
+test("findDeclaredThinkingLevel returns undefined with no set-thinking-level call", () => {
+  assert.equal(findDeclaredThinkingLevel([]), undefined);
+  assert.equal(findDeclaredThinkingLevel([messageEntryWith([toolCallBlock("subagent", {})])]), undefined);
+  assert.equal(findDeclaredThinkingLevel([messageEntryWith([toolCallBlock("read", { path: "x" })])]), undefined);
+  assert.equal(findDeclaredThinkingLevel([{ type: "model_change" }]), undefined);
+});
+
+test("findDeclaredThinkingLevel returns the last set-thinking-level call's level", () => {
+  const entries = [
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "low" })]),
+    messageEntryWith([toolCallBlock("subagent", { agent: "r" })]),
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "xhigh" })]),
+  ];
+  assert.equal(findDeclaredThinkingLevel(entries), "xhigh");
+});
+
+test("findDeclaredThinkingLevel stays sticky across interleaved model changes and continuation", () => {
+  const entries = [
+    { type: "model_change", provider: "sensenova", modelId: "deepseek-v4-flash" },
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "xhigh" })]),
+    { type: "model_change", provider: "sensenova", modelId: "deepseek-v4-pro" },
+    messageEntryWith([toolCallBlock("subagent", { agent: "r" })]),
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "medium" })]),
+  ];
+  assert.equal(findDeclaredThinkingLevel(entries), "medium", "the last declaration wins regardless of model changes");
+});
+
+test("findDeclaredThinkingLevel ignores invalid levels and accepts off", () => {
+  const entries = [
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "bogus" })]),
+    messageEntryWith([toolCallBlock("set-thinking-level", { level: "off" })]),
+  ];
+  assert.equal(findDeclaredThinkingLevel(entries), "off");
+  assert.equal(
+    findDeclaredThinkingLevel([
+      messageEntryWith([toolCallBlock("set-thinking-level", { level: "off" })]),
+      messageEntryWith([toolCallBlock("set-thinking-level", { level: "bogus" })]),
+    ]),
+    "off",
+    "the last invalid call does not erase an earlier valid declaration",
+  );
+});
+
+// S8b — resolveDispatchThinking (ADR 0020 + issue #39 + A-axis): the per-task/per-step
 // layer sits above the call-level override; the decision layers then order
-// roleDefaults > config > preset > inherited (plain).
+// declared > roleDefaults > config > preset > inherited (plain).
 test("resolveDispatchThinking prefers the per-task level over the call-level override", () => {
   const agent = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
   assert.equal(
@@ -1216,6 +1297,24 @@ test("resolveDispatchThinking orders the decision layers and applies plain inher
   const pinned = { name: "r", description: "", systemPrompt: "", model: "sensenova/deepseek-v4-flash", source: "embedded" as const };
   assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high" }), undefined, "pinned skips the inherited layer");
   assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "high", roleDefaultLevel: "low" }), "low", "pinned still honors roleDefaults");
+});
+
+test("resolveDispatchThinking threads the declared level above roleDefaults and honors per-task first", () => {
+  const preset = { name: "r", description: "", systemPrompt: "", thinkingLevel: "medium", source: "embedded" as const };
+  assert.equal(
+    resolveDispatchThinking(preset, { thinkingLevel: "xhigh", declaredLevel: "max", roleDefaultLevel: "low", configLevel: "high" }),
+    "max",
+    "declared beats roleDefaults, config, and preset",
+  );
+  assert.equal(
+    resolveDispatchThinking(preset, { thinkingLevel: "xhigh", declaredLevel: "max", roleDefaultLevel: "low", configLevel: "high" }, "off"),
+    "off",
+    "per-task level still beats the declared level",
+  );
+  const pinned = { name: "r", description: "", systemPrompt: "", model: "sensenova/deepseek-v4-flash", source: "embedded" as const };
+  assert.equal(resolveDispatchThinking(pinned, { thinkingLevel: "xhigh", declaredLevel: "max" }), "max", "model-pinned roles receive the declared layer");
+  const bare = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
+  assert.equal(resolveDispatchThinking(bare, { thinkingLevel: "xhigh", declaredLevel: "max" }), "max", "declared beats inherited for preset-less roles");
 });
 
 test("resolveDispatchThinking treats a roleDefaults-pinned model like a role-pinned one (hasModel widening)", () => {
