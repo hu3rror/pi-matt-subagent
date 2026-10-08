@@ -36,9 +36,6 @@
   "pi": {
     "extensions": [
       "./extensions"
-    ],
-    "prompts": [
-      "./prompts"
     ]
   },
   "devDependencies": {

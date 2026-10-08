@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import {
@@ -54,6 +55,7 @@ import {
   discoverAgents,
   effectiveResearchChildExtensions,
   emptyUsage,
+  expandPresetText,
   findDeclaredThinkingLevel,
   formatConfigOverview,
   formatRunSnapshot,
@@ -62,6 +64,7 @@ import {
   isConfigKey,
   isConfigSetKey,
   isTerminalRunStatus,
+  loadWorkflowPreset,
   mergeToolParams,
   omitConfigKey,
   parseConfigFile,
@@ -73,6 +76,7 @@ import {
   pathIsInsidePackage,
   runStageLine,
   planRunThinking,
+  presetsDirOf,
   readLogTail,
   researchStatusContent,
   RESEARCH_RESULT_SCHEMA,
@@ -1101,6 +1105,30 @@ export default function (pi: ExtensionAPI) {
     const id = await pickRun(ctx, "Show log for which run?", subagentRuns.snapshot().filter((r) => r.logPath != null));
     if (id) tailRun(id, ctx);
   };
+
+  // -----------------------------------------------------------------------
+  // Workflow presets (issue #41): the three slash commands ship as markdown
+  // files in `prompts/` and are registered behind the `hideWorkflowPresets`
+  // knob (hidden = not registered). The knob is read at load, so applying it
+  // needs `/reload`; the tools and `/subagents` are never gated. Expansion is
+  // byte-equivalent to pi's prompt-template expansion (rationale: ADR 0023).
+  // -----------------------------------------------------------------------
+  const presetsDir = presetsDirOf(fileURLToPath(import.meta.url));
+  if (!readConfigStatus().effective.hideWorkflowPresets) {
+    for (const file of ["code-review.md", "design-it-twice.md", "research.md"]) {
+      const preset = loadWorkflowPreset(path.join(presetsDir, file));
+      if (!preset) {
+        console.error(`[matt-subagent] workflow preset not found: ${path.join(presetsDir, file)}`);
+        continue;
+      }
+      pi.registerCommand(preset.name, {
+        description: preset.description,
+        handler: async (args) => {
+          await pi.sendUserMessage(expandPresetText(preset.body, args), { deliverAs: "steer" });
+        },
+      });
+    }
+  }
 
   pi.registerCommand("subagents", {
     description:

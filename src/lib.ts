@@ -95,6 +95,11 @@ const CONFIG_KEY_SPECS = [
   { key: "dispatchDefaultModel", kind: "model" as const, optional: true as const },
   { key: "dispatchDefaultThinkingLevel", kind: "level" as const, optional: true as const },
   { key: "roleDefaults", kind: "roleDefaults" as const, optional: true as const },
+  {
+    key: "hideWorkflowPresets",
+    kind: "boolean" as const,
+    optional: false as const,
+  },
 ] as const;
 type ConfigKind = (typeof CONFIG_KEY_SPECS)[number]["kind"];
 interface ConfigKeySpec {
@@ -149,6 +154,13 @@ export interface EffectiveConfig {
    * extensions (network fully off).
    */
   researchChildExtensions?: string[];
+  /**
+   * True hides the three built-in workflow presets (`/code-review`,
+   * `/design-it-twice`, `/research`) from `/` completion (issue #41). Read at
+   * extension load, so a change needs `/reload`. Never gates the tools or
+   * `/subagents`.
+   */
+  hideWorkflowPresets: boolean;
 }
 
 /** Built-in defaults — the single source for the blocking limits too. */
@@ -163,6 +175,7 @@ export function defaultConfig(): EffectiveConfig {
     dispatchDefaultThinkingLevel: undefined,
     roleDefaults: undefined,
     researchChildExtensions: undefined,
+    hideWorkflowPresets: false,
   };
 }
 
@@ -216,6 +229,9 @@ function decodeConfigValue(
     return typeof value === "number" && Number.isInteger(value) && value >= 1
       ? { valid: true, value }
       : { valid: false };
+  }
+  if (spec.kind === "boolean") {
+    return typeof value === "boolean" ? { valid: true, value } : { valid: false };
   }
   if (value === null) {
     return spec.optional ? { valid: true, value: undefined } : { valid: false };
@@ -346,6 +362,13 @@ export function parseConfigSetValue(
     }
     return { ok: true, value: n };
   }
+  // Boolean knob: only true/false; inherit/empty has no meaning (non-optional).
+  if (spec.kind === "boolean") {
+    const trimmed = rawValue.trim();
+    if (trimmed === "true") return { ok: true, value: true };
+    if (trimmed === "false") return { ok: true, value: false };
+    return { ok: false, reason: `${key} must be "true" or "false", got "${rawValue}"` };
+  }
   // Optional knobs: inherit/empty clears the override.
   const trimmed = rawValue.trim();
   if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
@@ -472,7 +495,7 @@ export interface ConfigBlockingLimits {
   perTaskOutputCap: number;
 }
 
-type ConfigValue = number | string | string[] | ThinkingLevel | RoleDefaults | undefined;
+type ConfigValue = number | string | string[] | boolean | ThinkingLevel | RoleDefaults | undefined;
 
 /** Returns one knob's effective value off a config without indexing casts. */
 export function getConfigValue(cfg: EffectiveConfig, key: ConfigKey): ConfigValue {
@@ -553,6 +576,140 @@ export function formatConfigOverview(status: ConfigStatus, configPath: string, e
   return lines.join("\n");
 }
 
+
+// ---------------------------------------------------------------------------
+// Workflow presets (issue #41)
+//   The three built-in slash-command presets ship as markdown files and are
+//   registered by the extension as config-gated commands behind the
+//   `hideWorkflowPresets` knob. This section owns the pure mechanics: reading
+//   a preset file (frontmatter + body), shell-like argument parsing, and
+//   argument substitution byte-equivalent to pi's prompt-template expansion.
+// ---------------------------------------------------------------------------
+
+/** A loaded workflow-preset file: frontmatter description plus the body text. */
+export interface WorkflowPreset {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/**
+ * The package's `prompts/` directory relative to a module file inside the
+ * package (`extensions/…` or `src/…`), shared by the extension and the tests.
+ */
+export function presetsDirOf(moduleFilePath: string): string {
+  return path.join(path.dirname(moduleFilePath), "..", "prompts");
+}
+
+/**
+ * Splits a `---\n…\n---\n` frontmatter header off a preset markdown file.
+ * Only `description` is read; other frontmatter keys are ignored and a file
+ * without a header is treated as all body.
+ */
+export function parsePresetFrontmatter(raw: string): { description?: string; body: string } {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(raw);
+  if (!match) return { body: raw };
+  const body = raw.slice(match[0].length);
+  let description: string | undefined;
+  for (const line of match[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9-]+):\s*(.*)$/.exec(line);
+    if (!kv) continue;
+    if (kv[1] === "description") description = kv[2].replace(/^["']|["']$/g, "");
+  }
+  return {
+    ...(description !== undefined ? { description } : {}),
+    body,
+  };
+}
+
+/** Reads a preset file from disk; undefined when unreadable. */
+export function loadWorkflowPreset(filePath: string): WorkflowPreset | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const { description, body } = parsePresetFrontmatter(raw);
+  return {
+    name: path.basename(filePath).replace(/\.md$/, ""),
+    description: description ?? "",
+    body,
+  };
+}
+
+/**
+ * Shell-like argument splitting, replicating pi's prompt-template expansion
+ * (`parseCommandArgs`): whitespace-separated tokens with single/double-quote
+ * grouping. An empty string yields no args.
+ */
+export function parsePresetArgs(argsString: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let inQuote: string | null = null;
+  for (let i = 0; i < argsString.length; i++) {
+    const char = argsString[i];
+    if (inQuote) {
+      if (char === inQuote) inQuote = null;
+      else current += char;
+    } else if (char === '"' || char === "'") {
+      inQuote = char;
+    } else if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+    } else {
+      current += char;
+    }
+  }
+  if (current) args.push(current);
+  return args;
+}
+
+/**
+ * Argument substitution replicating pi's `substituteArgs`: `$@` /
+ * `$ARGUMENTS` (all args joined), `${@:-default}` (value or default), `${@:N}`
+ * / `${@:N:L}` (argument slices), and `$N` (one arg). Non-template `$` stays
+ * as-is. Kept byte-equivalent so the commands expand like the templates did.
+ */
+export function substitutePresetText(content: string, args: string[]): string {
+  const allArgs = args.join(" ");
+  return content.replace(
+    /\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g,
+    (
+      _match,
+      defaultTarget: string | undefined,
+      defaultValue: string | undefined,
+      sliceStart: string | undefined,
+      sliceLength: string | undefined,
+      simple: string | undefined,
+    ) => {
+      if (defaultTarget) {
+        const value =
+          defaultTarget === "@" || defaultTarget === "ARGUMENTS"
+            ? allArgs
+            : args[parseInt(defaultTarget, 10) - 1];
+        return value || defaultValue || "";
+      }
+      if (sliceStart) {
+        let start = parseInt(sliceStart, 10) - 1;
+        if (start < 0) start = 0;
+        if (sliceLength) {
+          return args.slice(start, start + parseInt(sliceLength, 10)).join(" ");
+        }
+        return args.slice(start).join(" ");
+      }
+      if (simple === "ARGUMENTS" || simple === "@") return allArgs;
+      return args[parseInt(simple ?? "", 10) - 1] ?? "";
+    },
+  );
+}
+
+/** Parses the raw command argument string and expands a preset body. */
+export function expandPresetText(content: string, argsString: string): string {
+  return substitutePresetText(content, parsePresetArgs(argsString));
+}
 
 // ---------------------------------------------------------------------------
 // Tool parameter schemas and the `input` escape hatch (ADR 0011)

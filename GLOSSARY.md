@@ -42,7 +42,7 @@ _Avoid_: combined review, merged review
 _Avoid_: brainstorming, options
 
 **workflow preset**:
-预编码一次编排（single/parallel/chain）的 prompt 模板。
+预编码一次编排（single/parallel/chain）的 prompt 模板。三个内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）由扩展注册为斜杠命令，按 `hideWorkflowPresets` 配置决定注册与否（issue #41）：隐藏时不注册、从 `/` 补全消失，`/subagents` 与三个工具不受影响。
 _Avoid_: command, recipe
 
 **chain step（链式步骤）**:
@@ -102,7 +102,7 @@ _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 _Avoid_: 设置面板, 配置文件（笼统）
 
 **config knob（配置旋钮）**:
-extension config 暴露的单个可调项，v1 九个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
+extension config 暴露的单个可调项，v1 十个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）、`hideWorkflowPresets`（布尔，默认 false；为 true 时扩展不注册三个内置 workflow preset，加载时读取故需 `/reload` 生效，issue #41）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
 _Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:

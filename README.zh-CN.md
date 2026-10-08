@@ -33,7 +33,7 @@ pi install npm:pi-matt-subagent
 pi install <path-to-this-repo>
 ```
 
-两种方式都会安装扩展和 prompt 模板（`/code-review`、`/design-it-twice`、`/research`；`/subagents` 随扩展内置）。用 `pi list` 验证；prompt 会出现在 TUI 的 `/` 补全里。
+两种方式都会安装扩展，扩展注册三个 workflow preset（`/code-review`、`/design-it-twice`、`/research`）和 `/subagents` 命令。用 `pi list` 验证；preset 会出现在 TUI 的 `/` 补全里，除非用 `hideWorkflowPresets` 配置隐藏（隐藏后需 `/reload` 生效）。
 
 ## 快速上手
 
@@ -82,7 +82,7 @@ pi install <path-to-this-repo>
 
 ## 配置
 
-配置项存放在按需创建的文件 `~/.pi/agent/extensions/matt-subagent.json`。加载不会写它——只有 `set` 或 `reset` 时文件才会出现——删除文件即恢复全部默认值。修改在下次运行生效，不需要 `/reload`。
+配置项存放在按需创建的文件 `~/.pi/agent/extensions/matt-subagent.json`。加载不会写它——只有 `set` 或 `reset` 时文件才会出现——删除文件即恢复全部默认值。修改在下次运行生效，不需要 `/reload`——例外：`hideWorkflowPresets` 在扩展加载时决定命令注册，需 `/reload` 生效。
 
 | 键 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -95,6 +95,9 @@ pi install <path-to-this-repo>
 | `dispatchDefaultModel` | （继承） | 调用和角色都未指定时的默认 `provider/id` |
 | `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对六个内置角色生效，不再是死配置）；未设时 → 继承主会话档位（原样） |
 | `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
+| `hideWorkflowPresets` | `false` | 隐藏三个内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）——适合已安装对应 skills（覆盖同一工作流）的用户。扩展加载时读取，需 `/reload` 生效。不影响三个工具与 `/subagents` |
+
+`hideWorkflowPresets` 开启后，输入被隐藏的 preset 名称与任何未知 `/` 命令一样：文本原样发给模型。
 
 通过 `/subagents config` 操作：
 
@@ -103,6 +106,7 @@ pi install <path-to-this-repo>
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set roleDefaults.standards-reviewer.thinkingLevel low
 /subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config set hideWorkflowPresets true
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset
@@ -147,7 +151,7 @@ src/blocking-protocol.ts       纯阻塞子进程协议：JSON-lines stdout 累�
 src/blocking-runner.ts         纯阻塞编排——单个 / 并行 / 链式计划
 src/*.test.ts                  单元测试（node --test，不需要 pi 运行时）
 scripts/                       token 基准和 e2e 脚本（仅开发用）
-prompts/                       三个斜杠命令的模板
+prompts/                       三个 workflow preset 的 markdown 源（扩展加载时读取）
 docs/adr/                      19 条已记录的决策（双通道、research 重构、配置面、usage 行……）
 GLOSSARY.md                    领域词汇表（subagent、role、blocking、background、push……）
 ```

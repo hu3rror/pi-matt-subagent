@@ -26,6 +26,7 @@ import {
   EMBEDDED_ROLES,
   emptyUsage,
   estimateToolSurfaceTokens,
+  expandPresetText,
   findDeclaredThinkingLevel,
   formatBlockingToolError,
   formatConfigOverview,
@@ -38,14 +39,17 @@ import {
   isToolError,
   lastAssistantText,
   lastOutputLine,
+  loadWorkflowPreset,
   mergeToolParams,
   omitConfigKey,
   parseConfigFile,
   parseConfigSetValue,
+  parsePresetArgs,
   parseRoleDefaultFieldValue,
   parseRoleDefaultsKey,
   parseSubagentsArgs,
   planRunThinking,
+  presetsDirOf,
   readLogTail,
   researchStatusContent,
   RESEARCH_FULL_PARAMS,
@@ -65,6 +69,7 @@ import {
   serializeConfig,
   setConfigValue,
   setRoleDefaultField,
+  substitutePresetText,
   RUN_STATUS_ICONS,
   RUN_STATUSES,
   scopeAllowsProject,
@@ -3022,4 +3027,147 @@ test("getPiInvocation falls back to pi on PATH when no current script exists", (
   } finally {
     process.argv[1] = saved;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Workflow preset expansion and the hideWorkflowPresets knob (issue #41)
+//   Golden expectations are hand-expanded from the shipped prompts/*.md files
+//   using pi's documented template substitution semantics — an independent
+//   source of truth, so a mismatch means the extension would diverge from the
+//   old template behavior.
+// ---------------------------------------------------------------------------
+
+const PRESETS_DIR = presetsDirOf(fileURLToPath(import.meta.url));
+
+test("parsePresetArgs splits shell-like quoted arguments", () => {
+  assert.deepEqual(parsePresetArgs(""), []);
+  assert.deepEqual(parsePresetArgs("HEAD~1"), ["HEAD~1"]);
+  assert.deepEqual(parsePresetArgs('"verify the claim that X"'), ["verify the claim that X"]);
+  assert.deepEqual(parsePresetArgs("a \"b c\" d"), ["a", "b c", "d"]);
+  assert.deepEqual(parsePresetArgs("'single' \"double\" plain"), ["single", "double", "plain"]);
+});
+
+test("substitutePresetText replicates pi template substitution for $@ $ARGUMENTS ${@:-d} ${@:N} $N", () => {
+  assert.equal(substitutePresetText("for `$@`", ["src/lib.ts"]), "for `src/lib.ts`");
+  assert.equal(substitutePresetText("for `$@`", []), "for ``");
+  assert.equal(substitutePresetText("since `${@:-HEAD~1}`", []), "since `HEAD~1`");
+  assert.equal(substitutePresetText("since `${@:-HEAD~1}`", ["main"]), "since `main`");
+  assert.equal(substitutePresetText("$ARGUMENTS", ["a", "b"]), "a b");
+  assert.equal(substitutePresetText("${ARGUMENTS:-none}", []), "none");
+  assert.equal(substitutePresetText("$1 and $2", ["a", "b"]), "a and b");
+  assert.equal(substitutePresetText("$1", []), "");
+  assert.equal(substitutePresetText("${@:2}", ["a", "b", "c"]), "b c");
+  assert.equal(substitutePresetText("${@:2:1}", ["a", "b", "c"]), "b");
+  // pi's regex treats any $N as an argument reference, even a dollar amount.
+  assert.equal(substitutePresetText("cost $5", []), "cost ");
+  assert.equal(substitutePresetText("cost $5", ["a", "b", "c", "d", "e"]), "cost e");
+});
+
+test("loadWorkflowPreset strips frontmatter into name/description/body", () => {
+  const preset = loadWorkflowPreset(path.join(PRESETS_DIR, "code-review.md"));
+  assert.ok(preset);
+  assert.equal(preset!.name, "code-review");
+  assert.equal(
+    preset!.description,
+    "Two-axis review (Standards + Spec) of the diff since a fixed point, run as two parallel blocking subagents",
+  );
+  assert.ok(preset!.body.startsWith("Review the changes since `${@:-HEAD~1}` (a commit SHA"));
+  assert.ok(preset!.body.endsWith("total findings and the worst issue within that axis.\n"));
+  assert.equal(loadWorkflowPreset(path.join(PRESETS_DIR, "does-not-exist.md")), undefined);
+});
+
+test("expanding the shipped code-review preset with no args applies the HEAD~1 default (golden)", () => {
+  const preset = loadWorkflowPreset(path.join(PRESETS_DIR, "code-review.md"))!;
+  assert.equal(
+    expandPresetText(preset.body, ""),
+    `Review the changes since \`HEAD~1\` (a commit SHA, branch, tag, or merge-base) along two axes, running each axis as a parallel **blocking** subagent via the \`subagent\` tool's \`tasks\` array.
+
+0. If no ref was given and you fell back to the default \`HEAD~1\`, open with one line stating the ref you resolved so the user can correct it. Never invent a ref beyond the default.
+1. Resolve the fixed point: let \`R\` be the ref you review against (the one above). Run \`git rev-parse <R>\`, confirm \`git diff <R>...HEAD\` is non-empty, and capture \`git log <R>..HEAD --oneline\`.
+2. Identify the spec source (issue refs in commits, an argument, or a file under \`docs/\`, \`specs/\`, \`.scratch/\`) and the standards sources (e.g. \`CODING_STANDARDS.md\`, \`CONTRIBUTING.md\`). If the spec is missing, note it and skip the Spec axis.
+3. Call the \`subagent\` tool ONCE with a \`tasks\` array (parallel, blocking — the call returns only after both axes finish):
+   - agent \`standards-reviewer\`, task = the diff command + commit list + the standards-source file list + the full smell baseline, with the brief "report under 400 words; distinguish hard violations from judgement calls; skip anything tooling enforces".
+   - agent \`spec-reviewer\`, task = the diff command + commit list + the spec path or contents, with the brief "report missing/partial, scope creep, and wrong-looking implementations, quoting spec lines; under 400 words".
+4. Present the two reports under \`## Standards\` and \`## Spec\`, verbatim. Do not merge or rerank. End with one line per axis: total findings and the worst issue within that axis.
+`,
+  );
+});
+
+test("expanding the shipped code-review preset substitutes an explicit ref (golden, first line)", () => {
+  const preset = loadWorkflowPreset(path.join(PRESETS_DIR, "code-review.md"))!;
+  const expanded = expandPresetText(preset.body, "main");
+  assert.equal(
+    expanded.split("\n")[0],
+    "Review the changes since `main` (a commit SHA, branch, tag, or merge-base) along two axes, running each axis as a parallel **blocking** subagent via the `subagent` tool's `tasks` array.",
+  );
+});
+
+test("expanding the shipped design-it-twice preset substitutes the candidate (golden)", () => {
+  const preset = loadWorkflowPreset(path.join(PRESETS_DIR, "design-it-twice.md"))!;
+  assert.equal(
+    expandPresetText(preset.body, "src/lib.ts"),
+    `Explore alternative interfaces for the chosen deepening candidate \`src/lib.ts\` using the design-it-twice pattern, via the \`subagent\` tool's \`tasks\` array (parallel, blocking).
+
+0. If no candidate was given, ask the user which module or seam to explore before spawning anything — suggest candidates from \`GLOSSARY.md\`, a recent \`/improve-codebase-architecture\` survey, or the code under discussion. Never invent a candidate.
+1. Frame the problem space for the user: the constraints, the dependencies and their category, and a rough illustrative sketch. Show it, then proceed.
+2. Call the \`subagent\` tool ONCE with a \`tasks\` array of 3-4 \`design-explorer\` tasks. Each task carries the same technical brief (file paths, coupling details, dependency category, what sits behind the seam, plus the architecture vocabulary and the project's \`GLOSSARY.md\` domain vocabulary) and a DIFFERENT constraint:
+   - "Minimize the interface: aim for 1-3 entry points max. Maximise leverage per entry point."
+   - "Maximise flexibility: support many use cases and extension."
+   - "Optimise for the most common caller: make the default case trivial."
+   - (optional) "Design around ports & adapters for cross-seam dependencies."
+3. Present each design sequentially, then compare by depth, locality, and seam placement. Give your own recommendation; propose a hybrid if elements combine well. Be opinionated.
+`,
+  );
+});
+
+test("expanding the shipped research preset substitutes the question twice (golden)", () => {
+  const preset = loadWorkflowPreset(path.join(PRESETS_DIR, "research.md"))!;
+  assert.equal(
+    expandPresetText(preset.body, "verify the claim that X"),
+    `Spin up a **background** researcher for \`verify the claim that X\` via the \`research\` tool, so you keep working while it reads.
+
+0. If no question was given, ask the user what to research before starting — a fuzzy or invented question wastes a background run. Sharpen the question in the \`task\` you pass rather than researching a fuzzy version of it.
+1. Decide where the findings file goes: follow the repo's existing convention for research/notes files (\`docs/\`, a notes dir, or wherever similar notes already live); if there is none, pick a sensible location (e.g. \`docs/research-<slug>.md\` or next to the topic it concerns) and state it. Prefer an absolute path for the tool call — the tool also accepts repo-relative paths, resolved against the working directory, so an absolute path just avoids that ambiguity.
+2. Call the \`research\` tool once with \`task: verify the claim that X\` and that findings path. The tool returns immediately with a handle — do NOT wait, and do NOT poll for the file.
+3. Tell the user the findings path and the log location from the handle, then continue with whatever you were doing.
+4. When the completion **push** arrives (succeeded / failed / terminated / aborted), read the findings file and use it — summarizing, citing, or acting on it as appropriate. A failure/stop push may leave findings partial: judge by content, and re-run if the answer isn't there.
+
+The researcher investigates against primary sources (official docs, source code, specs, first-party APIs) and writes each claim with its source. If the question is vague, sharpen it in the \`task\` you pass (e.g. add the specific claim or API surface you want verified) rather than researching a fuzzy version of it.
+`,
+  );
+});
+
+test("defaultConfig sets hideWorkflowPresets to false", () => {
+  assert.equal(defaultConfig().hideWorkflowPresets, false);
+});
+
+test("parseConfigFile decodes the boolean hideWorkflowPresets knob and degrades non-booleans", () => {
+  const hidden = parseConfigFile('{"hideWorkflowPresets": true}');
+  assert.equal(hidden.effective.hideWorkflowPresets, true);
+  assert.ok(hidden.present.has("hideWorkflowPresets"));
+  assert.equal(hidden.degraded.has("hideWorkflowPresets"), false);
+
+  const visible = parseConfigFile('{"hideWorkflowPresets": false}');
+  assert.equal(visible.effective.hideWorkflowPresets, false);
+
+  const degraded = parseConfigFile('{"hideWorkflowPresets": "yes"}');
+  assert.equal(degraded.effective.hideWorkflowPresets, false);
+  assert.ok(degraded.degraded.has("hideWorkflowPresets"));
+});
+
+test("parseConfigSetValue accepts true/false and rejects other values for hideWorkflowPresets", () => {
+  assert.deepEqual(parseConfigSetValue("hideWorkflowPresets", "true"), { ok: true, value: true });
+  assert.deepEqual(parseConfigSetValue("hideWorkflowPresets", "false"), { ok: true, value: false });
+  assert.ok(!parseConfigSetValue("hideWorkflowPresets", "yes").ok);
+  assert.ok(!parseConfigSetValue("hideWorkflowPresets", "inherit").ok);
+  assert.ok(!parseConfigSetValue("hideWorkflowPresets", "").ok);
+});
+
+test("configKeyLabel renders the boolean knob with default/customized markers", () => {
+  assert.equal(
+    configKeyLabel("hideWorkflowPresets", parseConfigFile(undefined)),
+    "hideWorkflowPresets = false [default]",
+  );
+  const custom = parseConfigFile('{"hideWorkflowPresets": true}');
+  assert.equal(configKeyLabel("hideWorkflowPresets", custom), "hideWorkflowPresets = true [customized]");
 });

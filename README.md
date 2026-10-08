@@ -33,7 +33,7 @@ Or from a local checkout:
 pi install <path-to-this-repo>
 ```
 
-Both install the extension and the prompt templates (`/code-review`, `/design-it-twice`, `/research`; `/subagents` ships with the extension). Verify with `pi list`; the prompts appear in the TUI's `/` completion.
+Both install the extension, which registers the three workflow presets (`/code-review`, `/design-it-twice`, `/research`) and the `/subagents` command. Verify with `pi list`; the presets appear in the TUI's `/` completion unless hidden via the `hideWorkflowPresets` config knob (which needs `/reload` to take effect).
 
 ## Quick start
 
@@ -82,7 +82,7 @@ Thinking effort resolves deterministically through two orthogonal layers. The de
 
 ## Configuration
 
-Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-subagent.json`. Loading never writes it — the file appears only when you `set` or `reset` — and deleting it restores all defaults. Values apply to the next run without `/reload`.
+Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-subagent.json`. Loading never writes it — the file appears only when you `set` or `reset` — and deleting it restores all defaults. Values apply to the next run without `/reload` — except `hideWorkflowPresets`, which gates command registration at load and takes effect on `/reload`.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -95,6 +95,9 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the six embedded roles, no longer dead config); absent → inherited (main-session level as-is) |
 | `roleDefaults` | (inherit) | Per-role dispatch customization: `{ "<role>": { model?, thinkingLevel? } }`. `roleDefaults.<role>.thinkingLevel` beats the config default and the role's own preset; `roleDefaults.<role>.model` beats the config default model. Edit via dotted keys: `config set roleDefaults.standards-reviewer.thinkingLevel low` |
+| `hideWorkflowPresets` | `false` | Hides the three workflow presets (`/code-review`, `/design-it-twice`, `/research`) from `/` completion — for users with the matching skills installed, which cover the same workflows. Read at extension load, so needs `/reload`. Never gates the three tools or `/subagents` |
+
+When `hideWorkflowPresets` is on, typing a hidden preset name behaves like any unknown `/` command: the text goes to the model unchanged.
 
 Drive it from `/subagents config`:
 
@@ -103,6 +106,7 @@ Drive it from `/subagents config`:
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set roleDefaults.standards-reviewer.thinkingLevel low
 /subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config set hideWorkflowPresets true
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset
@@ -150,7 +154,7 @@ src/blocking-protocol.ts       pure blocking-child protocol: JSON-lines stdout a
 src/blocking-runner.ts         pure blocking orchestration — single / parallel / chain plans
 src/*.test.ts                  unit tests (node --test, no pi runtime)
 scripts/                       token benchmark + e2e scripts (dev-only)
-prompts/                       the three slash-command templates
+prompts/                       the three workflow-preset markdown sources (read by the extension at load)
 docs/adr/                      19 recorded decisions (dual channel, research redesign,
                                config surface, usage line, …)
 GLOSSARY.md                    domain glossary (subagent, role, blocking, background, push, …)
