@@ -2,7 +2,7 @@
   "name": "pi-matt-subagent",
   "version": "0.11.0",
   "type": "module",
-  "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling).",
+  "description": "Blocking + background subagents for skills that require subagents (code-review, design-it-twice, improve-codebase-architecture, research, wayfinder, grilling, no-comments), including a pstack-derived comment-audit role.",
   "keywords": [
     "pi-package"
   ],

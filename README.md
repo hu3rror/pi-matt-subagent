@@ -6,7 +6,7 @@
   <img src="docs/banner.webp" alt="pi-matt-subagent: from Matt Pocock skills to blocking/background subagents" width="800">
 </div>
 
-A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) into real tool calls. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer — it starts real pi subagents (separate subprocesses, or an in-process session for background work), waits for them, and hands you their results.
+A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent instructions in [Matt Pocock's skills](https://github.com/mattpocock) — and [pstack's `no-comments` workflow](https://github.com/cursor/plugins/tree/main/pstack) — into real tool calls. When a skill says *"spawn sub-agents in parallel"* or *"fire the research subagents"*, this plugin is the execution layer — it starts real pi subagents (separate subprocesses, or an in-process session for background work), waits for them, and hands you their results.
 
 > [!WARNING]
 > This plugin registers a tool named `subagent`; similar subagents extensions do too. Don't run them side by side — install one or the other, never both.
@@ -16,7 +16,7 @@ A [pi](https://github.com/earendil-works/pi) plugin that turns the subagent inst
 - **Two tools, two semantics** — `subagent` (blocking) and `research` (background), matching exactly what the upstream skills ask for.
 - **Blocking subagents** — single, parallel, or chained agents run in separate subprocesses; results come back in one tool result, with a `{previous}` placeholder for chain handoffs.
 - **Background research** — an in-process second session writes cited findings to a file while you keep working; the completion state (`succeeded` / `failed` / `terminated` / `aborted`) is pushed into your context — no polling.
-- **Six bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder` — the same jobs the skills describe.
+- **Seven bundled roles** — `standards-reviewer`, `spec-reviewer`, `design-explorer`, `architecture-scout`, `researcher`, `fact-finder`, and `comment-sicko` (a report-only comment audit for the `no-comments` workflow).
 - **Four slash commands** — `/code-review <ref>`, `/design-it-twice <candidate>`, `/research <question>`, and `/subagents` for run management.
 - **Per-run overrides** — pin one run's model via the public `model` field; thinking effort is deterministic (per-task > per-call override > conversationally-declared session level > per-role customization > config default > role preset > inherited main-session level, as-is), with the `set-thinking-level` tool as the only model-visible channel for changing it.
 - **Live run management** — a footer counter (`⧗ N subagents running`); `/subagents` to follow, stop, or inspect runs.
@@ -76,7 +76,7 @@ Model names resolve against your `~/.pi/agent/models.json` registry as `provider
 
 ## Roles and dispatch
 
-Six bundled roles come with the plugin. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation).
+Seven bundled roles come with the plugin: six mirror the jobs Matt Pocock's skills describe, and `comment-sicko` is a report-only comment audit adapted in spirit from pstack's `no-comments` workflow (MIT) — it reports, its caller fixes. User agents from `~/.pi/agent/agents/` and project agents from `.pi/agents/` override bundled roles by name (project agents sit behind a trust confirmation).
 
 Thinking effort resolves deterministically through two orthogonal layers. The decision-source hierarchy is **per-task/per-step `thinkingLevel` > per-call override (`input.thinkingOverride`) > declared (the conversationally-declared session level — the requested level of the last `set-thinking-level` call, read from the session transcript, sticky across model switches and session continuation) > `roleDefaults` per-role tier > config default (`dispatchDefaultThinkingLevel`) > role preset > inherited** (the main-session level, passed through **as-is** — a declared depth like `xhigh` propagates to preset-less roles). The result then passes through the target model's capability clamp (`clampThinkingLevel`, upward-first) — requested vs effective are both recorded, and a clamp shows as `high (req: xhigh)`. The public `thinkingLevel` parameter is gone (it was the randomness source); the only model-visible channel for changing effort is the `set-thinking-level` tool, called only when the user explicitly asks for a different depth. Model-pinned roles (frontmatter/embedded or `roleDefaults.<role>.model`) skip only the inherited layer. The dispatch model resolves per-call-first — per-call override > role-pinned model > `roleDefaults` model > config default > inherited session model — for both tools.
 
@@ -93,7 +93,7 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `researchChildExtensions` | (curated) | npm packages loaded into a research child: default `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`; only an explicit empty array disables extensions |
 | `logTailBytes` | 4096 | Byte cap for `/subagents tail` log reads |
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
-| `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the six embedded roles, no longer dead config); absent → inherited (main-session level as-is) |
+| `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the seven embedded roles, no longer dead config); absent → inherited (main-session level as-is) |
 | `roleDefaults` | (inherit) | Per-role dispatch customization: `{ "<role>": { model?, thinkingLevel? } }`. `roleDefaults.<role>.thinkingLevel` beats the config default and the role's own preset; `roleDefaults.<role>.model` beats the config default model. Edit via dotted keys: `config set roleDefaults.standards-reviewer.thinkingLevel low` |
 | `hideWorkflowPresets` | `false` | Hides the three workflow presets (`/code-review`, `/design-it-twice`, `/research`) from `/` completion — for users with the matching skills installed, which cover the same workflows. Read at extension load, so needs `/reload`. Never gates the three tools or `/subagents` |
 
@@ -167,4 +167,4 @@ npm test          # unit tests, no pi runtime needed
 npm run typecheck # extension + lib + scripts typecheck
 ```
 
-The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~482 / ~398 / ~104 tokens for `subagent` / `research` / `set-thinking-level`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.
+The extension is a thin consumer of `src/lib.ts`; the pure functions there (dispatch-arg assembly, tool resolution, `input` merge/validation, the surface contract) are what the tests cover. Real-pi e2e scripts (`scripts/push-e2e.ts`, `scripts/blocking-e2e.ts`) cover the process wiring that unit tests can't reach; `node scripts/benchmark-tools.ts` measures the tool surface's token contribution (~486 / ~398 / ~104 tokens for `subagent` / `research` / `set-thinking-level`), guarded by a regression test in the suite. `node scripts/apply-skill-patch.ts` re-applies the ADR 0013 patch texts to the installed skills after a mattpocock upstream sync.

@@ -1,7 +1,7 @@
 /**
  * pi-matt-subagent — blocking + background subagents for skills that require
  * subagents (code-review, codebase-design/design-it-twice,
- * improve-codebase-architecture, research, wayfinder, grilling).
+ * improve-codebase-architecture, research, wayfinder, grilling, no-comments).
  *
  * Two tools:
  *   - `subagent` (blocking): single / parallel / chain. Does not return until
@@ -13,8 +13,10 @@
  *     state (succeeded / failed / terminated / aborted) into the main context
  *     via `pi.sendMessage` — no polling.
  *
- * Six bundled roles live in src/lib.ts (standards-reviewer, spec-reviewer,
- * design-explorer, architecture-scout, researcher, fact-finder). User agents
+ * Seven bundled roles live in src/lib.ts (standards-reviewer, spec-reviewer,
+ * design-explorer, architecture-scout, researcher, fact-finder, comment-sicko —
+ * a report-only comment audit adapted in spirit from pstack's no-comments
+ * workflow, MIT). User agents
  * from ~/.pi/agent/agents/*.md and project agents from .pi/agents/*.md
  * override bundled roles by name.
  */

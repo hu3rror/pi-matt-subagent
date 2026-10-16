@@ -305,13 +305,14 @@ test("emptyUsage returns an all-zero usage struct", () => {
 });
 
 // S3 — discoverAgents
-test("discoverAgents returns the six embedded roles", () => {
+test("discoverAgents returns the seven embedded roles", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   try {
     const { agents } = discoverAgents(root, path.join(root, "agentDir"), ".pi", "user", stubParser);
     const names = agents.map((a) => a.name).sort();
     assert.deepEqual(names, [
       "architecture-scout",
+      "comment-sicko",
       "design-explorer",
       "fact-finder",
       "researcher",
@@ -322,6 +323,15 @@ test("discoverAgents returns the six embedded roles", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the comment-sicko role declares only built-in tools (no extension dependency)", () => {
+  const declared = EMBEDDED_ROLES["comment-sicko"].tools ?? [];
+  assert.deepEqual(declared, ["read", "grep", "find", "ls", "bash"]);
+  // Resolve against a built-ins-only registry: every declared name survives,
+  // so the role runs in a child process with no extensions loaded.
+  const builtIns = new Set(["read", "grep", "find", "ls", "bash", "powershell"]);
+  assert.deepEqual(resolveTools(declared, builtIns), ["read", "grep", "find", "ls", "bash"]);
 });
 
 test("the researcher role and default research tools include web and docs queries", () => {
@@ -1365,6 +1375,7 @@ test("embedded roles carry per-role thinking levels", () => {
     assert.equal(levelOf("architecture-scout"), "medium");
     assert.equal(levelOf("design-explorer"), "medium");
     assert.equal(levelOf("researcher"), "medium");
+    assert.equal(levelOf("comment-sicko"), "medium");
     assert.equal(levelOf("fact-finder"), "low");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -2707,7 +2718,7 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
 // into the public schema (+16 tokens per tool, honest-wording input
 // description); the baseline constant is updated here to the re-measured
 // numbers (prior pi 1.0.2 record: 557/448).
-const TOKEN_BASELINE: Record<string, number> = { subagent: 482, research: 398, "set-thinking-level": 104 };
+const TOKEN_BASELINE: Record<string, number> = { subagent: 486, research: 398, "set-thinking-level": 104 };
 
 test("TOOL_CONTRACTS covers exactly the three frozen tool surfaces", () => {
   assert.deepEqual(TOOL_CONTRACTS.map((t) => t.name), ["subagent", "research", "set-thinking-level"]);
@@ -2826,8 +2837,8 @@ test("the slimmed descriptions retain the load-bearing facts (Variant A, no drif
   );
   assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("{previous}"), "the chain placeholder survives");
   assert.ok(
-    SUBAGENT_TOOL_DESCRIPTION.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder"),
-    "all six bundled roles survive",
+    SUBAGENT_TOOL_DESCRIPTION.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder, comment-sicko"),
+    "all seven bundled roles survive",
   );
   assert.ok(SUBAGENT_TOOL_DESCRIPTION.includes("agentScope"), "the scope semantics survive");
   assert.ok(RESEARCH_TOOL_DESCRIPTION.includes("pushed"), "push delivery survives");
@@ -2854,8 +2865,8 @@ test("the preserved help texts carry the full teaching text (help-on-demand entr
   assert.ok(SUBAGENT_HELP_TEXT.includes("bash and poll files"), "the anti-pattern survives in the help text");
   assert.ok(SUBAGENT_HELP_TEXT.includes("{previous}"), "the chain placeholder survives in the help text");
   assert.ok(
-    SUBAGENT_HELP_TEXT.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder"),
-    "all six bundled roles survive in the help text",
+    SUBAGENT_HELP_TEXT.includes("standards-reviewer, spec-reviewer, design-explorer, architecture-scout, researcher, fact-finder, comment-sicko"),
+    "all seven bundled roles survive in the help text",
   );
   assert.ok(SUBAGENT_HELP_TEXT.includes(".pi/agents"), "the scope semantics survive in the help text");
   // research
@@ -2867,6 +2878,25 @@ test("the preserved help texts carry the full teaching text (help-on-demand entr
   );
   assert.ok(RESEARCH_HELP_TEXT.includes("45 minutes"), "the wall-clock cap survives in the help text");
   assert.ok(RESEARCH_HELP_TEXT.includes("checkpointed"), "the checkpoint guarantee survives in the help text");
+});
+
+// The role prompt's decision-bearing clauses, pinned as facts (the same
+// anti-rot pattern as the help text): the register is not testable, the rules
+// are. Deleting a clause must fail this test.
+test("the comment-sicko prompt pins its decision-bearing clauses", () => {
+  const prompt = EMBEDDED_ROLES["comment-sicko"].systemPrompt;
+  assert.ok(prompt.includes("a comment dies unless a closed exception saves it"), "delete-by-default survives");
+  assert.ok(prompt.includes("That list is the only leash"), "the closed exception list is the only leash");
+  assert.ok(prompt.includes("prettier-ignore"), "the formatter escape survives");
+  assert.ok(prompt.includes("public API contract"), "the public-API doc-comment escape survives");
+  assert.ok(prompt.includes("proven true on a live path today"), "keeps require today's proof on a live path");
+  assert.ok(prompt.includes("Doubt after the hunt is meat"), "doubt defaults to deletion");
+  assert.ok(prompt.includes("MUST KILL"), "the reshape flag survives");
+  assert.ok(prompt.includes("never edit code"), "report-only survives");
+  assert.ok(prompt.includes("never ask questions"), "the no-questions rule survives");
+  assert.ok(prompt.includes("Report only:"), "the report contract survives");
+  assert.ok(prompt.includes("read-only commands only"), "the read-only shell rule survives");
+  assert.ok(!prompt.includes("Ha ha ha") && !prompt.includes("My first output"), "the scripted opening line stays out");
 });
 
 test("toolErrorMessage converts any thrown value to model-visible text", () => {
