@@ -146,21 +146,6 @@ import {
 
 const parseAgentFrontmatter: FrontmatterParser = (content) => parseFrontmatter<AgentFrontmatter>(content);
 
-// ---------------------------------------------------------------------------
-// In-process research child (ADR 0013, revised by issue #37)
-//   The real `createChildSession` factory wired into `runBackgroundResearch`:
-//   an in-process second session (`createAgentSession` +
-//   `SessionManager.inMemory()`) built with `systemPromptOverride`. The child's
-//   extension loadout is curated: it loads exactly the approved query packages
-//   (`researchChildExtensions`, issue #37) via an `extensionsOverride` filter;
-//   only a caller that passes no extension list gets the legacy
-//   `noExtensions: true` child. Anti-recursion is structural either way —
-//   subagent/research (this extension) never match the knob, so no recursive
-//   extension re-entry. The async body is wrapped in try/catch; every session
-//   is tracked here so `session_shutdown` disposes any that outlive their runs
-//   (session-scoped research lifetime).
-// ---------------------------------------------------------------------------
-
 interface Disposable {
   dispose(): void;
 }
@@ -191,7 +176,6 @@ export function createResearchChildSession(opts: {
   /** Optional synchronous audit hook (toolCall audit): invoked once per executed tool call. */
   onToolCall?: (call: ToolCallEvent) => void;
 }): ResearchChildSession {
-  // A tiny async queue serving the runner's `for await` tee over `output`.
   const chunks: string[] = [];
   let ended = false;
   const waiters: Array<() => void> = [];
@@ -364,10 +348,6 @@ const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown"
   unknown: "dim",
 };
 
-// ---------------------------------------------------------------------------
-// Display helpers
-// ---------------------------------------------------------------------------
-
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
   const safeName = agentName.replace(/[^\w.-]+/g, "_");
@@ -397,12 +377,10 @@ function renderAgentRow(
   return `${icon} ${theme.fg("toolTitle", theme.bold(agent))}${theme.fg("muted", ` (${source})`)}`;
 }
 
-/** The indented, 10-line-capped body text shared by both renderResult branches. */
 function renderIndentedBody(text: string): string {
   return text.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n");
 }
 
-/** The indented dim usage line shared by the error row and the success rows. */
 function renderUsageLine(
   theme: { fg(color: ThemeColor, text: string): string },
   usage: UsageStats,
@@ -412,11 +390,6 @@ function renderUsageLine(
   return u ? `  ${theme.fg("dim", u)}` : undefined;
 }
 
-/**
- * Keeps the footer count in sync with the run registry. Counts active runs
- * (queued + running); clears the status when nothing is active. No-op
- * without a UI (headless / print / json mode).
- */
 function updateSubagentFooter(
   ctx: { hasUI: boolean; ui: { setStatus: (key: string, value?: string) => void } },
   registry: RunRegistry,
@@ -481,12 +454,6 @@ function probeResearchChildTools(
   };
 }
 
-/**
- * Gates project-local agents behind a trust confirmation, shared by the
- * blocking `subagent` tool and the background `research` tool. Returns true
- * when no confirmation is needed (user scope, headless, trusted project, or
- * no requested agent resolves to a project source) or when the user approves.
- */
 async function confirmProjectAgents(
   ctx: {
     hasUI: boolean;
@@ -511,10 +478,6 @@ async function confirmProjectAgents(
     `Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
   );
 }
-
-// ---------------------------------------------------------------------------
-// Result types
-// ---------------------------------------------------------------------------
 
 interface DispatchDefaults {
   /** Per-call model override (merged.model); first in the model chain (issue #39 revision). */
@@ -556,35 +519,14 @@ const makeModelResolver =
     return provider && id ? registry.find(provider, id) : undefined;
   };
 
-/**
- * Plans one run's thinking pair (ADR 0018 clamp transparency): only a
- * resolved model clamps; otherwise the request passes through unchanged and
- * nothing extra is recorded.
- */
 const planForRun = (requested: string | undefined, model: Model<any> | undefined) => {
   const planned = model ? planRunThinking(requested, clampForModel(model)) : undefined;
   return { effective: planned?.actual ?? requested, requested: planned?.requested };
 };
 
-/**
- * The conversationally-declared thinking level (A-axis, issue #40), read from
- * the active session branch per dispatch: the transcript is the single source
- * of truth, so the declaration is sticky across model switches and session
- * continuation (the `set-thinking-level` tool itself is unchanged — the
- * declared value is its `arguments.level`). No cache: upstream leaf ids
- * advance on every append (a cache keyed on them is always cold) and branch
- * switches do not change the entry count, so any cache key would trade
- * correctness for nothing — the branch walk is negligible next to a subagent
- * dispatch. The structural shape read here mirrors upstream SessionEntry /
- * SessionMessageEntry toolCall blocks.
- */
 const readDeclaredLevel = (ctx: {
   sessionManager: { getBranch(): unknown[] };
 }) => findDeclaredThinkingLevel(ctx.sessionManager.getBranch() as unknown as DeclaredLevelEntry[]);
-
-// ---------------------------------------------------------------------------
-// Blocking runner
-// ---------------------------------------------------------------------------
 
 async function runSingleAgent(
   defaultCwd: string,
@@ -688,8 +630,6 @@ async function runSingleAgent(
       proc.stderr.on("data", (data) => acc.onStderr(data.toString()));
 
       proc.on("close", (code) => {
-        // The close handler flushes any pending partial line, like the old
-        // inline buffer.
         accumulated = acc.finish();
         resolve(code ?? 0);
       });
@@ -736,23 +676,7 @@ async function runSingleAgent(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Background research runner
-//   Implementation lives in src/lib.ts (runBackgroundResearch) so it is
-//   testable under `node --test`; spawn is injectable there.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Extension
-// ---------------------------------------------------------------------------
-
 export default function (pi: ExtensionAPI) {
-  // D3 — in-session registry of every tracked subagent run (blocking +
-  // background). Cleared on session teardown so no stale state survives into
-  // a new session.
-  // Footer sync rides the registry's onChange hook: every mutation re-counts
-  // active runs, so no caller has to remember to refresh the footer (this
-  // replaced the 16 scattered updateSubagentFooter call sites).
   let footerUi: SubagentsUi | undefined;
   const subagentRuns = createRunRegistry(Date.now, () => {
     if (footerUi?.hasUI) updateSubagentFooter(footerUi, subagentRuns);
@@ -801,16 +725,12 @@ export default function (pi: ExtensionAPI) {
     researchChildren.clear();
   });
 
-  // ADR 0013 — the push card: renders a research terminal state as a readable
-  // transcript entry (status + findings path + log path; expanded shows the tail).
   pi.registerMessageRenderer(RESEARCH_STATUS_CUSTOM_TYPE, (message, { expanded, outputPad }, theme) => {
     // `Partial` because the renderer must tolerate malformed messages; the
     // status stays on the frozen terminal union (plus an explicit `unknown`
     // sentinel) instead of re-widening to `string`.
     const details = message.details as Partial<ResearchStatusDetails> | undefined;
     const status: ResearchStatusDetails["status"] | "unknown" = details?.status ?? "unknown";
-    // Reuse the frozen icon map from lib (single source for status icons);
-    // colors come from the sibling RESEARCH_STATUS_COLORS map, not a cascade.
     const icon = status === "unknown" ? "?" : RUN_STATUS_ICONS[status];
     const color = RESEARCH_STATUS_COLORS[status];
     const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
@@ -821,11 +741,6 @@ export default function (pi: ExtensionAPI) {
     return box;
   });
 
-  // D3 — unified overview of all tracked runs; use when idle to read the
-  // snapshot (blocking runs are not reachable mid-run by design, since input
-  // queues until the agent finishes).
-  // D6 — /subagents surface: kill aborts an in-process researcher via its
-  // AbortController (never re-kill a finished run), prune is terminal-only, tail is byte-capped.
   type SubagentsUi = {
     hasUI: boolean;
     ui: {
@@ -929,11 +844,6 @@ export default function (pi: ExtensionAPI) {
     return choice.split(" · ")[0];
   };
 
-  // -------------------------------------------------------------------------
-  // Extension config surface (ADR 0018). Lazy creation: reading never writes;
-  // only `set`/`reset` creates the file. Every handler re-reads the file so a
-  // change applies to the next dispatch without /reload.
-  // -------------------------------------------------------------------------
   const configPath = () => path.join(getAgentDir(), "extensions", CONFIG_FILE_NAME);
   const configFileExists = () => fs.existsSync(configPath());
   const readConfigStatus = (): ConfigStatus => {
@@ -962,8 +872,6 @@ export default function (pi: ExtensionAPI) {
     return configKeyLabel(key, status);
   };
   const setConfig = async (ctx: SubagentsUi, key: ConfigSetKey, value: string) => {
-    // Issue #39 — a dotted `roleDefaults.<role>.<field>` key edits the nested
-    // knob; every other key goes through the top-level pipeline unchanged.
     const roleKey = parseRoleDefaultsKey(key);
     if (roleKey) {
       const parsed = parseRoleDefaultFieldValue(roleKey.field, value);
@@ -1026,12 +934,7 @@ export default function (pi: ExtensionAPI) {
     }
     const key = CONFIG_KEYS.find((k) => choice.startsWith(`${k} =`));
     if (!key) return;
-    // Issue #39 — the roleDefaults knob is grouped by role: each set field is
-    // its own selectable entry (choosing it resets just that field), plus a
-    // free-text "set" entry for adding new role/field combinations.
     if (key === "roleDefaults") {
-      // roleDefaultFields returns fully-prefixed dotted keys, so each entry
-      // is already the reset key (`choice2.split(" = ")[0]` below).
       const entries = roleDefaultFields(readConfigStatus().effective.roleDefaults).map(
         (f) => `${f.key} = ${f.value}`,
       );
@@ -1055,15 +958,11 @@ export default function (pi: ExtensionAPI) {
       if (!isConfigSetKey(resetKey)) return;
       return resetConfigKey(ctx, resetKey);
     }
-    // Per-key actions: setting enters the kind-driven input below; resetting
-    // drops just this knob back to default/inherit.
     const MENU_CONFIG_SET = "Set value…";
     const MENU_CONFIG_RESET_KEY = "Reset to default";
     const action = await ctx.ui.select(`${key}`, [MENU_CONFIG_SET, MENU_CONFIG_RESET_KEY, MENU_CONFIG_BACK]);
     if (!action || action === MENU_CONFIG_BACK) return;
     if (action === MENU_CONFIG_RESET_KEY) return resetConfigKey(ctx, key);
-    // Set value…: the per-key spec drives the input — level → enum select,
-    // model → pi model registry picker (text fallback), number → free text.
     const spec = configKeySpec(key);
     if (spec?.kind === "level") {
       const sel = await ctx.ui.select(`${key}`, [...THINKING_LEVELS, "inherit (clear)"]);
@@ -1108,13 +1007,6 @@ export default function (pi: ExtensionAPI) {
     if (id) tailRun(id, ctx);
   };
 
-  // -----------------------------------------------------------------------
-  // Workflow presets (issue #41): the three slash commands ship as markdown
-  // files in `prompts/` and are registered behind the `hideWorkflowPresets`
-  // knob (hidden = not registered). The knob is read at load, so applying it
-  // needs `/reload`; the tools and `/subagents` are never gated. Expansion is
-  // byte-equivalent to pi's prompt-template expansion (rationale: ADR 0023).
-  // -----------------------------------------------------------------------
   const presetsDir = presetsDirOf(fileURLToPath(import.meta.url));
   if (!readConfigStatus().effective.hideWorkflowPresets) {
     for (const file of ["code-review.md", "design-it-twice.md", "research.md"]) {
@@ -1155,9 +1047,6 @@ export default function (pi: ExtensionAPI) {
 
       let suggestions: Array<{ value: string; label: string; description?: string }> = [];
       if (fixed.length === 0) {
-        // Verb position: an empty or partial token trims against the five
-        // verbs; a fully typed "config" (with or without trailing space)
-        // moves on to its sub-verbs instead of re-suggesting itself.
         if (partial === "config") {
           suggestions = SUB_VERBS.map((v) => suggest(`config ${v}`, v));
         } else {
@@ -1167,9 +1056,6 @@ export default function (pi: ExtensionAPI) {
         if (fixed.length === 1) {
           suggestions = match(SUB_VERBS).map((v) => suggest(`config ${v}`, v));
         } else if (fixed.length === 2 && (fixed[1] === "set" || fixed[1] === "reset")) {
-          // Issue #39 — existing roleDefaults fields autocomplete as dotted
-          // keys (fully-prefixed by roleDefaultFields) alongside the top-level
-          // knobs.
           const keys: string[] = [
             ...CONFIG_KEYS,
             ...roleDefaultFields(readConfigStatus().effective.roleDefaults).map((f) => f.key),
@@ -1179,7 +1065,6 @@ export default function (pi: ExtensionAPI) {
           const key = fixed[2];
           const specKey = CONFIG_KEYS.find((k) => k === key);
           const spec = specKey ? configKeySpec(specKey) : undefined;
-          // A dotted roleDefaults key gets field-aware value suggestions too.
           const roleKey = parseRoleDefaultsKey(key);
           if (roleKey?.field === "thinkingLevel") {
             suggestions = THINKING_LEVELS.filter((l) => l.startsWith(partial)).map((l) =>
@@ -1221,7 +1106,6 @@ export default function (pi: ExtensionAPI) {
       footerUi = ctx as SubagentsUi;
       const argText = args ?? "";
       if (!argText.trim()) {
-        // non-TUI modes have no menu: fall back to the snapshot
         if (!ctx.hasUI) return showSnapshot(ctx);
         return openMenu(ctx);
       }
@@ -1259,7 +1143,6 @@ export default function (pi: ExtensionAPI) {
       // source produced → Model object; unresolvable stays undefined so the
       // child's existing loud unknown-model error is preserved untouched.
       const resolveSubagentModel = makeModelResolver(ctx.modelRegistry);
-      // Extension config (ADR 0018): read once per call, reused for this run.
       const config = readConfigStatus().effective;
       const dispatchDefaults: DispatchDefaults = {
         // Model chain (blocking, issue #39 revision): per-call override >

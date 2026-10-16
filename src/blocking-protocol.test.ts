@@ -5,7 +5,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createResultAccumulator, escalateKill, type SingleResult } from "./blocking-protocol.ts";
 
-/** A message_end event like the child protocol emits, cast to the protocol's message type. */
 function assistantEvent(text: string, overrides: Record<string, unknown> = {}) {
   return {
     type: "message_end",
@@ -20,10 +19,6 @@ function assistantEvent(text: string, overrides: Record<string, unknown> = {}) {
 function usageEvent(text: string, usage: Record<string, unknown>) {
   return assistantEvent(text, { usage });
 }
-
-// ---------------------------------------------------------------------------
-// Protocol accumulator
-// ---------------------------------------------------------------------------
 
 test("accumulator buffers a JSON line split across stdout chunks", () => {
   const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
@@ -126,7 +121,6 @@ test("finish processes a trailing pending line without a newline", () => {
   const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
   const full = JSON.stringify(assistantEvent("x"));
   acc.onStdout(`${full}\n`);
-  // A complete line delivered without a trailing newline stays pending until finish.
   acc.onStdout(JSON.stringify(assistantEvent("y")));
   const r = acc.finish();
   assert.equal(r.messages.length, 2);
@@ -166,10 +160,6 @@ test("finish returns the assembled result with identity fields and a default exi
   assert.equal(r.step, 3);
   assert.equal(r.exitCode, 0, "exitCode is patched by the caller after close");
 });
-
-// ---------------------------------------------------------------------------
-// Escalating kill (SIGTERM → SIGKILL after grace)
-// ---------------------------------------------------------------------------
 
 interface FakeTimer {
   fired?: () => void;

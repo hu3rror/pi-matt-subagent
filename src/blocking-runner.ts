@@ -30,10 +30,6 @@ import type { SingleResult } from "./blocking-protocol.ts";
 
 export type { SingleResult } from "./blocking-protocol.ts";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface SubagentDetails {
   mode: "single" | "parallel" | "chain";
   results: SingleResult[];
@@ -88,14 +84,6 @@ export interface BlockingPlanResult {
 // defaults, so the two cannot drift.
 const DEFAULT_LIMITS: Required<BlockingPlanLimits> = configToLimits(defaultConfig());
 
-// ---------------------------------------------------------------------------
-// Result semantics helpers
-//   The failure/status/output-semantics cluster lives in lib.ts (isToolError,
-//   blockingRunStatus, getResultOutput, lastAssistantText, lastOutputLine);
-//   the orchestrator consumes it. truncateParallelOutput stays here because it
-//   is parallel-summary display, not shared semantics.
-// ---------------------------------------------------------------------------
-
 /**
  * ADR 0020 — a per-task/per-step `thinkingLevel` is an undocumented field
  * (never declared on the model-facing schema) that pi passes through to the
@@ -144,10 +132,6 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
   return results;
 }
 
-// ---------------------------------------------------------------------------
-// Orchestrator
-// ---------------------------------------------------------------------------
-
 /**
  * Runs one validated blocking plan over the runner seam, owning the registry
  * flow (register → live progress → terminal patch → abort sweep) and the
@@ -174,7 +158,6 @@ export async function runBlockingPlan(opts: {
 
   const sourceOf = (name: string): AgentSource => resolveRole(agents, name)?.source ?? "unknown";
   const makeDetails = (results: SingleResult[]): SubagentDetails => ({ mode: plan.mode, results });
-  /** The refusal returned for an over-limit plan (parallel tasks or chain steps) before anything registers/runs. */
   const tooMany = (what: "parallel tasks" | "chain steps", count: number, max: number) => ({
     text: `Too many ${what} (${count}). Max is ${max}.`,
     details: makeDetails([]),

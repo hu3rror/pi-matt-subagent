@@ -14,9 +14,6 @@ import * as path from "node:path";
 import { runBackgroundResearch, type ResearchExitInfo } from "./lib.ts";
 import { embeddedResearcher, fakeChild } from "./test-helpers.ts";
 
-// Seam C — ADR 0013. A delayed findings write: the child session writes the
-// findings file after 1000ms and then settles; the caller must have returned
-// long before that, and onExit must resolve succeeded with the file on disk.
 test("background research writes findings without blocking the caller (fake child)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a2-e2e-"));
   const findingsPath = path.join(dir, "findings.md");
@@ -45,7 +42,6 @@ test("background research writes findings without blocking the caller (fake chil
   assert.equal(typeof handle.researchId, "string");
   assert.deepEqual(exits, [], "onExit must not have fired while the child sleeps");
 
-  // wait for the terminal state (real timers, real file writes)
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && exits.length === 0) {
     await new Promise((r) => setTimeout(r, 150));
@@ -56,9 +52,6 @@ test("background research writes findings without blocking the caller (fake chil
   assert.equal(handle.findingsPath, findingsPath);
 });
 
-// Seam C — ADR 0013. A runaway researcher floods its output forever; the real
-// wall-clock watcher must abort it at the cap, append the slim marker, and
-// resolve terminated.
 test("a runaway researcher is killed by the wall-clock cap and marked (real timers)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
   const findingsPath = path.join(dir, "findings.md");
@@ -100,8 +93,6 @@ test("a runaway researcher is killed by the wall-clock cap and marked (real time
   assert.ok(fs.statSync(handle.logPath).size > 0, "the per-run log must carry the teed output");
 });
 
-// Seam C — ADR 0013. A throwing child session resolves failed; any partial
-// work already written stays on disk.
 test("a throwing researcher resolves failed and preserves partial work (real timers)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
   const findingsPath = path.join(dir, "findings.md");
@@ -129,8 +120,6 @@ test("a throwing researcher resolves failed and preserves partial work (real tim
   assert.ok(!fs.readFileSync(findingsPath, "utf8").includes("research-terminated"), "a failure is not a wall-clock cut");
 });
 
-// Seam C — ADR 0013. A manual abort signal resolves aborted with real timers
-// and no termination marker (kill is not a cap cut).
 test("a manual kill resolves aborted with no marker (real timers)", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
   const findingsPath = path.join(dir, "findings.md");

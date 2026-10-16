@@ -47,7 +47,6 @@ export default function (pi: ExtensionAPI) {
 
   let started = false;
 
-  /** Spawn a real pi child exactly like runSingleAgent, return the handle + accumulator wiring. */
   function spawnBlockingChild(task: string, model: string) {
     const args = buildDispatchArgs({ model, thinking: "off", task });
     const invocation = getPiInvocation(args);
@@ -76,7 +75,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     void (async () => {
-      // Gate 1 — spawn + protocol + usage on a real pi child.
       const c1 = spawnBlockingChild('Reply with exactly the single word: pong', model);
       const { code: code1, signal: sig1 } = await c1.closed;
       const r1: SingleResult = c1.finish();
@@ -88,9 +86,6 @@ export default function (pi: ExtensionAPI) {
         log("BLOCKING-E2E FAIL: gate 1");
       }
 
-      // Gate 2 — dispose-on-close: SIGTERM a long-running real pi child
-      // mid-flight (the abort path), assert it dies within grace (not by the
-      // SIGKILL backstop), then close→dispose.
       const c2 = spawnBlockingChild(
         'Use the bash tool to run: node -e "setTimeout(() => {}, 20000)". Then reply: done',
         model,

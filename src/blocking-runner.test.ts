@@ -43,10 +43,6 @@ function failedResult(agent: string, stderr = "boom", stopReason = "error"): Sin
   };
 }
 
-// ---------------------------------------------------------------------------
-// Single
-// ---------------------------------------------------------------------------
-
 test("single mode runs one task, settles the run succeeded, and returns the final output", async () => {
   const registry = createRunRegistry();
   const runner: RunnerSeam = {
@@ -131,10 +127,6 @@ test("an unknown agent resolves to the unknown source and fails through the norm
   assert.equal(run.status, "failed");
 });
 
-// ---------------------------------------------------------------------------
-// Chain
-// ---------------------------------------------------------------------------
-
 test("chain mode substitutes {previous} and registers one run per step", async () => {
   const registry = createRunRegistry();
   const seen: string[] = [];
@@ -213,10 +205,6 @@ test("chain mode throws the step tool error and stops at the failed step", async
     "step 3 never registers once the chain stops",
   );
 });
-
-// ---------------------------------------------------------------------------
-// Parallel
-// ---------------------------------------------------------------------------
 
 test("parallel mode runs all tasks and aggregates a summary", async () => {
   const registry = createRunRegistry();
@@ -390,10 +378,6 @@ test("parallel mode honors the concurrency limit", async () => {
   assert.equal(maxActive, 2);
 });
 
-// ---------------------------------------------------------------------------
-// Registry change hook (footer convergence by construction)
-// ---------------------------------------------------------------------------
-
 test("a late progress event after an abort sweep is dropped, not a frozen-update throw (race contained at the blocking boundary)", async () => {
   const registry = createRunRegistry();
   let first = true;
@@ -481,10 +465,6 @@ test("runStep patches the dispatched model and thinking level into the registry 
   );
 });
 
-// ---------------------------------------------------------------------------
-// Parallel summary truncation
-// ---------------------------------------------------------------------------
-
 test("truncateParallelOutput byte-caps a task's summary output and notes the omission", () => {
   const out = truncateParallelOutput("x".repeat(10_000), 100);
   const [head, note] = out.split("\n\n");
@@ -503,10 +483,6 @@ test("truncateParallelOutput drops the tail of a partial multibyte char", () => 
 test("truncateParallelOutput returns output unchanged under the cap", () => {
   assert.equal(truncateParallelOutput("short", 100), "short");
 });
-
-// ---------------------------------------------------------------------------
-// Per-task thinking level (ADR 0020)
-// ---------------------------------------------------------------------------
 
 test("firstInvalidPlanThinkingLevel passes unset and valid per-task levels", () => {
   assert.equal(

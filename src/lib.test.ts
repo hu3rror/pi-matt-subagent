@@ -117,7 +117,6 @@ function makeAgentFile(dir: string, name: string, description: string, body: str
   fs.writeFileSync(path.join(dir, `${name}.md`), `---\nname: ${name}\ndescription: ${description}\n---\n${body}\n`);
 }
 
-// S1 — resolveTools
 test("resolveTools maps bash to powershell on win32 and passes through otherwise", () => {
   const expected = process.platform === "win32" ? ["read", "powershell", "ls"] : ["read", "bash", "ls"];
   assert.deepEqual(resolveTools(["read", "bash", "ls"]), expected);
@@ -291,7 +290,6 @@ test("resolveTools keeps the legacy win32 bash→powershell mapping without a re
   assert.deepEqual(resolveTools(["bash", "read"], undefined, "linux"), ["bash", "read"]);
 });
 
-// S2 — emptyUsage
 test("emptyUsage returns an all-zero usage struct", () => {
   assert.deepEqual(emptyUsage(), {
     input: 0,
@@ -304,7 +302,6 @@ test("emptyUsage returns an all-zero usage struct", () => {
   });
 });
 
-// S3 — discoverAgents
 test("discoverAgents returns the seven embedded roles", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   try {
@@ -328,8 +325,6 @@ test("discoverAgents returns the seven embedded roles", () => {
 test("the comment-sicko role declares only built-in tools (no extension dependency)", () => {
   const declared = EMBEDDED_ROLES["comment-sicko"].tools ?? [];
   assert.deepEqual(declared, ["read", "grep", "find", "ls", "bash"]);
-  // Resolve against a built-ins-only registry: every declared name survives,
-  // so the role runs in a child process with no extensions loaded.
   const builtIns = new Set(["read", "grep", "find", "ls", "bash", "powershell"]);
   assert.deepEqual(resolveTools(declared, builtIns), ["read", "grep", "find", "ls", "bash"]);
 });
@@ -401,7 +396,6 @@ test("'user' scope excludes project agents", () => {
   }
 });
 
-// S4 — resolveRole
 test("resolveRole returns the effective agent for a name", () => {
   const agents: AgentConfig[] = [{ name: "researcher", description: "", source: "user", systemPrompt: "CUSTOM" }];
   const r = resolveRole(agents, "researcher");
@@ -413,8 +407,6 @@ test("resolveRole returns undefined for an unknown name", () => {
   assert.equal(resolveRole([], "nope"), undefined);
 });
 
-// S5 — buildResearchPrompt (ADR 0013): role prompt + findings path + a single
-// wall-clock cap line + the checkpoint rule. No budget block, no tiers.
 test("buildResearchPrompt embeds the agent system prompt, findings path, and task", () => {
   const agent: AgentConfig = {
     name: "researcher",
@@ -475,7 +467,6 @@ test("buildResearchPrompt has no budget block or tiers", () => {
   assert.ok(!p.includes("soft_limit_exceeded"));
 });
 
-// tracer bullet for Spec-9: an overridden researcher role must win in the background path
 test("background research prompt uses an overridden researcher role", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   const agentDir = path.join(root, "agentDir");
@@ -516,16 +507,11 @@ test("researchStatusContent flags the wall-clock cut and names the log only when
   assert.ok(failed.includes("/tmp/research.log"), "the run log is named when available");
 });
 
-// AgentScope helpers
 test("scopeAllowsProject is true only for project and both", () => {
   assert.equal(scopeAllowsProject("user"), false);
   assert.equal(scopeAllowsProject("project"), true);
   assert.equal(scopeAllowsProject("both"), true);
 });
-
-// S7 — runBackgroundResearch (ADR 0013, primary seam). The runner is
-// runtime-free: an injectable child-session factory stands in for the
-// extension's in-process createAgentSession wiring.
 
 function pendingChild(): { child: ResearchChildSession; abortCalls: number } {
   const state = { abortCalls: 0 };
@@ -561,14 +547,12 @@ test("runBackgroundResearch returns immediately and starts the child with the as
   });
   returnedBeforeChildDone = true;
 
-  // handle shape: researchId names the tmp dir, logPath is a research.log inside it
   assert.equal(handle.findingsPath, "/tmp/f.md");
   assert.match(handle.researchId, /^pi-research-/);
   assert.match(handle.logPath, /research\.log$/);
   assert.ok(handle.logPath.includes(handle.researchId));
   assert.ok(returnedBeforeChildDone, "the runner must not wait for the child");
 
-  // exactly one child factory call, carrying the assembled prompt surface
   assert.equal(calls.length, 1);
   const c = calls[0] as {
     cwd: string;
@@ -1014,7 +998,6 @@ test("runBackgroundResearch appends one JSONL line per tool call through the inj
   });
   const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
   assert.equal(typeof hook, "function", "the runner must hand the child factory an onToolCall hook");
-  // a zero-call run leaves an empty (but existing) file
   assert.ok(fs.existsSync(toolCallsPath), "the audit file is created eagerly beside the log");
   assert.equal(fs.readFileSync(toolCallsPath, "utf8"), "");
 
@@ -1118,26 +1101,19 @@ test("runBackgroundResearch unrefs the wall-clock timer so it never holds the ho
   assert.equal(unrefCalls, 1, "the wall-clock timer must be unref'd");
 });
 
-// S8 — resolveThinkingLevel (issue #39 priority + A-axis): per-call override >
-// declared > roleDefaults tier > config default > role preset > inherited (plain).
-// The `hasModel` short-circuit skips only the inherited layer.
 test("resolveThinkingLevel skips only the inherited layer for model-pinned agents", () => {
-  // explicit layers survive: roleDefaults, config, and preset levels beat the model's default
   assert.equal(resolveThinkingLevel({ hasModel: true, roleLevel: "medium", inherited: "high" }), "medium");
   assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: "low", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: true, roleDefaultLevel: "off", inherited: "high" }), "off");
-  // roleDefaults > config > preset even for pinned models
   assert.equal(
     resolveThinkingLevel({ hasModel: true, roleDefaultLevel: "low", configLevel: "medium", roleLevel: "high", inherited: "xhigh" }),
     "low",
   );
-  // nothing explicit: the model-pinned shortcut still returns undefined (the pin skips the inherited layer)
   assert.equal(resolveThinkingLevel({ hasModel: true, inherited: "high" }), undefined);
   assert.equal(resolveThinkingLevel({ hasModel: true }), undefined);
 });
 
 test("resolveThinkingLevel honors the per-call override even for model-pinned agents", () => {
-  // the escape hatch beats everything, including a pinned model
   assert.equal(resolveThinkingLevel({ hasModel: true, override: "low" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: true, override: "low", roleLevel: "medium", inherited: "high" }), "low");
   assert.equal(resolveThinkingLevel({ hasModel: true, override: "low", roleDefaultLevel: "off", configLevel: "medium" }), "low");
@@ -1202,8 +1178,6 @@ const messageEntryWith = (content: Array<{ type?: string; name?: string; argumen
   message: { role: "assistant", content },
 });
 
-// S8c — findDeclaredThinkingLevel (A-axis): the declared level is the last
-// set-thinking-level call's requested level, read from the session transcript.
 test("findDeclaredThinkingLevel returns undefined with no set-thinking-level call", () => {
   assert.equal(findDeclaredThinkingLevel([]), undefined);
   assert.equal(findDeclaredThinkingLevel([messageEntryWith([toolCallBlock("subagent", {})])]), undefined);
@@ -1247,9 +1221,6 @@ test("findDeclaredThinkingLevel ignores invalid levels and accepts off", () => {
   );
 });
 
-// S8b — resolveDispatchThinking (ADR 0020 + issue #39 + A-axis): the per-task/per-step
-// layer sits above the call-level override; the decision layers then order
-// declared > roleDefaults > config > preset > inherited (plain).
 test("resolveDispatchThinking prefers the per-task level over the call-level override", () => {
   const agent = { name: "r", description: "", systemPrompt: "", source: "embedded" as const };
   assert.equal(
@@ -1351,8 +1322,6 @@ test("resolveDispatchThinking treats a roleDefaults-pinned model like a role-pin
   );
 });
 
-// S8c — ADR 0020 data path: per-task thinkingLevel must pass both schemas
-// unchanged (pass-through rationale: blocking-runner.ts validator JSDoc).
 test("subagent schemas accept a per-task thinkingLevel without declaring it", () => {
   const call = { tasks: [{ agent: "a", task: "t", thinkingLevel: "high" }] };
   assert.ok(Value.Check(SUBAGENT_TOOL_PARAMS, call), "registered schema must pass per-task thinkingLevel through");
@@ -1439,8 +1408,6 @@ test("appendResearchTerminatedMarker appends the frozen slim marker", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-// S16 — run registry (D3, Seam A). The status enum is frozen as a literal;
-// terminal states are frozen (no further updates); transitions are guarded.
 test("RUN_STATUSES freezes the D3 status enum", () => {
   assert.deepEqual(RUN_STATUSES, ["queued", "running", "succeeded", "failed", "aborted", "terminated"]);
 });
@@ -1508,7 +1475,6 @@ test("update records endedAt when transitioning to a terminal status", () => {
 test("update rejects an illegal status transition", () => {
   const reg = createRunRegistry();
   const id = reg.register({ role: "r", source: "embedded", channel: "blocking", startedAt: 0 });
-  // queued must pass through running before reaching a terminal state
   assert.throws(() => reg.update(id, { status: "succeeded" }), /transition/);
   assert.equal(reg.get(id)?.status, "queued", "failed transition must not corrupt the run");
 });
@@ -1569,8 +1535,6 @@ test("RUN_STATUS_ICONS freezes the icon mapping", () => {
   });
 });
 
-// S17 — snapshot formatting (D3, display layer). Pure text, grouped
-// running-before-finished, startedAt-ascending within a group.
 test("formatRunSnapshot returns an empty-state message for no runs", () => {
   assert.equal(formatRunSnapshot([], 1000), "No subagents running.");
 });
@@ -1643,8 +1607,6 @@ test("formatRunSnapshot renders last output, usage, and paths when present", () 
   assert.ok(text.includes("/tmp/research.log"), "log path");
 });
 
-// ADR 0015 — blocking snapshot rows now carry the dispatched model and thinking
-// level, so `/subagents` answers "which model, which tier" for a finished run.
 test("formatRunSnapshot shows the dispatched model and thinking level for blocking runs", () => {
   const runs: RunEntry[] = [
     {
@@ -1716,8 +1678,6 @@ test("formatRunSnapshot collapses and truncates an over-long last output to one 
   assert.ok(!output.includes("word99"), "far tail is cut");
 });
 
-// S18 — readLogTail (D3). Last maxBytes of a log file, partial leading line
-// dropped, missing file safe.
 test("readLogTail returns the last lines of a log file, truncated to maxBytes", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lib-test-"));
   const logPath = path.join(dir, "research.log");
@@ -1796,7 +1756,6 @@ test("isToolError treats abort as an error while blockingRunStatus keeps it dist
   assert.equal(isToolError({ exitCode: 0, stopReason: "aborted" }), true, "abort throws as a tool error");
   assert.equal(isToolError({ exitCode: 0, stopReason: "end" }), false);
   assert.equal(isToolError({ exitCode: 0 }), false);
-  // the two axes disagree on abort by design: aborted in the registry, error in the throw path
   assert.equal(blockingRunStatus({ exitCode: 0, stopReason: "aborted" }), "aborted");
 });
 
@@ -1904,8 +1863,6 @@ test("toolErrorDetails returns a detached usage copy", () => {
   assert.equal(reg.get(id)?.usage?.input, 0, "mutating the payload must not leak into the registry");
 });
 
-// S20 — result output extraction and usage display (semantics cluster).
-
 test("assistantTextOfMessage joins all text parts of one assistant message, empty for others", () => {
   assert.equal(assistantTextOfMessage({ role: "assistant", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }), "ab");
   assert.equal(assistantTextOfMessage({ role: "user", content: [{ type: "text", text: "x" }] }), "");
@@ -1953,9 +1910,6 @@ test("formatUsageLine pluralizes turns and adds context/model only on request", 
   assert.equal(formatUsageLine(zero), "", "an all-zero usage line is empty");
 });
 
-// ADR 0015 — the usage line shows the resolved dispatch thinking level next to
-// the dispatched model, in pi's footer style. `undefined` (a model-pinned role
-// with no override) is labelled `default`, never invented.
 test("formatModelSegment renders pi's footer model style with the thinking level attached", () => {
   assert.equal(formatModelSegment("sensenova/deepseek-flash", "high"), "(sensenova) deepseek-flash • high");
   assert.equal(
@@ -1986,9 +1940,6 @@ test("formatModelSegment renders pi's footer model style with the thinking level
   assert.equal(formatModelSegment("prov/", "high"), "prov • high", "a trailing slash never renders a broken segment");
 });
 
-// ADR 0018 — clamp transparency: a run whose requested thinking level was
-// clamped by the model records both; the usage line annotates the clamp and
-// stays byte-identical when the level was not clamped (or never requested).
 test("planRunThinking returns undefined without a request (old no-\u002d-thinking path unchanged)", () => {
   const neverCalled = () => {
     throw new Error("clamp must not run without a request");
@@ -2080,14 +2031,6 @@ test("parseSubagentsArgs maps the four command forms and rejects the rest", () =
   });
   assert.deepEqual(parseSubagentsArgs("bogus"), { action: "invalid", reason: 'unknown action "bogus"' });
 });
-
-// ---------------------------------------------------------------------------
-// S21 — extension config surface (ADR 0018). The runtime-free decode /
-// validate / degrade seam: the lazy file creation, `set`/`reset` verbs, and
-// the dispatch-time plumbing are the extension's thin wiring shell; here we
-// pin the pure pipeline (parse -> validate -> degrade -> resolve) with
-// node --test, exactly like the other runtime-free lib suites.
-// ---------------------------------------------------------------------------
 
 test("defaultConfig returns the built-in defaults, wall-clock linked to the research ceiling", () => {
   const c = defaultConfig();
@@ -2186,13 +2129,13 @@ test("parseConfigFile applies the validated keys present and leaves the rest def
 test("parseConfigFile degrades structurally-invalid per-key values to defaults", () => {
   const s = parseConfigFile(
     JSON.stringify({
-      maxTasksPerCall: "eight", // wrong type
-      maxConcurrency: 0, // not >= 1
-      perTaskOutputCap: 1.5, // not an integer
+      maxTasksPerCall: "eight",
+      maxConcurrency: 0,
+      perTaskOutputCap: 1.5,
       researchWallClockMs: -5,
       logTailBytes: 2000, // valid -> NOT degraded
-      dispatchDefaultModel: "", // empty model invalid
-      dispatchDefaultThinkingLevel: "turbo", // not a thinking level
+      dispatchDefaultModel: "",
+      dispatchDefaultThinkingLevel: "turbo",
     }),
   );
   const eff = s.effective;
@@ -2484,7 +2427,6 @@ test("resolveThinkingLevel orders config above the role preset (issue #39 promot
   assert.equal(resolveThinkingLevel({ hasModel: true, configLevel: undefined }), undefined, "nothing explicit stays unforced");
 });
 
-
 test("parseSubagentsArgs parses the config sub-verb forms and roleDefaults dotted keys", () => {
   assert.deepEqual(parseSubagentsArgs("config"), { action: "config", verb: "show" });
   assert.deepEqual(parseSubagentsArgs("config show"), { action: "config", verb: "show" });
@@ -2542,16 +2484,12 @@ test("formatConfigOverview marks each key default/customized/degraded and shows 
 });
 
 test("configKeyLabel: a written key equal to its default is [default], not [customized]", () => {
-  // maxTasksPerCall written as its built-in default → value equals default.
   const atDefault = parseConfigFile(JSON.stringify({ maxTasksPerCall: 8 }));
   assert.match(configKeyLabel("maxTasksPerCall", atDefault), /8 \[default\]/);
-  // A differing value keeps [customized].
   const changed = parseConfigFile(JSON.stringify({ maxConcurrency: 6 }));
   assert.match(configKeyLabel("maxConcurrency", changed), /6 \[customized\]/);
-  // An explicit-null inherit marker has effective undefined = default → [default].
   const inherit = parseConfigFile(JSON.stringify({ dispatchDefaultModel: null }));
   assert.match(configKeyLabel("dispatchDefaultModel", inherit), /\(inherit\) \[default\]/);
-  // Not written at all is [default] too.
   assert.match(configKeyLabel("logTailBytes", parseConfigFile(undefined)), /4096 \[default\]/);
 });
 
@@ -2561,14 +2499,6 @@ test("formatConfigOverview reports a missing file and an unparseable file", () =
   const bad = formatConfigOverview(parseConfigFile("{"), "/x.json", true);
   assert.match(bad, /unparseable/i);
 });
-
-// ---------------------------------------------------------------------------
-// S21 — Seam A: `input` merge semantics (ADR 0011). Direct fields override
-// same-name JSON keys; absent/empty input is a passthrough; unparseable or
-// non-object input raises the documented model-visible error; the merged
-// object is validated against the full contract and failures name field
-// paths. Pure, runtime-free: unit-tested with node --test.
-// ---------------------------------------------------------------------------
 
 test("mergeToolParams merges input JSON under the direct params (direct fields win)", () => {
   const direct: Record<string, unknown> = { agent: "researcher", task: "direct task" };
@@ -2667,21 +2597,18 @@ test("mergeToolParams validates the research full contract (model + maxWallClock
 
 test("maxWallClockMs is a hidden positive integer that may only tighten the 45-minute default", () => {
   const direct = { task: "Q", findingsPath: "/tmp/f.md" } as Record<string, unknown>;
-  // tighten: accepted
   const tight = mergeToolParams({
     direct,
     input: JSON.stringify({ maxWallClockMs: 60_000 }),
     fullSchema: RESEARCH_FULL_PARAMS,
   });
   assert.equal(tight.maxWallClockMs, 60_000);
-  // the 45-minute ceiling itself: accepted
   const ceiling = mergeToolParams({
     direct,
     input: JSON.stringify({ maxWallClockMs: DEFAULT_RESEARCH_WALL_CLOCK_MS }),
     fullSchema: RESEARCH_FULL_PARAMS,
   });
   assert.equal(ceiling.maxWallClockMs, DEFAULT_RESEARCH_WALL_CLOCK_MS);
-  // above the ceiling: rejected (tighten-only)
   assert.throws(
     () =>
       mergeToolParams({
@@ -2691,7 +2618,6 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
       }),
     /maxWallClockMs/,
   );
-  // non-positive or non-integer: rejected
   assert.throws(
     () => mergeToolParams({ direct, input: '{"maxWallClockMs": 0}', fullSchema: RESEARCH_FULL_PARAMS }),
     /maxWallClockMs/,
@@ -2701,15 +2627,6 @@ test("maxWallClockMs is a hidden positive integer that may only tighten the 45-m
     /maxWallClockMs/,
   );
 });
-
-// ---------------------------------------------------------------------------
-// S22 — Seam D: surface contract tests (ADR 0011). The model-facing contract
-// (tool names, required parameters, hidden parameters present only in the
-// full schema) is asserted against the shared lib module — no fake pi is
-// constructed (Path 1). The token-budget guard keeps the serialized surface
-// (description + parameter schema, ceil(chars/4)) within baseline × 1.2 of
-// the Seam E measurement recorded below.
-// ---------------------------------------------------------------------------
 
 // Seam E baseline — measured with `node scripts/benchmark-tools.ts`
 // (separate pi process, empty config, before_agent_start, ceil(chars/4)).
@@ -2733,14 +2650,12 @@ test("set-thinking-level requires the level enum and rejects values outside the 
 });
 
 test("thinkingLevel survives only as the per-task pass-through field", () => {
-  // the model-facing schemas no longer declare the top-level thinkingLevel
   assert.ok(!("thinkingLevel" in SUBAGENT_TOOL_PARAMS.properties!), "subagent public schema dropped it");
   assert.ok(!("thinkingLevel" in RESEARCH_TOOL_PARAMS.properties!), "research public schema dropped it");
   // a legacy top-level call still passes pi's lenient public validation (pi
   // never strips unknown keys) but must fail the full dispatch contract loudly
   assert.ok(Value.Check(SUBAGENT_TOOL_PARAMS, { agent: "a", task: "t", thinkingLevel: "high" }));
   assert.ok(!Value.Check(SUBAGENT_FULL_PARAMS, { agent: "a", task: "t", thinkingLevel: "high" }));
-  // the per-task/per-step pass-through (ADR 0020) survives both schemas
   assert.ok(Value.Check(SUBAGENT_FULL_PARAMS, { tasks: [{ agent: "a", task: "t", thinkingLevel: "high" }] }));
   assert.ok(Value.Check(SUBAGENT_FULL_PARAMS, { chain: [{ agent: "a", task: "t", thinkingLevel: "xhigh" }] }));
 });
@@ -2857,7 +2772,6 @@ test("the slimmed descriptions retain the load-bearing facts (Variant A, no drif
 });
 
 test("the preserved help texts carry the full teaching text (help-on-demand entry point, ADR 0012/0019)", () => {
-  // subagent
   assert.ok(
     SUBAGENT_HELP_TEXT.includes("does not return until every subagent finishes"),
     "blocking semantics survive in the help text",
@@ -2869,7 +2783,6 @@ test("the preserved help texts carry the full teaching text (help-on-demand entr
     "all seven bundled roles survive in the help text",
   );
   assert.ok(SUBAGENT_HELP_TEXT.includes(".pi/agents"), "the scope semantics survive in the help text");
-  // research
   assert.ok(RESEARCH_HELP_TEXT.includes("pushed to you"), "push delivery survives in the help text");
   assert.ok(RESEARCH_HELP_TEXT.includes("no polling"), "the no-polling contract survives in the help text");
   assert.ok(
@@ -2937,11 +2850,9 @@ test("buildSubagentEnv preserves the base environment and adds the marker with a
   const base = { HOME: "/home/u", PATH: "/usr/bin", EMPTY: "" };
   const env = buildSubagentEnv(base, "session-123");
   assert.ok(env !== base, "returns a fresh map, not the caller's object");
-  // every base key/value survives
   assert.equal(env.HOME, "/home/u");
   assert.equal(env.PATH, "/usr/bin");
   assert.equal(env.EMPTY, "");
-  // the marker names the parent session
   assert.equal(env[SUBAGENT_PARENT_SESSION_ENV], "session-123");
 });
 
@@ -2960,10 +2871,6 @@ test("buildSubagentEnv never mutates the caller's base", () => {
   buildSubagentEnv(base);
   assert.deepEqual(base, snapshot, "the caller's object is untouched");
 });
-
-// ---------------------------------------------------------------------------
-// Blocking invocation helpers (buildDispatchArgs / getPiInvocation)
-// ---------------------------------------------------------------------------
 
 test("buildDispatchArgs puts fixed flags first, then optional flags, then the task", () => {
   const args = buildDispatchArgs({
@@ -3009,8 +2916,6 @@ test("buildDispatchArgs resolves tool names through resolveTools before assembly
   const tools = toolsEntry.split(",").filter(Boolean);
   assert.ok(tools.includes("grep"), "ffgrep degrades to grep in the allowlist");
   assert.ok(!tools.includes("ffgrep"));
-  // bash resolves to the real bash when the registry has it (Git Bash honored
-  // on win32); it is never invented into powershell on other platforms.
   assert.ok(tools.includes("bash"), "bash stays bash when the registry has it");
   assert.ok(!tools.includes("powershell"), "powershell is not substituted when bash exists");
 });

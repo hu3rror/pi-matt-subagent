@@ -13,10 +13,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { emptyUsage, type AgentSource, type UsageStats } from "./lib.ts";
 
-// ---------------------------------------------------------------------------
-// Result type
-// ---------------------------------------------------------------------------
-
 /** One blocking subagent run's accumulated outcome (single / chain step / parallel task). */
 export interface SingleResult {
   agent: string;
@@ -36,10 +32,6 @@ export interface SingleResult {
   errorMessage?: string;
   step?: number;
 }
-
-// ---------------------------------------------------------------------------
-// Protocol accumulator
-// ---------------------------------------------------------------------------
 
 /**
  * The protocol-side accumulation surface: feed stdout chunks (buffered into
@@ -141,10 +133,6 @@ export function createResultAccumulator(opts: {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Escalating kill
-// ---------------------------------------------------------------------------
 
 /** The minimal process surface the kill path needs (structural; real spawn passes a ChildProcess). */
 export interface KillTarget {

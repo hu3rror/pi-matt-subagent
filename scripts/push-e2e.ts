@@ -61,7 +61,6 @@ export default function (pi: ExtensionAPI) {
     const sessionModel = ctx.model;
 
     void (async () => {
-      // Gate 1 — spawn + complete a real in-process research child.
       const findingsPath = path.join(os.tmpdir(), "push-e2e-findings.md");
       const teeLog = path.join(os.tmpdir(), "push-e2e-child-output.log");
       const child = createResearchChildSession({
@@ -113,8 +112,6 @@ export default function (pi: ExtensionAPI) {
         log("PUSH-E2E FAIL: gate 2");
       }
 
-      // Gate 3 — crash isolation: a child with a bogus model must fail without
-      // taking the main session down.
       try {
         const doomed = createResearchChildSession({
           cwd: ctx.cwd,

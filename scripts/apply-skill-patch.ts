@@ -34,7 +34,6 @@ interface Patch {
   render: (current: string) => string | null;
 }
 
-/** Full-file replacement: patch wins unless the target already equals it. */
 function fullFileReplacement(patched: string): Patch["render"] {
   // EOL-normalize before comparing: a sync that wrote the installed file with
   // CRLF must still be recognized as already-patched, or idempotency breaks.
@@ -59,7 +58,6 @@ function lineReplacement(anchorPrefix: string, patchedLine: string): Patch["rend
   };
 }
 
-/** Extracts the first ```markdown code block's content from a patch doc. */
 function extractMarkdownCodeBlock(docPath: string): string {
   const doc = fs.readFileSync(docPath, "utf-8");
   const m = doc.match(/```markdown\n([\s\S]*?)```/);
@@ -67,7 +65,6 @@ function extractMarkdownCodeBlock(docPath: string): string {
   return m[1].replace(/\s+$/, "") + "\n";
 }
 
-/** Extracts the first `> ` blockquote line after `## After` from a patch doc. */
 function extractAfterLine(docPath: string): string {
   const doc = fs.readFileSync(docPath, "utf-8");
   const m = doc.match(/## After\n\n> (.*)$/m);

@@ -13,10 +13,6 @@ import * as path from "node:path";
 import { Type, type TObject, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface RoleDef {
   description: string;
   tools?: string[];
@@ -45,16 +41,6 @@ export function scopeAllowsProject(scope: AgentScope): boolean {
   return scope === "project" || scope === "both";
 }
 
-// ---------------------------------------------------------------------------
-// Research wall-clock cap (ADR 0013)
-//   One hard control dimension replaces the retired five-budget machinery
-//   (ADR 0003/0008): a wall-clock cap, default 45 minutes, written into the
-//   researcher's prompt as a single line. Findings are checkpointed before
-//   each search round, so a kill or crash loses at most one round of work;
-//   the runner enforces the cap by aborting the in-process child and
-//   appending the slim `research-terminated` marker.
-// ---------------------------------------------------------------------------
-
 export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 45 * 60 * 1000;
 
 /**
@@ -66,16 +52,6 @@ export const DEFAULT_RESEARCH_WALL_CLOCK_MS = 45 * 60 * 1000;
  * must still arrive (ADR 0013: every terminal state is pushed).
  */
 const TEE_DRAIN_BOUND_MS = 500;
-
-// ---------------------------------------------------------------------------
-// Extension config surface (ADR 0018)
-//   A user-level, lazily-created JSON (`~/.pi/agent/extensions/` +
-//   `CONFIG_FILE_NAME`) exposing seven tunable knobs; the decode/validate/
-//   degrade and the optional-dispatch-knob handling live here (runtime-free)
-//   so the whole surface is pinned with node --test and the extension stays a
-//   thin wiring shell. Design rationale (per-key decode vs one strict object,
-//   the dispatch precedence layer, wall-clock ceiling) is in docs/adr/0018.
-// ---------------------------------------------------------------------------
 
 export const CONFIG_FILE_NAME = "matt-subagent.json";
 
@@ -318,9 +294,6 @@ export function parseConfigFile(raw: string | undefined | null): ConfigStatus {
   let effective = defaultConfig();
   for (const key of CONFIG_KEYS) {
     if (!(key in obj)) continue;
-    // decodeConfigValue already returns valid for an optional key's explicit
-    // null (the inherit marker) and for any structurally-valid value; only
-    // genuinely invalid values land here to degrade.
     const decoded = decodeConfigValue(key, obj[key]);
     if (decoded.valid) {
       effective = setConfigValue(effective, key, decoded.value);
@@ -369,10 +342,8 @@ export function parseConfigSetValue(
     if (trimmed === "false") return { ok: true, value: false };
     return { ok: false, reason: `${key} must be "true" or "false", got "${rawValue}"` };
   }
-  // Optional knobs: inherit/empty clears the override.
   const trimmed = rawValue.trim();
   if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
-  // The extensions knob takes a comma-separated package list.
   if (spec.kind === "extensions") {
     const items = trimmed.split(",").map((s) => s.trim()).filter((s) => s !== "");
     return items.length > 0
@@ -576,16 +547,6 @@ export function formatConfigOverview(status: ConfigStatus, configPath: string, e
   return lines.join("\n");
 }
 
-
-// ---------------------------------------------------------------------------
-// Workflow presets (issue #41)
-//   The three built-in slash-command presets ship as markdown files and are
-//   registered by the extension as config-gated commands behind the
-//   `hideWorkflowPresets` knob. This section owns the pure mechanics: reading
-//   a preset file (frontmatter + body), shell-like argument parsing, and
-//   argument substitution byte-equivalent to pi's prompt-template expansion.
-// ---------------------------------------------------------------------------
-
 /** A loaded workflow-preset file: frontmatter description plus the body text. */
 export interface WorkflowPreset {
   name: string;
@@ -711,26 +672,6 @@ export function expandPresetText(content: string, argsString: string): string {
   return substitutePresetText(content, parsePresetArgs(argsString));
 }
 
-// ---------------------------------------------------------------------------
-// Tool parameter schemas and the `input` escape hatch (ADR 0011)
-//   Single source of truth for both tools' model-facing parameter schemas,
-//   shared by the extension (registration + dispatch validation) and the
-//   contract tests (Seam D). The public schemas are the frozen surface plus
-//   one optional `input` field; the full schemas add the remaining hidden
-//   parameters (`thinkingOverride` / `maxWallClockMs`) the runtime dispatch
-//   layer already supports but the public schema hides. The per-run `model`
-//   override is a public field on both tools (ADR 0022). Merge semantics
-//   follow the lightweight-subagents-facade pattern: direct fields override
-//   same-name JSON keys (`{ ...parsed, ...direct }`), absent/empty `input` is
-//   a passthrough, and a non-object or unparseable value raises a
-//   model-visible tool error. After merging, the object is validated against
-//   the full contract; failures are summarized with field paths.
-//   Issue #39 — the public `thinkingLevel` parameter is gone from both tools
-//   (the randomness source); a legacy call carrying it now fails the full
-//   contract as an unknown parameter, and the deterministic decision layers
-//   plus the `set-thinking-level` tool own thinking effort.
-// ---------------------------------------------------------------------------
-
 const AgentScopeSchema = Type.Union(AGENT_SCOPES.map((s) => Type.Literal(s)));
 const ThinkingLevelSchema = Type.Union(THINKING_LEVELS.map((l) => Type.Literal(l)));
 
@@ -768,7 +709,6 @@ const ResearchPublicFields = {
   cwd: Type.Optional(Type.String({ description: "Working directory" })),
   tools: Type.Optional(Type.Array(Type.String({ description: "Tool names to enable" }))),
   agentScope: Type.Optional(AgentScopeSchema),
-  // ADR 0022 — same move as `subagent`'s model override: public field now.
   model: ModelOverrideField,
 };
 
@@ -1014,11 +954,6 @@ interface ValidationErrorLike {
   params?: Record<string, unknown>;
 }
 
-/**
- * Collapses a TypeBox error stream into one field-path-keyed summary: unknown
- * keys become `<path>: unknown parameter`, union alternatives collapse to
- * `must be one of: ...`, and a type mismatch keeps its own message.
- */
 function summarizeValidationErrors(errors: Iterable<ValidationErrorLike>): string {
   const byPath = new Map<string, { allowed: string[]; message?: string }>();
   for (const e of errors) {
@@ -1084,10 +1019,6 @@ export interface UsageStats {
   contextTokens: number;
   turns: number;
 }
-
-// ---------------------------------------------------------------------------
-// Embedded roles
-// ---------------------------------------------------------------------------
 
 export const EMBEDDED_ROLES: Record<string, RoleDef> = {
   "standards-reviewer": {
@@ -1206,10 +1137,6 @@ Report only: audited files, how many comments must die, every MUST KILL on one l
   },
 };
 
-// ---------------------------------------------------------------------------
-// Discovery
-// ---------------------------------------------------------------------------
-
 function parseToolList(value: unknown): string[] | undefined {
   const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
   const tools = raw
@@ -1311,10 +1238,6 @@ export function discoverAgents(
 
   return { agents: Array.from(map.values()), projectAgentsDir };
 }
-
-// ---------------------------------------------------------------------------
-// Tool resolution and usage
-// ---------------------------------------------------------------------------
 
 /**
  * Tool-name aliases for third-party enhanced search tools (e.g. fff's
@@ -1500,10 +1423,6 @@ export function resolveTools(
 export function emptyUsage(): UsageStats {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
-
-// ---------------------------------------------------------------------------
-// Background research
-// ---------------------------------------------------------------------------
 
 export const DEFAULT_RESEARCH_TOOLS = [
   "read",
@@ -1919,10 +1838,6 @@ export function runBackgroundResearch(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Role resolution and research prompt
-// ---------------------------------------------------------------------------
-
 export function resolveRole(agents: AgentConfig[], name: string): AgentConfig | undefined {
   return agents.find((a) => a.name === name);
 }
@@ -2116,15 +2031,6 @@ export interface ResearchStatusDetails {
   lastOutput?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Research termination marker (ADR 0013)
-//   The slim `research-terminated` marker the runner appends to the findings
-//   file on a wall-clock kill: reason (always `wall_clock_exceeded`) and a
-//   timestamp. A standalone reader — a later session, or the file shipped as
-//   the deliverable — tells truncation from completion by its presence,
-//   without the push's context. `partial` is implied by the marker itself.
-// ---------------------------------------------------------------------------
-
 /**
  * Appends the slim termination marker to the findings file (creating it if
  * absent) on a wall-clock kill. Frozen format, asserted by tests.
@@ -2151,15 +2057,6 @@ function trimNumber(n: number): string {
   return fixed.replace(/\.?0+$/, "");
 }
 
-// ---------------------------------------------------------------------------
-// Run registry (D3)
-//   In-process registry of every tracked subagent run — blocking (single /
-//   parallel / chain steps) and background (research) alike — plus the pure
-//   display layer (`formatRunSnapshot`) and the outcome mappings used by the
-//   extension to move runs to their terminal status. Zero pi-runtime imports
-//   so it is testable with `node --test`.
-// ---------------------------------------------------------------------------
-
 export const RUN_STATUSES = ["queued", "running", "succeeded", "failed", "aborted", "terminated"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
@@ -2178,10 +2075,6 @@ export function isTerminalRunStatus(status: RunStatus): boolean {
   return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status);
 }
 
-/**
- * The legal status transitions. A queued run may be aborted before its slot
- * opens; a running run may terminate into any terminal status.
- */
 const RUN_STATUS_TRANSITIONS: Record<RunStatus, readonly RunStatus[]> = {
   queued: ["running", "aborted"],
   running: ["succeeded", "failed", "aborted", "terminated"],
@@ -2305,12 +2198,10 @@ export const RUN_STATUS_ICONS: Record<RunStatus, string> = {
   terminated: "⛔",
 };
 
-/** Formats the elapsed duration since `startedAt` (reuses formatDuration). */
 function formatElapsed(startedAt: number, now: number): string {
   return formatDuration(Math.max(0, now - startedAt));
 }
 
-/** Human-readable start time: local HH:MM:SS. */
 function formatStartTime(startedAt: number): string {
   const d = new Date(startedAt);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -2399,10 +2290,6 @@ export function formatTokens(count: number): string {
   return `${(count / 1000000).toFixed(1)}M`;
 }
 
-/**
- * Renders one run as a display row: icon + role (source) + status label +
- * started time + elapsed, then indented detail lines when present.
- */
 function formatRunRow(run: RunEntry, now: number): string[] {
   const icon = RUN_STATUS_ICONS[run.status];
   // terminal runs show their actual duration (endedAt), not elapsed since the
@@ -2533,20 +2420,11 @@ export function isToolError(result: { exitCode: number; stopReason?: string }): 
   return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
-// ---------------------------------------------------------------------------
-// Result output extraction
-//   One structural message shape shared by the blocking protocol and the
-//   research child session (the two pi message types are structurally
-//   identical over the parts we read), so both channels agree on what "the
-//   final output" is.
-// ---------------------------------------------------------------------------
-
 export interface AssistantMessageLike {
   role?: string;
   content?: unknown;
 }
 
-/** The text parts of one message (non-array content and non-text parts are tolerated). */
 function textPartsOfMessage(msg: AssistantMessageLike): Array<{ type?: string; text?: string }> {
   return Array.isArray(msg.content)
     ? (msg.content as Array<{ type?: string; text?: string }>).filter((p) => p.type === "text" && typeof p.text === "string")
@@ -2628,17 +2506,6 @@ export function toolErrorMessage(err: unknown): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tool-error details payload (ADR 0016)
-//   Since pi 0.99.1 a tool may return an error result (`isError: true`) instead
-//   of throwing. The `subagent` tool converts its orchestrator's throw at the
-//   tool boundary and shapes the failed run's terminal info from the registry
-//   (decided Q2=b): status, agent, source, usage, model, thinking level — the
-//   display fields that make a failure legible in the transcript. The coverage
-//   rule (3b) and the exceptions (parallel aggregate, input-JSON) are separate
-//   concerns documented in ADR 0016.
-// ---------------------------------------------------------------------------
-
 /** The terminal-run info an error-marked subagent result carries (ADR 0016). */
 export interface SubagentRunError {
   status: "failed" | "aborted";
@@ -2676,15 +2543,6 @@ export function toolErrorDetails(snapshot: readonly RunEntry[], sinceIndex: numb
     ...(failed.requestedThinking !== undefined ? { requestedThinking: failed.requestedThinking } : {}),
   };
 }
-
-// ---------------------------------------------------------------------------
-// Run management (D6)
-//   Manual kill / prune / tail plumbing that lives in the pure layer so it is
-//   testable under `node --test`; the extension wires it to the /subagents
-//   command. Since ADR 0013 the research child is in-process: kill aborts the
-//   child session via the extension-side AbortController (no OS signals), and
-//   the run resolves `aborted` through the runner's onExit.
-// ---------------------------------------------------------------------------
 
 export type SubagentsCommand =
   | { action: "snapshot" }
