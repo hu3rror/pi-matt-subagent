@@ -1339,11 +1339,11 @@ test("embedded roles carry per-role thinking levels", () => {
   try {
     const { agents } = discoverAgents(root, path.join(root, "agentDir"), ".pi", "user", stubParser);
     const levelOf = (name: string) => agents.find((a) => a.name === name)?.thinkingLevel;
-    assert.equal(levelOf("standards-reviewer"), "medium");
-    assert.equal(levelOf("spec-reviewer"), "medium");
+    assert.equal(levelOf("standards-reviewer"), "high");
+    assert.equal(levelOf("spec-reviewer"), "high");
     assert.equal(levelOf("architecture-scout"), "medium");
     assert.equal(levelOf("design-explorer"), "medium");
-    assert.equal(levelOf("researcher"), "medium");
+    assert.equal(levelOf("researcher"), "high");
     assert.equal(levelOf("comment-sicko"), "medium");
     assert.equal(levelOf("fact-finder"), "low");
   } finally {

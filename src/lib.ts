@@ -1025,7 +1025,7 @@ export const EMBEDDED_ROLES: Record<string, RoleDef> = {
     description:
       "Standards axis of a two-axis review: does the diff conform to the repo's documented standards (and the smell baseline)?",
     tools: ["read", "grep", "find", "ls", "bash"],
-    thinkingLevel: "medium",
+    thinkingLevel: "high",
     systemPrompt: `You are the Standards axis of a two-axis code review. You receive a diff command and commit list, the standards-source files, and the full smell baseline, and you report violations.
 
 Report, per file/hunk where relevant:
@@ -1041,7 +1041,7 @@ The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only com
     description:
       "Spec axis of a two-axis review: does the diff faithfully implement the originating issue / spec?",
     tools: ["read", "grep", "find", "ls", "bash"],
-    thinkingLevel: "medium",
+    thinkingLevel: "high",
     systemPrompt: `You are the Spec axis of a two-axis code review. You receive a diff command and commit list, and the originating spec (path or fetched contents), and you report fidelity.
 
 Report:
@@ -1094,7 +1094,7 @@ Report findings with exact file paths and line ranges, grouped by severity, and 
     description:
       "Investigates a question against primary sources and writes cited findings to a Markdown file.",
     tools: ["read", "grep", "find", "ls", "bash", "write", "web_access", "query-docs", "resolve-library-id"],
-    thinkingLevel: "medium",
+    thinkingLevel: "high",
     systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
 
 Write your findings to a single Markdown file at the findings path given in your task, citing each claim's source. The file is the deliverable; do not answer in chat.`,
