@@ -58,6 +58,7 @@ import {
   RESEARCH_HELP_TEXT,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
+  researchChildToolNames,
   resolveRole,
   resolveDispatchThinking,
   resolveThinkingLevel,
@@ -195,6 +196,67 @@ test("pathIsInsidePackage rejects other packages, unrelated paths, and prefixes"
   assert.ok(!pathIsInsidePackage("/n/node_modules/pi-web-access-lean2/x.ts", "pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/n/node_modules/@ssk_dev/index.ts", "@ssk_dev/pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/tmp/somewhere.ts", "read"));
+});
+
+// Issue #43 — the research child's available tool set is built-in names
+// (derived from pi's public tool factories) UNIONED with the knob-package
+// tools, never "registry entries whose source is the built-in source": a
+// built-in name shadowed by an extension in the main session (e.g. a
+// hashline-based read/grep) must still resolve, because the child does not
+// load the shadowing extension and gets pi's built-in implementation.
+test("researchChildToolNames keeps built-in names even when the registry entry comes from a package", () => {
+  const result = researchChildToolNames({
+    builtinNames: new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]),
+    registryTools: [
+      { name: "read", sourcePath: "/n/node_modules/hashline-tools/read.ts" },
+      { name: "grep", sourcePath: "/n/node_modules/hashline-tools/grep.ts" },
+    ],
+    knob: [],
+    platform: "win32",
+  });
+  assert.ok(result.names.has("read"), "shadowed read is a built-in name, so the child must get it");
+  assert.ok(result.names.has("grep"), "shadowed grep is a built-in name, so the child must get it");
+  assert.ok(result.names.has("write"), "unshadowed built-ins are present too");
+  assert.deepEqual(result.packagesNotLoaded, []);
+});
+
+test("researchChildToolNames with an empty knob reduces to the built-in names", () => {
+  const result = researchChildToolNames({
+    builtinNames: new Set(["read", "bash", "grep", "powershell"]),
+    registryTools: [],
+    knob: [],
+    platform: "linux",
+  });
+  assert.deepEqual([...result.names].sort(), ["bash", "grep", "read"], "off-win32 the built-in powershell is excluded");
+  assert.deepEqual(result.packagesNotLoaded, []);
+});
+
+test("researchChildToolNames unions knob-package tools and reports knob packages that registered nothing", () => {
+  const result = researchChildToolNames({
+    builtinNames: new Set(["read", "grep"]),
+    registryTools: [
+      { name: "web_access", sourcePath: "/n/node_modules/@ssk_dev/pi-web-access-lean/index.ts" },
+      { name: "query-docs", sourcePath: "/n/node_modules/@upstash/context7-pi/extensions/index.ts" },
+      // A package that is NOT in the knob: its tool must drop (not a
+      // built-in, not provided by a kept knob package) and its package must
+      // not be reported (only knob packages are drift-reported).
+      { name: "mystery", sourcePath: "/n/node_modules/some-other-pkg/x.ts" },
+    ],
+    knob: ["npm:@ssk_dev/pi-web-access-lean", "npm:@upstash/context7-pi", "npm:ghost-pkg"],
+    platform: "win32",
+  });
+  assert.ok(result.names.has("web_access"));
+  assert.ok(result.names.has("query-docs"));
+  assert.ok(!result.names.has("mystery"), "a non-built-in from a non-knob package must drop");
+  assert.deepEqual(result.packagesNotLoaded, ["ghost-pkg"], "knob packages with no registered tool are reported");
+});
+
+test("researchChildToolNames keeps the platform shell rules (powershell off-win32, kept on win32)", () => {
+  const builtinNames = new Set(["read", "powershell"]);
+  const off = researchChildToolNames({ builtinNames, registryTools: [], knob: [], platform: "darwin" });
+  assert.ok(!off.names.has("powershell"), "off-win32 the built-in powershell is registered but not callable, so it is excluded");
+  const on = researchChildToolNames({ builtinNames, registryTools: [], knob: [], platform: "win32" });
+  assert.ok(on.names.has("powershell"), "on win32 the built-in powershell is callable and stays");
 });
 
 test("childLoadoutReport reports a healthy loadout even when the allowlist excludes its tools", () => {

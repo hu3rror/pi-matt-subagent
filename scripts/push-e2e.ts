@@ -38,14 +38,71 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createResearchChildSession, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
-import { DEFAULT_RESEARCH_CHILD_EXTENSIONS, EMBEDDED_ROLES } from "../src/lib.ts";
+import { createResearchChildSession, probeChildToolNames, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
+import { DEFAULT_RESEARCH_CHILD_EXTENSIONS, EMBEDDED_ROLES, resolveTools } from "../src/lib.ts";
 
 export default function (pi: ExtensionAPI) {
   const logPath = path.join(os.tmpdir(), "push-e2e.log");
   fs.writeFileSync(logPath, "", { encoding: "utf-8" });
   const log = (msg: string) => fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`);
+  const shadowError = (what: string, err: unknown) => ({
+    content: [{ type: "text" as const, text: `${what} failed: ${(err as Error).message}` }],
+    details: {},
+    isError: true,
+  });
+
+  // Gate 6 — issue #43: shadow the built-in read/grep in the MAIN registry the
+  // way a tool-replacing extension does (extension tools carry
+  // `source: "extension"`, overwriting pi's built-in entries). The research
+  // child does NOT load this extension, so it must still get pi's built-in
+  // implementations; the probe recognizes a built-in by NAME (derived from
+  // pi's public tool factories), not by which extension owns it in the main
+  // session. The shadows stay callable so the main turn keeps working.
+  pi.registerTool({
+    name: "read",
+    label: "Read (push-e2e shadow)",
+    description: "Read a file (shadow of the built-in read for the issue #43 gate).",
+    parameters: Type.Object({
+      path: Type.String({ description: "File to read." }),
+      offset: Type.Optional(Type.Integer({ description: "1-based starting line." })),
+      limit: Type.Optional(Type.Integer({ description: "Maximum number of lines to return." })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const lines = fs.readFileSync(params.path, "utf8").split("\n");
+        const start = Math.max(0, (params.offset ?? 1) - 1);
+        const slice = params.limit ? lines.slice(start, start + params.limit) : lines.slice(start);
+        const text = slice.map((l, i) => `${start + i + 1}│${l}`).join("\n");
+        return { content: [{ type: "text", text: text || "(empty)" }], details: {} };
+      } catch (err) {
+        return shadowError("read", err);
+      }
+    },
+  });
+  pi.registerTool({
+    name: "grep",
+    label: "Grep (push-e2e shadow)",
+    description: "Search a file for a pattern (shadow of the built-in grep for the issue #43 gate).",
+    parameters: Type.Object({
+      pattern: Type.String({ description: "Substring to search for." }),
+      path: Type.String({ description: "File to search." }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const hits = fs
+          .readFileSync(params.path, "utf8")
+          .split("\n")
+          .map((l, i) => ({ i, l }))
+          .filter(({ l }) => l.includes(params.pattern))
+          .map(({ i, l }) => `${i + 1}:${l}`);
+        return { content: [{ type: "text", text: hits.length > 0 ? hits.join("\n") : "no matches" }], details: {} };
+      } catch (err) {
+        return shadowError("grep", err);
+      }
+    },
+  });
 
   const children: Array<{ abort(): void }> = [];
   let started = false;
@@ -218,6 +275,47 @@ export default function (pi: ExtensionAPI) {
         okMessage: "loadout report reflects the loader, not the allowlist",
         failMessage: "loadout line above shows the regression",
       });
+
+      // Gate 6 — issue #43: the main-session registry's read/grep now come
+      // from THIS extension (the shadows registered at load), not from pi.
+      // The probe must still hand the built-in names to a research child,
+      // which does not load the shadowing extension and gets pi's built-in
+      // implementations. Probe with an empty knob (network off → built-ins
+      // only), resolve the declared researcher tools against it, build a real
+      // child with that allowlist, and require the child-loadout self-report
+      // to show no allowlist-missing line.
+      try {
+        const shadowProbe = probeChildToolNames(pi, []);
+        const shadowAllowlist = resolveTools(declared, shadowProbe.names) ?? [];
+        const child = createResearchChildSession({
+          cwd: sessionCwd,
+          model: sessionModel,
+          thinkingLevel: "off",
+          extensions: [],
+          tools: shadowAllowlist,
+          systemPrompt: "You are a loadout check. Reply with exactly: pong",
+          task: "Reply with exactly: pong",
+          findingsPath: path.join(os.tmpdir(), "push-e2e-shadow-findings.md"),
+        });
+        children.push(child);
+        let out = "";
+        void (async () => {
+          for await (const chunk of child.output) out += chunk;
+        })().catch(() => {});
+        await child.done;
+        log(`(6) shadow probe names: ${[...shadowProbe.names].sort().join(", ")}`);
+        log(`(6) resolved allowlist: ${shadowAllowlist.join(", ")}`);
+        const ok =
+          shadowProbe.names.has("read") &&
+          shadowProbe.names.has("grep") &&
+          shadowAllowlist.includes("read") &&
+          shadowAllowlist.includes("grep") &&
+          !out.includes("[child-loadout] allowlist missing from loadout:");
+        log(ok ? "PUSH-E2E OK: gate 6 (shadowed built-ins stay available to the research child)" : "PUSH-E2E FAIL: gate 6");
+      } catch (err) {
+        log(`(6) shadow child FAILED: ${(err as Error).message}`);
+        log("PUSH-E2E FAIL: gate 6");
+      }
     })().catch((err) => {
       log(`push-e2e async body errored: ${(err as Error).stack ?? (err as Error).message}`);
     });

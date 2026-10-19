@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runBackgroundResearch, type ResearchExitInfo } from "./lib.ts";
+import { runBackgroundResearch, researchChildToolNames, type CreateChildSession, type ResearchExitInfo } from "./lib.ts";
 import { embeddedResearcher, fakeChild } from "./test-helpers.ts";
 
 test("background research writes findings without blocking the caller (fake child)", async (t) => {
@@ -151,4 +151,64 @@ test("a manual kill resolves aborted with no marker (real timers)", async (t) =>
   assert.deepEqual(exits, [{ status: "aborted" }]);
   assert.ok(aborted, "the child must be aborted on a manual kill");
   assert.ok(!fs.existsSync(findingsPath), "no termination marker on a manual kill");
+});
+
+test("the allowlist handed to the research child keeps built-in names shadowed in the parent registry (issue #43)", async (t) => {
+  // The fixed probe's output for a main-session registry where read/grep
+  // come from a shadowing package and an empty knob: built-ins ∪ nothing, so
+  // the shadowed names stay available to the child, which does not load the
+  // shadowing extension.
+  const available = researchChildToolNames({
+    builtinNames: new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]),
+    registryTools: [
+      { name: "read", sourcePath: "/n/node_modules/hashline-tools/read.ts" },
+      { name: "grep", sourcePath: "/n/node_modules/hashline-tools/grep.ts" },
+    ],
+    knob: [],
+    platform: process.platform,
+  }).names;
+  assert.ok(available.has("read"));
+  assert.ok(available.has("grep"));
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a2-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  let childOpts: Parameters<CreateChildSession>[0] | undefined;
+  const done = new Promise<void>((resolve) => setTimeout(resolve, 400));
+  const exits: ResearchExitInfo[] = [];
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      tools: ["read", "grep", "find", "ls", "bash", "write"],
+      availableToolNames: available,
+      onExit: (info) => exits.push(info),
+    },
+    (opts) => {
+      childOpts = opts;
+      return fakeChild({ done });
+    },
+  );
+  t.after(async () => {
+    await done;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && exits.length === 0) {
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.deepEqual(exits, [{ status: "succeeded" }]);
+
+  assert.ok(childOpts, "the child was created with the resolved allowlist");
+  assert.ok(childOpts!.tools!.includes("read"), "the child's allowlist keeps the shadowed built-in read");
+  assert.ok(childOpts!.tools!.includes("grep"), "the child's allowlist keeps the shadowed built-in grep");
+  assert.ok(
+    childOpts!.systemPrompt.includes("Available tools (the only tools you can call): read, grep, find, ls, bash, write"),
+    "the prompt's tool line lists the shadowed built-ins",
+  );
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  assert.ok(!logText.includes("[research-drift]"), "no drift line when the shadowed built-ins resolve");
 });

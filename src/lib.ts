@@ -1286,6 +1286,56 @@ export function pathIsInsidePackage(filePath: string, pkgName: string): boolean 
 }
 
 /**
+ * The tool names a research child can actually call (issue #43): pi's
+ * built-in names — injected as data, derived at runtime from pi's public
+ * tool factories (coding tools, read-only tools, powershell tool) by the
+ * extension — UNIONED with the tools provided by the knob-package extensions
+ * the child's loader keeps. The main-session registry is consulted only for
+ * the knob-package half, matched by install path (the same predicate the
+ * child loader's filter uses, so probe and loadout cannot drift):
+ *
+ * - A built-in name SHADOWED by an extension in the main session stays
+ *   available: the child does not load the shadowing extension, so it gets
+ *   pi's built-in implementation. The old predicate ("this registry entry's
+ *   source is the built-in source") misclassified that case and silently
+ *   dropped read/grep from the child's allowlist.
+ * - A name that is neither built-in nor provided by a kept knob package is
+ *   dropped, and its knob package (when it is one) is reported as not
+ *   loaded, exactly as before.
+ * - The platform shell rule keeps its behavior: off-win32 the built-in
+ *   powershell is registered but not callable (pi's implementation throws),
+ *   so it is excluded; an empty knob reduces the result to the built-ins.
+ */
+export function researchChildToolNames(input: {
+  /** pi's built-in tool names, derived at runtime from the installed pi's public tool factories. */
+  builtinNames: ReadonlySet<string>;
+  /** The main session's tool registry entries: name plus install path (absent for built-ins). */
+  registryTools: ReadonlyArray<{ name: string; sourcePath?: string }>;
+  /** The knob package specs in effect for the run (effectiveResearchChildExtensions). */
+  knob: string[];
+  /** Off-win32 the built-in powershell is excluded. */
+  platform: NodeJS.Platform;
+}): { names: ReadonlySet<string>; packagesNotLoaded: string[] } {
+  const names = new Set(input.builtinNames);
+  const packagesHit = new Set<string>();
+  for (const t of input.registryTools) {
+    const sourcePath = t.sourcePath ?? "";
+    for (const k of input.knob) {
+      if (pathIsInsidePackage(sourcePath, packageNameOfSpec(k))) {
+        packagesHit.add(packageNameOfSpec(k));
+        names.add(t.name);
+        break;
+      }
+    }
+  }
+  if (input.platform !== "win32") names.delete("powershell");
+  return {
+    names,
+    packagesNotLoaded: [...new Set(input.knob.map(packageNameOfSpec).filter((p) => !packagesHit.has(p)))],
+  };
+}
+
+/**
  * The research child's loadout self-report lines (issue #37), computed from
  * the LOADOUT TRUTH — the tools registered by the knob-package extensions the
  * loader filter actually kept — plus the allowlist-side drift check. The

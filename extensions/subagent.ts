@@ -32,6 +32,9 @@ import {
   type AgentSession,
   CONFIG_DIR_NAME,
   createAgentSession,
+  createCodingTools,
+  createPowerShellTool,
+  createReadOnlyTools,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
@@ -80,6 +83,7 @@ import {
   planRunThinking,
   presetsDirOf,
   readLogTail,
+  researchChildToolNames,
   researchStatusContent,
   RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
@@ -401,57 +405,55 @@ function updateSubagentFooter(
 }
 
 /**
- * Probes the tool registry of the current (main) session for the names a
- * child subagent process can be handed via `--tools`. The child starts from
- * the same settings and extensions as this session, so its registry is the
- * main registry intersected with the `--tools` allowlist: probing here and
- * filtering each role's declarations against it keeps names that only exist
- * in this environment (e.g. fff's ffgrep/ffind outside override mode) or not
- * at all out of the child's allowlist.
+ * The built-in tool-name set, derived at runtime from pi's public tool
+ * factories (coding tools, read-only tools, powershell tool); their union
+ * reproduces pi's internal built-in name set, which is not exported. Deriving
+ * it at runtime means a pi upgrade cannot silently reintroduce a
+ * misclassification (the set follows the installed pi, never this package).
+ * Only names are read; the factories' cwd never matters.
  */
-function probeAvailableToolNames(pi: ExtensionAPI): ReadonlySet<string> {
-  return new Set(pi.getAllTools().map((t) => t.name));
+function builtInToolNames(): ReadonlySet<string> {
+  const cwd = process.cwd();
+  return new Set([
+    ...createCodingTools(cwd).map((t) => t.name),
+    ...createReadOnlyTools(cwd).map((t) => t.name),
+    createPowerShellTool(cwd).name,
+  ]);
 }
 
 /**
- * Probes the tool set a research child can actually call (issue #37) — the
- * built-ins plus the tools whose extension source is one of the knob's
- * packages — NOT the main session's full registry (the incident root cause:
- * the child had no web tools while the parent did). Tools are matched by
- * their install path (`node_modules/<pkg>`; the same predicate the child
- * loader's filter uses, so probe and loadout cannot drift); a tool's
- * `sourceInfo` is the same object as its extension's, and built-ins all
- * carry `source === "builtin"`. Off-win32, powershell is registered but not
- * callable (pi's implementation throws), so it is excluded here too. An
- * empty knob (network off) reduces the probe to built-ins. Also reports the
+ * Probes the tool names a child can actually call, shared by both subagent
+ * paths (issue #43). The research child's loadout is built-ins ∪ knob-package
+ * tools (issue #37) — NOT the main session's full registry (the incident root
+ * cause: the child had no web tools while the parent did). The built-in half
+ * is name-based (`builtInToolNames`, injected into the pure logic layer as
+ * data): a built-in name shadowed by an extension in the main session (e.g. a
+ * hashline-based read/grep) stays available, because the child does not load
+ * the shadowing extension and gets pi's built-in implementation. The
+ * knob-package half is matched by install path (`node_modules/<pkg>`; the
+ * same predicate the child loader's filter uses, so probe and loadout cannot
+ * drift). An empty knob reduces the probe to the built-ins. Also reports the
  * knob packages for which NOTHING registered — a mistyped or uninstalled
  * package stays silent when no role declares its tools, so the caller warns.
+ *
+ * With `knob` undefined (the blocking path) the child inherits the full
+ * extension set, so every registry name resolves; unioning the built-in names
+ * in is harmless there (they are already present) and keeps the two paths on
+ * one helper.
  */
-function probeResearchChildTools(
+export function probeChildToolNames(
   pi: ExtensionAPI,
-  knob: string[],
+  knob: string[] | undefined,
 ): { names: ReadonlySet<string>; packagesNotLoaded: string[] } {
-  const names = new Set<string>();
-  const packagesHit = new Set<string>();
-  for (const t of pi.getAllTools()) {
-    if (t.sourceInfo?.source === "builtin") {
-      names.add(t.name);
-      continue;
-    }
-    const path = t.sourceInfo?.path ?? "";
-    for (const k of knob) {
-      if (pathIsInsidePackage(path, packageNameOfSpec(k))) {
-        packagesHit.add(packageNameOfSpec(k));
-        names.add(t.name);
-        break;
-      }
-    }
+  const registryTools = pi.getAllTools().map((t) => ({ name: t.name, sourcePath: t.sourceInfo?.path }));
+  const builtinNames = builtInToolNames();
+  if (knob === undefined) {
+    return {
+      names: new Set([...registryTools.map((t) => t.name), ...builtinNames]),
+      packagesNotLoaded: [],
+    };
   }
-  if (process.platform !== "win32") names.delete("powershell");
-  return {
-    names,
-    packagesNotLoaded: [...new Set(knob.map(packageNameOfSpec).filter((p) => !packagesHit.has(p)))],
-  };
+  return researchChildToolNames({ builtinNames, registryTools, knob, platform: process.platform });
 }
 
 async function confirmProjectAgents(
@@ -1138,7 +1140,7 @@ export default function (pi: ExtensionAPI) {
         fullSchema: SUBAGENT_FULL_PARAMS,
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
-      const availableToolNames = probeAvailableToolNames(pi);
+      const availableToolNames = probeChildToolNames(pi, undefined).names;
       // Model resolution for pre-clamp (ADR 0018): a provider/id string any
       // source produced → Model object; unresolvable stays undefined so the
       // child's existing loud unknown-model error is preserved untouched.
@@ -1384,7 +1386,7 @@ export default function (pi: ExtensionAPI) {
       // session's full registry (the incident root cause). The same knob
       // reaches the child factory, so probe and loadout cannot drift.
       const knob = effectiveResearchChildExtensions(config);
-      const probe = probeResearchChildTools(pi, knob);
+      const probe = probeChildToolNames(pi, knob);
       const availableToolNames = probe.names;
       const findingsPath = path.isAbsolute(merged.findingsPath)
         ? merged.findingsPath
