@@ -5,9 +5,12 @@ Rules for code written in this repository. Agent behavior rules live in `AGENTS.
 ## Comments
 
 - The code is the source of truth; a comment never is. When a comment and the code disagree, the code wins: fix the comment or delete it.
-- Default to no comments for what the code already says — names and structure should be the explanation.
-- Comment only what the code cannot express, as a constraint that still binds: hidden constraints, counterintuitive behavior, deliberate deviations, compatibility requirements. When the code changes, update or delete the comment; keep no comment that describes code as it once was.
+- No comment survives on comfort: a comment is kept only when it states a constraint the code cannot express and we cannot encode — hidden constraints, counterintuitive behavior, deliberate deviations, compatibility requirements — and it must show it still binds. Ambiguity is a defect: when in doubt, delete.
+- Encode before commenting. A constraint worth stating is worth encoding as a type, a runtime check, a test, or a CI lint rule; a comment is the fallback for what cannot be encoded, not the first resort. An encoded constraint is enforced; a comment is a promise.
+- Lint and type-checker suppressions are comments: silent suppressions are defects; correctness or safety suppressions carry the same proof as any other kept comment.
+- Bare `TODO`/`FIXME` are defects: a deferred item is an issue with an owner, referenced as `TODO(#NN)`.
 - Document exported API — symbols other code or packages consume — with doc comments that state the contract (purpose, invariants, units, thread-safety, caller obligations).
+- Do not restate the code: the contract is what the name and signature cannot say.
 - Trade-off rationale and rejected alternatives live in ADRs, not in code comments.
 
 ## Error handling
@@ -36,7 +39,7 @@ Rules for code written in this repository. Agent behavior rules live in `AGENTS.
 - Updating or merging an existing standards file: the human decides what changes.
 - Writing ADRs: rationale belongs in ADRs, and the doc points there.
 
-<!-- end of baseline v1; repo-owned content below survives baseline updates -->
+<!-- end of baseline v2; repo-owned content below survives baseline updates -->
 
 ## Repo conventions
 
