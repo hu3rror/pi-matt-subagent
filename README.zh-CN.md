@@ -90,7 +90,7 @@ pi install <path-to-this-repo>
 | `maxConcurrency` | 4 | 并行模式下同时运行的 subagent 进程数上限 |
 | `perTaskOutputCap` | 50 KiB | 并行聚合中单个任务摘要输出的字节上限 |
 | `researchWallClockMs` | 45 分钟 | 后台 research 的默认运行时长上限，也是 `input.maxWallClockMs` 的硬上限（已显式配置的旧值会压过新默认——重置该键才能拿到 45 分钟） |
-| `researchChildExtensions` | （默认两包） | research 子会话装载的 npm 包：默认 `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`；只有在 JSON 文件里显式写成空数组才彻底禁用扩展 |
+| `researchChildExtensions` | `[]`（安静默认） | research 子会话装载的 npm 包；空列表即安静默认（只有内置工具、无网络）。配置了包之后，包的工具**自动**进入子会话——一步完成，无需改角色。`set` 接受逗号列表；`config reset researchChildExtensions` 回到安静默认 |
 | `logTailBytes` | 4096 | `/subagents tail` 读取日志的字节上限 |
 | `dispatchDefaultModel` | （继承） | 调用和角色都未指定时的默认 `provider/id` |
 | `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对七个内置角色生效，不再是死配置）；未设时 → 继承主会话档位（原样） |
@@ -106,6 +106,7 @@ pi install <path-to-this-repo>
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set roleDefaults.standards-reviewer.thinkingLevel low
 /subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean
 /subagents config set hideWorkflowPresets true
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
@@ -114,27 +115,35 @@ pi install <path-to-this-repo>
 
 `set` 把生效值写入文件；`reset` 移除单个键（回到该键的默认值）或整个文件。点分 `roleDefaults.<role>.<field>` 键编辑嵌套旋钮；reset 点分键只移除该字段（清空的角色自动剪除）。非法条目会把对应键回退为默认值，并在配置视图中标记 `[degraded]`。
 
-## Research 子会话扩展（信任面维护）
+## Research 子会话扩展（信任判据）
 
-后台 research 子会话启动时**只带内置工具加上获批的查询包**——绝不复用主会话的完整扩展集。默认装载 `npm:@ssk_dev/pi-web-access-lean`（网页搜索/抓取）与 `npm:@upstash/context7-pi`（库文档），researcher 角色声明的工具名是 `web_access`、`query-docs`、`resolve-library-id`。
+后台 research 子会话启动时**只带 pi 的内置工具**——绝不复用主会话的完整扩展集，也不装载任何你没点名的扩展包。要给 researcher 网页/库文档查询能力，把包放进 `researchChildExtensions` 旋钮，包提供的工具会**自动**进入子会话：不用改任何角色文件、没有第二步。两个经过审查的示例包：`npm:@ssk_dev/pi-web-access-lean`（网页搜索/抓取，提供 `web_access`）与 `npm:@upstash/context7-pi`（库文档，提供 `query-docs` / `resolve-library-id`）。
 
-这个清单是一块**精心维护的信任面，而不是「凡是查询类工具就默认放行」的承诺**。一个包要进默认列表，必须满足：只读、无外部写副作用、外部成本明确且低、服务于一手来源检案（官网/库文档）。
+这是一条**精心维护的信任判据，而不是默认装载清单**。一个包要获得推荐，必须满足：只读、无外部写副作用、外部成本明确且低、服务于一手来源检案（官网/库文档）。
 
-**按机器维护清单**（不改代码）：
+**开启网页研究——一步完成**：
 
-- **扩充/覆盖** —— 把包加进 `researchChildExtensions`（JSON 文件里的数组，或 `/subagents config set researchChildExtensions npm:x,npm:y` 逗号列表）。别忘了下面第 2 步：加载的包只有在角色上也声明了它的工具后，researcher 才看得见。
-- **彻底禁用** —— 在 JSON 文件里把 `researchChildExtensions` 写成 `[]`（config-set 命令表达不了空列表）：子会话将不装载任何扩展（完全断网，只剩内置工具）。
+```sh
+/subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean,npm:@upstash/context7-pi
+```
+
+装载即激活。回到安静默认：
+
+```sh
+/subagents config reset researchChildExtensions
+```
+
+- **安静默认** —— 空的 `researchChildExtensions` 什么都不装载：子会话只有内置工具、无网络、无警告，运行日志写 `[loadout] info · no query packages configured`。本旋钮不再有 `inherit`（没有可继承的东西）；只剩 `set`（逗号列表）与 `reset`。
+- **升级须知（既有用户）** —— 此改动之前 research 子会话默认装载两个包，所以升级后你的 research 子会话会失去网页/库文档能力，直到你配置该旋钮。这正是设计意图：包现在是选择，不是默认。
 - **更细的控制** —— 在 `~/.pi/agent/agents/researcher.md` 建用户代理覆盖内置 researcher 角色（frontmatter `tools:` + 正文；同名覆盖生效，runner 仍会附加 findings 路径/墙钟/checkpoint 规则），精确钉住声明的工具。
 
-**新增查询工具的两步**：(1) *装载*：把它的包放进 `researchChildExtensions`；(2) *暴露*：在 researcher 角色上声明工具名（内置角色列表，或你自己的 `researcher.md`）。两步缺一就是漂移。
-
-**报错形态与处置**。当声明的工具无法装载（包未安装、被 knob 关闭、或平台不可能——例如非 Windows 上的 `powershell`），运行照常启动但该工具不会出现在子会话里：research 工具返回文本与运行日志会带一条 `⚠ Declared but not loaded: …` 漂移提示，researcher 的 prompt 只列出它真正拥有的工具。忽略提示的症状：researcher 模型瞎猜工具名然后死循环。处置：安装该包、把 knob 指向它、或从角色上删掉该工具。
+**报错形态与处置**。当声明的工具无法装载（包未安装、被 knob 关闭、或平台不可能——例如非 Windows 上的 `powershell`），运行照常启动但该工具不会出现在子会话里：research 工具返回文本与运行日志会带一条 `⚠ Declared but not loaded: …` 漂移提示，researcher 的 prompt 只列出它真正拥有的工具。忽略提示的症状：researcher 模型瞎猜工具名然后死循环。处置：安装该包、把 knob 指向它、或从角色上删掉该工具。另外，knob 里的包一个工具都没注册时，运行日志会写 `[loadout] warn · no tools loaded from knob packages (…)` 并点名该包。
 
 **如何阅读 research 运行日志——每一行是什么**。每次运行的日志（`logPath`，用 `/subagents tail <id>` 看尾部）混着四类内容，其中只有一类是运行结果：
 
 | 行 | 来源 | 说明什么 | 不等于什么 |
 |---|---|---|---|
-| `[loadout] ok/warn …` | 装载自检（日志首行起） | knob 包的工具是否**装载**成功 | 运行成败 |
+| `[loadout] ok/warn/info …` | 装载自检（日志首行起） | knob 包的工具是否**装载**成功（info = 未配置任何包） | 运行成败 |
 | `[run] HH:MM:SS …` | 阶段线（`session created`、`prompt started`、`terminal: <状态>`） | 运行**现在在干什么** | — |
 | 模型正文 | researcher 输出 | 研究**进度** | — |
 | research-status 推送卡 | 终态推送 | 运行的**权威结果**（`succeeded`/`failed`/`terminated`/`aborted`） | — |

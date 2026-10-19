@@ -171,8 +171,8 @@ export function createResearchChildSession(opts: {
   cwd: string;
   model?: unknown;
   thinkingLevel?: string;
-  /** The extension packages to load into the child (knob value); undefined keeps the legacy fully-disabled child. */
-  extensions?: string[];
+  /** The extension packages to load into the child (the knob's value; empty = built-in tools only). */
+  extensions: string[];
   tools?: string[];
   systemPrompt: string;
   task: string;
@@ -216,12 +216,13 @@ export function createResearchChildSession(opts: {
   const abortController = new AbortController();
   const done = (async () => {
     try {
-      // issue #37 — a curated child loadout: an `extensions` list (the knob's
-      // packages) filters the base's loaded extensions to exactly those
-      // packages, so the child carries built-ins + the approved query tools
-      // and nothing else (ADR 0013's anti-recursion property survives: the
-      // extension's own subagent/research never match the knob). An undefined
-      // value keeps the legacy noExtensions:true child. Uninstalled packages
+      // issue #37/#44 — the child's loadout is exactly the knob's packages:
+      // the filter keeps only those extensions, so the child carries
+      // built-ins + the approved query tools and nothing else (ADR 0013's
+      // anti-recursion property survives: this extension's own
+      // subagent/research never match the knob). An empty knob (the quiet
+      // default) keeps nothing, so the child is built-in tools only — the
+      // legacy `noExtensions:true` branch is gone. Uninstalled packages
       // simply never appear in the base's extensions, so the filter drops
       // them harmlessly (the drift report surfaces the consequence).
       const knob = opts.extensions;
@@ -229,19 +230,14 @@ export function createResearchChildSession(opts: {
       // self-report after creation, so the two sides of the knob match can
       // never drift (same guarantee `pathIsInsidePackage` gives the probe).
       const isKnobPackage = (e: { sourceInfo?: { path?: string } }) =>
-        (knob ?? []).some((k) => pathIsInsidePackage(e.sourceInfo?.path ?? "", packageNameOfSpec(k)));
+        knob.some((k) => pathIsInsidePackage(e.sourceInfo?.path ?? "", packageNameOfSpec(k)));
       const loader = new DefaultResourceLoader({
         cwd: opts.cwd,
         agentDir: getAgentDir(),
-        noExtensions: knob === undefined,
-        ...(knob !== undefined
-          ? {
-              extensionsOverride: (base) => ({
-                ...base,
-                extensions: base.extensions.filter((e) => isKnobPackage(e)),
-              }),
-            }
-          : {}),
+        extensionsOverride: (base) => ({
+          ...base,
+          extensions: base.extensions.filter((e) => isKnobPackage(e)),
+        }),
         systemPromptOverride: () => opts.systemPrompt,
       });
       await loader.reload();
@@ -277,7 +273,7 @@ export function createResearchChildSession(opts: {
       const knobExtensions = loader.getExtensions().extensions.filter((e) => isKnobPackage(e));
       const keptKnobTools = knobExtensions.flatMap((e) => [...e.tools.keys()]);
       for (const line of childLoadoutReport({
-        knob: knob ?? [],
+        knob,
         keptExtensionTools: keptKnobTools,
         sessionToolNames: session.getAllTools().map((t) => t.name),
         allowlist: opts.tools ?? [],
@@ -432,8 +428,10 @@ function builtInToolNames(): ReadonlySet<string> {
  * the shadowing extension and gets pi's built-in implementation. The
  * knob-package half is matched by install path (`node_modules/<pkg>`; the
  * same predicate the child loader's filter uses, so probe and loadout cannot
- * drift). An empty knob reduces the probe to the built-ins. Also reports the
- * knob packages for which NOTHING registered — a mistyped or uninstalled
+ * drift). An empty knob reduces the probe to the built-ins. The package half
+ * is reported separately (`packageToolNames` — the knob packages' registered
+ * tool names), feeding the runner's activation union (issue #44). Also reports
+ * the knob packages for which NOTHING registered — a mistyped or uninstalled
  * package stays silent when no role declares its tools, so the caller warns.
  *
  * With `knob` undefined (the blocking path) the child inherits the full
@@ -444,12 +442,13 @@ function builtInToolNames(): ReadonlySet<string> {
 export function probeChildToolNames(
   pi: ExtensionAPI,
   knob: string[] | undefined,
-): { names: ReadonlySet<string>; packagesNotLoaded: string[] } {
+): { names: ReadonlySet<string>; packageToolNames: string[]; packagesNotLoaded: string[] } {
   const registryTools = pi.getAllTools().map((t) => ({ name: t.name, sourcePath: t.sourceInfo?.path }));
   const builtinNames = builtInToolNames();
   if (knob === undefined) {
     return {
       names: new Set([...registryTools.map((t) => t.name), ...builtinNames]),
+      packageToolNames: [],
       packagesNotLoaded: [],
     };
   }
@@ -979,7 +978,14 @@ export default function (pi: ExtensionAPI) {
         return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
       }
     }
-    const raw = await ctx.ui.input(`${key}`, "new value (inherit clears the dispatch knobs)");
+    // The extensions knob has nothing to inherit from (issue #44): the hint
+    // names its input shape, and `config reset <key>` returns it to the quiet
+    // default — no "inherit" token is offered.
+    const hint =
+      spec?.kind === "extensions"
+        ? "comma-separated package list, e.g. npm:x,npm:y (reset returns to the quiet default)"
+        : "new value (inherit clears the dispatch knobs)";
+    const raw = await ctx.ui.input(`${key}`, hint);
     if (raw === undefined) return;
     setConfig(ctx, key, raw);
   };
@@ -1380,14 +1386,16 @@ export default function (pi: ExtensionAPI) {
         fullSchema: buildResearchFullParams(config.researchWallClockMs),
       });
       const agentScope: AgentScope = merged.agentScope ?? "user";
-      // issue #37 — the research child loads exactly the knob's extension
-      // packages (effectiveResearchChildExtensions), so its callable tool set
-      // is build-ins ∪ knob-package tools, probed as such instead of the main
-      // session's full registry (the incident root cause). The same knob
-      // reaches the child factory, so probe and loadout cannot drift.
+      // issue #37/#44 — the research child loads exactly the knob's extension
+      // packages (the knob itself, no curated fallback), so its callable tool
+      // set is build-ins ∪ knob-package tools, probed as such instead of the
+      // main session's full registry (the incident root cause). The same knob
+      // reaches the child factory, so probe and loadout cannot drift. The
+      // probe's package half feeds the runner's activation union.
       const knob = effectiveResearchChildExtensions(config);
       const probe = probeChildToolNames(pi, knob);
       const availableToolNames = probe.names;
+      const packageTools = probe.packageToolNames;
       const findingsPath = path.isAbsolute(merged.findingsPath)
         ? merged.findingsPath
         : path.join(ctx.cwd, merged.findingsPath);
@@ -1477,6 +1485,7 @@ export default function (pi: ExtensionAPI) {
             findingsPath,
             maxWallClockMs: merged.maxWallClockMs ?? config.researchWallClockMs,
             availableToolNames,
+            packageTools,
             agents,
             extensions: knob,
             abortSignal: abortController.signal,

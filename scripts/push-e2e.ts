@@ -41,7 +41,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createResearchChildSession, probeChildToolNames, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
-import { DEFAULT_RESEARCH_CHILD_EXTENSIONS, EMBEDDED_ROLES, resolveTools } from "../src/lib.ts";
+import { EMBEDDED_ROLES, researchChildAllowlist, resolveTools } from "../src/lib.ts";
 
 export default function (pi: ExtensionAPI) {
   const logPath = path.join(os.tmpdir(), "push-e2e.log");
@@ -125,6 +125,7 @@ export default function (pi: ExtensionAPI) {
         model: ctx.model,
         thinkingLevel: "off",
         tools: ["read", "grep", "find", "ls", "bash", "write"],
+        extensions: [],
         systemPrompt:
           "You are a minimal research subagent for a wiring check. Be terse. Write findings to the findings path you are given.",
         task: `Write "PUSH-E2E OK" to ${findingsPath}. Reply with exactly the single word: pong`,
@@ -175,6 +176,7 @@ export default function (pi: ExtensionAPI) {
           model: { provider: "x-nonexistent", id: "x-nonexistent" } as never,
           thinkingLevel: "off",
           tools: ["read"],
+          extensions: [],
           systemPrompt: "You are a research subagent.",
           task: "reply with one word",
           findingsPath: path.join(os.tmpdir(), "push-e2e-never.md"),
@@ -202,18 +204,21 @@ export default function (pi: ExtensionAPI) {
         log("PUSH-E2E FAIL: gate 1");
       }
 
-      // Gates 5 / 5b — issue #37: the curated knob loadout. A child built
-      // with the default researchChildExtensions must actually register the
-      // query packages and self-report them (loader truth, not the caller's
-      // allowlist-filtered session tools) as its first output line, with no
-      // drift and no warn. Gate 5 is the round-1 regression guard (child with
-      // built-ins only: tool names mismatched / loadout filter drifted); gate
-      // 5b pins the allowlist-excluding case that was misreported as `NO knob
-      // packages registered`. One shared helper keeps the two gates from
-      // drifting apart.
+      // Gates 5 / 5b — issue #37/#44: the research-child loadout. A child
+      // built with the knob's packages must self-report the loader truth
+      // (not the caller's allowlist-filtered session tools) as its first
+      // output line, with no drift and no warn. Gate 5 pins the quiet
+      // default: no packages configured => built-in tools only, one `info`
+      // loadout line, nothing missing. Gate 5b pins activation-follows-load:
+      // a child built with a loaded query package gets the package's tools on
+      // the allowlist without any role declaration (the union the runner
+      // computes), and the loadout reports them loaded. One shared helper
+      // keeps the two gates from drifting apart.
       const runLoadoutGate = async (opts: {
         label: string;
+        extensions: string[];
         tools: string[];
+        firstLineCheck: (firstLine: string) => boolean;
         assertStageLines?: boolean;
         okMessage: string;
         failMessage: string;
@@ -223,7 +228,7 @@ export default function (pi: ExtensionAPI) {
             cwd: sessionCwd,
             model: sessionModel,
             thinkingLevel: "off",
-            extensions: [...DEFAULT_RESEARCH_CHILD_EXTENSIONS],
+            extensions: opts.extensions,
             tools: opts.tools,
             systemPrompt: "You are a loadout check. Reply with exactly: pong",
             task: "Reply with exactly: pong",
@@ -238,8 +243,7 @@ export default function (pi: ExtensionAPI) {
           const firstLine = out.split("\n")[0] ?? "";
           log(`(${opts.label}) knob child first line: ${JSON.stringify(firstLine)}`);
           const ok =
-            firstLine.includes("[loadout] ok · loaded 3 knob tools:") &&
-            ["web_access", "query-docs", "resolve-library-id"].every((t) => firstLine.includes(t)) &&
+            opts.firstLineCheck(firstLine) &&
             !out.includes("[child-loadout] allowlist missing from loadout:") &&
             !out.includes("[loadout] warn") &&
             // Stage lines: the log must show created/prompt so a loadout line
@@ -256,25 +260,57 @@ export default function (pi: ExtensionAPI) {
 
       const declared = EMBEDDED_ROLES.researcher.tools ?? [];
       for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
-        if (!declared.includes(q)) throw new Error(`default researcher role no longer declares ${q} — update gate 5`);
+        if (declared.includes(q)) throw new Error(`default researcher role still declares ${q} — activation-follows-load expects built-in names only`);
       }
+
+      // Gate 5 — the quiet default: an empty knob loads no packages, the
+      // child carries built-in tools only, and the loadout speaks one `info`
+      // line instead of warning.
       await runLoadoutGate({
         label: "5",
+        extensions: [],
         tools: declared,
+        firstLineCheck: (firstLine) =>
+          firstLine.includes("[loadout] info · no query packages configured") && firstLine.includes("built-in tools only"),
         assertStageLines: true,
-        okMessage: "curated knob loadout registers the declared query tools; stage lines present",
-        failMessage: "child-loadout line above shows which tool/package drifted",
+        okMessage: "quiet default loadout is built-in tools only, info line present, no drift; stage lines present",
+        failMessage: "child-loadout line above shows the regression",
       });
 
-      // Gate 5b — platform-stable allowlist that still excludes the knob
-      // tools: `bash` would resolve to `powershell` on a bash-less win32 host
-      // and fire the drift line, failing the gate despite a correct loadout.
-      await runLoadoutGate({
-        label: "5b",
-        tools: ["read", "grep", "find"],
-        okMessage: "loadout report reflects the loader, not the allowlist",
-        failMessage: "loadout line above shows the regression",
-      });
+      // Gate 5b — activation follows load: probe the loaded query package
+      // (web_access), build the allowlist the runner would hand the child
+      // (declared built-ins ∪ package tools — the role declares no web tool),
+      // and require the loadout to report the package's tool loaded with no
+      // drift. Uses `bash`-free allowlist math so the gate is platform-stable.
+      try {
+        const knob = ["npm:@ssk_dev/pi-web-access-lean"];
+        const probe = probeChildToolNames(pi, knob);
+        if (probe.packageToolNames.length === 0) {
+          throw new Error("web-access-lean not installed — gate 5b cannot verify auto-activation");
+        }
+        log(`(5b) probe package tools: ${probe.packageToolNames.join(", ")}`);
+        const allowlist = researchChildAllowlist({
+          declared,
+          availableToolNames: probe.names,
+          platform: process.platform,
+          packageTools: probe.packageToolNames,
+          explicit: false,
+        }).tools;
+        log(`(5b) auto-activated allowlist: ${allowlist.join(", ")}`);
+        await runLoadoutGate({
+          label: "5b",
+          extensions: knob,
+          tools: allowlist,
+          firstLineCheck: (firstLine) =>
+            firstLine.includes("[loadout] ok · loaded") && firstLine.includes("web_access"),
+          assertStageLines: true,
+          okMessage: "loaded package's tool joins the allowlist without a role declaration; loadout ok, no drift",
+          failMessage: "child-loadout line above shows which tool/package drifted",
+        });
+      } catch (err) {
+        log(`(5b) auto-activation gate FAILED: ${(err as Error).message}`);
+        log("PUSH-E2E FAIL: gate 5b");
+      }
 
       // Gate 6 — issue #43: the main-session registry's read/grep now come
       // from THIS extension (the shadows registered at load), not from pi.

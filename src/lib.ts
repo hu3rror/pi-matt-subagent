@@ -66,7 +66,7 @@ const CONFIG_KEY_SPECS = [
   { key: "maxConcurrency", kind: "number" as const, optional: false as const },
   { key: "perTaskOutputCap", kind: "number" as const, optional: false as const },
   { key: "researchWallClockMs", kind: "number" as const, optional: false as const },
-  { key: "researchChildExtensions", kind: "extensions" as const, optional: true as const },
+  { key: "researchChildExtensions", kind: "extensions" as const, optional: false as const },
   { key: "logTailBytes", kind: "number" as const, optional: false as const },
   { key: "dispatchDefaultModel", kind: "model" as const, optional: true as const },
   { key: "dispatchDefaultThinkingLevel", kind: "level" as const, optional: true as const },
@@ -125,11 +125,12 @@ export interface EffectiveConfig {
    */
   roleDefaults?: RoleDefaults;
   /**
-   * The extension packages loaded into a research child; undefined => the
-   * curated defaults (DEFAULT_RESEARCH_CHILD_EXTENSIONS); explicit [] => no
-   * extensions (network fully off).
+   * The extension packages loaded into a research child. Always present: an
+   * empty list is the quiet default (built-in tools only, no network); a
+   * non-empty list opts the child into those packages' tools (issue #44 —
+   * activation follows load, no curated fallback).
    */
-  researchChildExtensions?: string[];
+  researchChildExtensions: string[];
   /**
    * True hides the three built-in workflow presets (`/code-review`,
    * `/design-it-twice`, `/research`) from `/` completion (issue #41). Read at
@@ -150,33 +151,19 @@ export function defaultConfig(): EffectiveConfig {
     dispatchDefaultModel: undefined,
     dispatchDefaultThinkingLevel: undefined,
     roleDefaults: undefined,
-    researchChildExtensions: undefined,
+    researchChildExtensions: [],
     hideWorkflowPresets: false,
   };
 }
 
 /**
- * The curated default research-child extension packages (the trust surface;
- * issue #37): web/page retrieval and library-docs queries. A package is
- * eligible for this default list when it is read-only, has no external write
- * side effects, has low and explicit external cost, and serves primary-source
- * retrieval — anything else goes through the per-machine knob. See the
- * README's maintenance section.
- */
-export const DEFAULT_RESEARCH_CHILD_EXTENSIONS = [
-  "npm:@ssk_dev/pi-web-access-lean",
-  "npm:@upstash/context7-pi",
-] as const;
-
-/**
- * The effective research-child extension list for a run: the knob when the
- * user set it (an explicit empty array fully disables extensions / network),
- * otherwise the curated defaults. Package-level (not tool-level) by design:
- * loading and activation stay separate concerns, mirroring blocking subagents
- * and pi's own `--tools` mental model (issue #37, Decision 4).
+ * The research-child extension list for a run is the knob itself (issue #44):
+ * an empty list is the quiet default (built-in tools only, no network), a
+ * non-empty list opts the child into exactly those packages. No curated
+ * fallback: packages are a choice, so an unconfigured knob stays quiet.
  */
 export function effectiveResearchChildExtensions(cfg: EffectiveConfig): string[] {
-  return cfg.researchChildExtensions ?? [...DEFAULT_RESEARCH_CHILD_EXTENSIONS];
+  return cfg.researchChildExtensions;
 }
 
 export interface ConfigStatus {
@@ -343,8 +330,19 @@ export function parseConfigSetValue(
     return { ok: false, reason: `${key} must be "true" or "false", got "${rawValue}"` };
   }
   const trimmed = rawValue.trim();
-  if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
+  // The inherit/empty clearing rule exists only for optional knobs (a value
+  // the run then inherits from the main session). Non-optional knobs have
+  // nothing to inherit from, so `inherit` is not a valid input for them.
+  if (spec.optional && (trimmed === "" || trimmed === "inherit")) return { ok: true, value: undefined };
   if (spec.kind === "extensions") {
+    // Nothing to inherit from (issue #44): the knob is non-optional with an
+    // empty quiet default, so the clear path is `config reset <key>`.
+    if (trimmed === "" || trimmed === "inherit") {
+      return {
+        ok: false,
+        reason: `${key} takes a comma-separated package list; \`config reset ${key}\` returns it to the quiet default (no packages)`,
+      };
+    }
     const items = trimmed.split(",").map((s) => s.trim()).filter((s) => s !== "");
     return items.length > 0
       ? { ok: true, value: items }
@@ -412,9 +410,9 @@ export function setRoleDefaultField(
   return { ...cfg, roleDefaults: Object.keys(roleDefaults).length === 0 ? undefined : roleDefaults };
 }
 
-/** Serializes an effective config to the file: required keys always, the
- * optional knobs only when set (absent = inherit the main session / curated
- * default, so `null` never appears in the file). */
+/** Serializes an effective config to the file: required keys always (the
+ * extensions knob included, as an explicit list), the optional knobs only
+ * when set (absent = inherit the main session, so `null` never appears). */
 export function serializeConfig(cfg: EffectiveConfig): string {
   const out: Record<string, unknown> = {};
   for (const spec of CONFIG_KEY_SPECS) {
@@ -508,15 +506,20 @@ export function configKeyLabel(key: ConfigKey, status: ConfigStatus): string {
   // A key the user wrote is only "customized" when its value actually differs
   // from the built-in default; a written-but-default value (e.g. `set`ting the
   // default back, or an explicit-null inherit marker) labels as [default].
-  const customized =
-    status.present.has(key) && getConfigValue(status.effective, key) !== getConfigValue(defaultConfig(), key);
+  // Array values (the extensions knob) are compared by content, not identity:
+  // a written-but-default `[]` must label [default], not [customized].
+  const valuesDiffer = (a: unknown, b: unknown) =>
+    typeof a === "object" || typeof b === "object" ? JSON.stringify(a) !== JSON.stringify(b) : a !== b;
+  const customized = status.present.has(key) && valuesDiffer(getConfigValue(status.effective, key), getConfigValue(defaultConfig(), key));
   const marker = status.degraded.has(key) ? "degraded" : customized ? "customized" : "default";
   const spec = configKeySpec(key);
   if (spec?.kind === "extensions") {
-    // Show the effective package list (the defaults when unset) so the view
-    // reflects what a research child will actually load, not just an
-    // "(inherit)" marker.
-    return `${key} = ${effectiveResearchChildExtensions(status.effective).join(", ")} [${marker}]`;
+    // Show the effective package list (the knob itself — issue #44, no
+    // curated fallback) so the view reflects what a research child will
+    // actually load; the quiet default reads as `(none)`.
+    const list = effectiveResearchChildExtensions(status.effective);
+    const shown = list.length > 0 ? list.join(", ") : "(none)";
+    return `${key} = ${shown} [${marker}]`;
   }
   if (spec?.kind === "roleDefaults") {
     // Show every set field as `role.field=value` so the overview doubles as
@@ -1093,7 +1096,7 @@ Report findings with exact file paths and line ranges, grouped by severity, and 
   researcher: {
     description:
       "Investigates a question against primary sources and writes cited findings to a Markdown file.",
-    tools: ["read", "grep", "find", "ls", "bash", "write", "web_access", "query-docs", "resolve-library-id"],
+    tools: ["read", "grep", "find", "ls", "bash", "write"],
     thinkingLevel: "high",
     systemPrompt: `You are a researcher. Investigate a question against primary sources available locally (official docs, source code, specs, first-party APIs — repo files and installed docs). Follow every claim back to the source that owns it.
 
@@ -1311,18 +1314,20 @@ export function researchChildToolNames(input: {
   builtinNames: ReadonlySet<string>;
   /** The main session's tool registry entries: name plus install path (absent for built-ins). */
   registryTools: ReadonlyArray<{ name: string; sourcePath?: string }>;
-  /** The knob package specs in effect for the run (effectiveResearchChildExtensions). */
+  /** The knob package specs in effect for the run (the config knob itself, issue #44). */
   knob: string[];
   /** Off-win32 the built-in powershell is excluded. */
   platform: NodeJS.Platform;
-}): { names: ReadonlySet<string>; packagesNotLoaded: string[] } {
+}): { names: ReadonlySet<string>; packageToolNames: string[]; packagesNotLoaded: string[] } {
   const names = new Set(input.builtinNames);
+  const packageToolNames = new Set<string>();
   const packagesHit = new Set<string>();
   for (const t of input.registryTools) {
     const sourcePath = t.sourcePath ?? "";
     for (const k of input.knob) {
       if (pathIsInsidePackage(sourcePath, packageNameOfSpec(k))) {
         packagesHit.add(packageNameOfSpec(k));
+        packageToolNames.add(t.name);
         names.add(t.name);
         break;
       }
@@ -1331,6 +1336,7 @@ export function researchChildToolNames(input: {
   if (input.platform !== "win32") names.delete("powershell");
   return {
     names,
+    packageToolNames: [...packageToolNames],
     packagesNotLoaded: [...new Set(input.knob.map(packageNameOfSpec).filter((p) => !packagesHit.has(p)))],
   };
 }
@@ -1370,6 +1376,11 @@ export function childLoadoutReport(input: {
             ", ",
           )}) — check they are installed and named correctly — run continues; final status via the research-status push\n`,
     );
+  } else {
+    // The quiet default (issue #44): one informational line so the log says
+    // explicitly that no query packages are configured — diagnosis never has
+    // to guess why the child has no web/library-docs tools.
+    lines.push("[loadout] info · no query packages configured — child carries built-in tools only\n");
   }
   const childAll = new Set(input.sessionToolNames);
   const missing = input.allowlist.filter((t) => !childAll.has(t));
@@ -1461,6 +1472,30 @@ function resolveToolsInternal(
   return { resolved, dropped };
 }
 
+/**
+ * Computes a research child's final `--tools` allowlist (issue #44):
+ * `resolveToolsInternal` first normalizes the declared tools against the
+ * child's available set, then — unless the caller passed an explicit list
+ * (which stays authoritative) — the tools the loaded knob packages provide
+ * are added, so a package's tools are usable without any role edit. The
+ * result is filtered by this extension's own tool names (ADR 0013: the
+ * recursion guard holds even when the knob names this package).
+ */
+export function researchChildAllowlist(input: {
+  /** The declared tools: the caller's explicit list, or the role's list. */
+  declared: string[] | undefined;
+  availableToolNames?: ReadonlySet<string>;
+  platform: NodeJS.Platform;
+  /** Tool names the loaded knob packages provide (the probe's package half). */
+  packageTools: string[];
+  /** True when the caller passed an explicit `tools` list (authoritative). */
+  explicit: boolean;
+}): { tools: string[]; dropped: string[] } {
+  const { resolved, dropped } = resolveToolsInternal(input.declared, input.availableToolNames, input.platform);
+  const activated = input.explicit ? [] : input.packageTools;
+  const tools = [...new Set([...resolved, ...activated])].filter((t) => !EXTENSION_TOOL_NAMES.has(t));
+  return { tools, dropped };
+}
 export function resolveTools(
   tools: string[] | undefined,
   availableToolNames?: ReadonlySet<string>,
@@ -1474,6 +1509,12 @@ export function emptyUsage(): UsageStats {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+/**
+ * The tool names a research child gets when neither the caller nor the role
+ * declares any (issue #44): built-in names only. Package-provided query tools
+ * are NOT here — they join the allowlist through activation (the loaded knob
+ * packages), so an unconfigured knob produces no drift on the fallback set.
+ */
 export const DEFAULT_RESEARCH_TOOLS = [
   "read",
   "grep",
@@ -1481,9 +1522,6 @@ export const DEFAULT_RESEARCH_TOOLS = [
   "ls",
   "bash",
   "write",
-  "web_access",
-  "query-docs",
-  "resolve-library-id",
 ];
 
 /** This extension's own tool names — never handed to a research child (ADR 0013: no recursive extension re-entry). */
@@ -1501,8 +1539,17 @@ export interface ResearchRunOptions {
   availableToolNames?: ReadonlySet<string>;
   /** Wall-clock hard cap in ms; defaults to DEFAULT_RESEARCH_WALL_CLOCK_MS (may only tighten). */
   maxWallClockMs?: number;
-  /** The extension packages the research child loads (the knob's value); undefined keeps the legacy no-extension child. */
+  /**
+   * The extension packages the research child loads (the knob's value);
+   * normalized to `[]` (the quiet default, built-in tools only) when absent.
+   */
   extensions?: string[];
+  /**
+   * Tool names the loaded knob packages provide (the probe's package half).
+   * Joined to the allowlist unless the caller passed an explicit `tools`
+   * list (issue #44 — activation follows load).
+   */
+  packageTools?: string[];
   /** Injectable timer deps for the wall-clock watcher (tests). */
   watcherDeps?: ResearchWatcherDeps;
   /** Manual-kill signal (/subagents kill): aborts the child and resolves the run `aborted`. */
@@ -1641,8 +1688,8 @@ export type CreateChildSession = (opts: {
   cwd: string;
   model?: unknown;
   thinkingLevel?: string;
-  /** The extension packages to load into the child (knob value; undefined = legacy no-extension child). */
-  extensions?: string[];
+  /** The extension packages to load into the child (the knob's value; empty = built-in tools only). */
+  extensions: string[];
   tools?: string[];
   systemPrompt: string;
   task: string;
@@ -1704,16 +1751,21 @@ export function runBackgroundResearch(
   const clearTimer = deps.clearTimeout ?? ((id?: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>));
 
   const maxWallClockMs = opts.maxWallClockMs ?? DEFAULT_RESEARCH_WALL_CLOCK_MS;
-  // Resolution is registry-driven (issue #37): the resolved set becomes the
-  // child's allowlist AND the prompt's tool-name line, so the two cannot
-  // drift; names that resolved to nothing are surfaced at start time (handle
-  // + per-run log) instead of surfacing as model-side tool-not-found loops.
-  const { resolved, dropped } = resolveToolsInternal(
-    opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS,
-    opts.availableToolNames,
-    process.platform,
-  );
-  const tools = resolved.filter((t) => !EXTENSION_TOOL_NAMES.has(t));
+  // Resolution is registry-driven (issue #37) + activation-follows-load
+  // (issue #44): the resolved set becomes the child's allowlist AND the
+  // prompt's tool-name line, so the two cannot drift; names that resolved to
+  // nothing are surfaced at start time (handle + per-run log) instead of
+  // surfacing as model-side tool-not-found loops. An explicit caller `tools`
+  // list stays authoritative (no activation); otherwise the tools the loaded
+  // knob packages provide join the allowlist regardless of what the role
+  // declares, so adding a package is one step.
+  const { tools, dropped } = researchChildAllowlist({
+    declared: opts.tools ?? agent.tools ?? DEFAULT_RESEARCH_TOOLS,
+    availableToolNames: opts.availableToolNames,
+    platform: process.platform,
+    packageTools: opts.packageTools ?? [],
+    explicit: opts.tools !== undefined,
+  });
   const systemPrompt = buildResearchPrompt(agent, opts.task, opts.findingsPath, maxWallClockMs, tools);
 
   // The runner owns the per-run artifacts: the output log (every child output
@@ -1776,7 +1828,7 @@ export function runBackgroundResearch(
       cwd: opts.cwd,
       model: opts.model,
       thinkingLevel: opts.thinkingLevel,
-      extensions: opts.extensions,
+      extensions: opts.extensions ?? [],
       tools,
       systemPrompt,
       task: opts.task,

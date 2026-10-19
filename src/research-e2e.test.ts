@@ -212,3 +212,88 @@ test("the allowlist handed to the research child keeps built-in names shadowed i
   const logText = fs.readFileSync(handle.logPath, "utf8");
   assert.ok(!logText.includes("[research-drift]"), "no drift line when the shadowed built-ins resolve");
 });
+
+// Issue #44 — activation follows load. The allowlist the runner hands the
+// child is the resolved declared tools UNIONED with the loaded knob packages'
+// tools, unless the caller passed an explicit list (then that list is exactly
+// the allowlist). These four cases pin the exact childOpts.tools.
+const BUILT_INS = new Set(["read", "grep", "find", "ls", "bash", "write"]);
+
+async function runWithCapture(
+  opts: Omit<Parameters<typeof runBackgroundResearch>[0], "cwd" | "findingsPath">,
+): Promise<{ childOpts: Parameters<CreateChildSession>[0]; logText: string; tmpDir: string }> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allowlist-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const done = new Promise<void>((resolve) => setTimeout(resolve, 100));
+  let childOpts: Parameters<CreateChildSession>[0] | undefined;
+  const handle = runBackgroundResearch(
+    { cwd: dir, findingsPath, ...opts },
+    (o) => {
+      childOpts = o;
+      return fakeChild({ done });
+    },
+  );
+  await done;
+  return { childOpts: childOpts!, logText: fs.readFileSync(handle.logPath, "utf8"), tmpDir: dir };
+}
+
+test("case 1: role tools only reach the child when nothing is configured or activated", async (t) => {
+  const { childOpts, logText, tmpDir } = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    availableToolNames: BUILT_INS,
+  });
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  assert.deepEqual(childOpts.tools, ["read", "grep", "find", "ls", "bash", "write"]);
+  assert.ok(
+    childOpts.systemPrompt.includes("Available tools (the only tools you can call): read, grep, find, ls, bash, write"),
+    "the prompt lists exactly the child's tools",
+  );
+  assert.ok(!logText.includes("[research-drift]"), "nothing declared dropped");
+});
+
+test("case 2: the loaded knob packages' tools join the allowlist without a role declaration", async (t) => {
+  const { childOpts, logText, tmpDir } = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    availableToolNames: new Set([...BUILT_INS, "web_access", "query-docs"]),
+    packageTools: ["web_access", "query-docs"],
+  });
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  assert.deepEqual(childOpts.tools, ["read", "grep", "find", "ls", "bash", "write", "web_access", "query-docs"]);
+  assert.ok(
+    childOpts.systemPrompt.includes("read, grep, find, ls, bash, write, web_access, query-docs"),
+    "the prompt lists the activated package tools too",
+  );
+  assert.ok(!logText.includes("[research-drift]"));
+});
+
+test("case 3: an explicit tools list is authoritative — no package tools are added", async (t) => {
+  const { childOpts, logText, tmpDir } = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    tools: ["read", "grep"],
+    availableToolNames: new Set([...BUILT_INS, "web_access"]),
+    packageTools: ["web_access"],
+  });
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  assert.deepEqual(childOpts.tools, ["read", "grep"], "the caller's list means exactly that list");
+  assert.ok(
+    childOpts.systemPrompt.includes("Available tools (the only tools you can call): read, grep"),
+    "the prompt lists only the authoritative list",
+  );
+  assert.ok(!logText.includes("[research-drift]"));
+});
+
+test("case 4: an empty knob hands the child built-ins only, with no drift", async (t) => {
+  const { childOpts, logText, tmpDir } = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    extensions: [],
+    packageTools: [],
+    availableToolNames: BUILT_INS,
+  });
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  assert.deepEqual(childOpts.tools, ["read", "grep", "find", "ls", "bash", "write"]);
+  assert.ok(!logText.includes("[research-drift]"), "the quiet default carries no drift");
+});

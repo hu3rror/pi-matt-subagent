@@ -90,7 +90,7 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `maxConcurrency` | 4 | Max in-flight subagent processes in parallel mode |
 | `perTaskOutputCap` | 50 KiB | Byte cap for one task's summary output in parallel aggregation |
 | `researchWallClockMs` | 45 min | Default background-research wall-clock cap, and the hard ceiling for `input.maxWallClockMs` (an existing explicit value overrides the new default; reset the key to pick up 45) |
-| `researchChildExtensions` | (curated) | npm packages loaded into a research child: default `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`; only an explicit empty array disables extensions |
+| `researchChildExtensions` | `[]` (quiet) | npm packages loaded into a research child; an empty list is the quiet default (built-in tools only, no network). A configured package's tools join the child automatically — one step, no role edit. `set` takes a comma list; `config reset researchChildExtensions` returns to the quiet default |
 | `logTailBytes` | 4096 | Byte cap for `/subagents tail` log reads |
 | `dispatchDefaultModel` | (inherit) | Default `provider/id` when neither the call nor the role specifies one |
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the seven embedded roles, no longer dead config); absent → inherited (main-session level as-is) |
@@ -106,6 +106,7 @@ Drive it from `/subagents config`:
 /subagents config set dispatchDefaultThinkingLevel low
 /subagents config set roleDefaults.standards-reviewer.thinkingLevel low
 /subagents config set roleDefaults.researcher.model openai/gpt-x
+/subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean
 /subagents config set hideWorkflowPresets true
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
@@ -116,25 +117,31 @@ Drive it from `/subagents config`:
 
 ## Research child extensions (trust surface)
 
-A background research child starts with **only built-in tools plus the approved query packages** — never the main session's full extension set. The default loadout is `npm:@ssk_dev/pi-web-access-lean` (web search/page fetch) and `npm:@upstash/context7-pi` (library docs), which the researcher role declares as `web_access`, `query-docs`, `resolve-library-id`.
+A background research child starts with **only pi's built-in tools** — never the main session's full extension set, and no extension package unless you say so. To give the researcher web / library-docs queries, put the packages in the `researchChildExtensions` knob and the packages' tools become available **automatically**: no role file edit, no second step. The two vetted examples are `npm:@ssk_dev/pi-web-access-lean` (web search/page fetch, provides `web_access`) and `npm:@upstash/context7-pi` (library docs, provides `query-docs` / `resolve-library-id`).
 
-This list is a **curated trust surface, not a promise that every query-style tool is default**. A package qualifies for the default list only when it is read-only, has no external write side effects, has low and explicit external cost, and serves primary-source retrieval.
+This is a **curated trust criterion, not a default loadout**. A package qualifies for recommendation only when it is read-only, has no external write side effects, has low and explicit external cost, and serves primary-source retrieval.
 
-**Maintaining the list per-machine** (no code changes):
+**Enabling web research — the one-step procedure:**
 
-- **Extend/override** — add packages to `researchChildExtensions` (JSON array in `~/.pi/agent/extensions/matt-subagent.json`, or a comma list via `/subagents config set researchChildExtensions npm:x,npm:y`). Remember step 2 below: a loaded package is only visible to the researcher once its tools are also declared on the role.
-- **Disable entirely** — set `researchChildExtensions` to `[]` in the JSON file (the config-set CLI cannot express an empty list): the child then loads no extensions at all (network fully off, built-ins only).
-- **Finer control** — override the built-in researcher role with a user agent at `~/.pi/agent/agents/researcher.md` (frontmatter `tools:` + body; same-name overrides win, and the runner still appends the findings path / wall-clock / checkpoint rules), to pin exactly which tools are declared.
+```sh
+/subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean,npm:@upstash/context7-pi
+```
 
-**Adding a new query tool — the two steps.** (1) *Load*: put its package in `researchChildExtensions`. (2) *Expose*: declare the tool name on the researcher role (the built-in list, or your custom `researcher.md`). Missing either half is a drift.
+That's it — load is activation. Reset returns to the quiet default:
 
-**Error shapes and remedies.** When a declared tool cannot be loaded (package not installed, knob-disabled, or platform-impossible — e.g. `powershell` off-Windows), the run still starts but the tool is absent from the child, the research tool's returned text and the run log carry a `⚠ Declared but not loaded: …` drift note, and the researcher prompt only lists tools it actually has. The symptom of ignoring the note: the researcher model guesses tool names and loops. Fix by installing the package, pointing the knob at it, or removing the tool from the role.
+```sh
+/subagents config reset researchChildExtensions
+```
 
-**Reading a research run's log — what each line means.** The per-run log (`logPath`, tail via `/subagents tail <id>`) mixes four kinds of content; only one of them is the run's outcome:
+- **The quiet default** — an empty `researchChildExtensions` loads nothing: the child is built-in tools only, no network, no warnings, and the run log says `[loadout] info · no query packages configured`. The `inherit` token is gone for this knob (there is nothing to inherit from); only `set` (a comma list) and `reset` exist.
+- **Upgrade note (existing users)** — before this change research children loaded the two packages by default, so after upgrading your research children lose web and library-docs access until you set the knob. That is the point: packages are now a choice.
+- **Finer control** — override the built-in researcher role with a user agent at `~/.pi/agent/agents/researcher.md` (frontmatter `tools:` + body; same-name overrides win, and the runner still appends the findings path / wall-clock / checkpoint rules) to pin exactly which tools are declared.
+
+**Error shapes and remedies.** When a declared tool cannot be loaded (package not installed, knob-disabled, or platform-impossible — e.g. `powershell` off-Windows), the run still starts but the tool is absent from the child, the research tool's returned text and the run log carry a `⚠ Declared but not loaded: …` drift note, and the researcher prompt only lists tools it actually has. The symptom of ignoring the note: the researcher model guesses tool names and loops. Fix by installing the package, pointing the knob at it, or removing the tool from the role. Separately, a knob package that loaded nothing at all is reported `[loadout] warn · no tools loaded from knob packages (…)` in the run log, naming the package.
 
 | Line | Source | It says | It does NOT say |
 |---|---|---|---|
-| `[loadout] ok/warn …` | loadout self-check (first lines) | whether the knob packages' tools were **loaded** | run success/failure |
+| `[loadout] ok/warn/info …` | loadout self-check (first lines) | whether the knob packages' tools were **loaded** (info = none configured) | run success/failure |
 | `[run] HH:MM:SS …` | stage lines (`session created`, `prompt started`, `terminal: <status>`) | what the run is **doing now** | — |
 | model text | researcher output | research **progress** | — |
 | research-status push | terminal push card | the run's **authoritative outcome** (`succeeded` / `failed` / `terminated` / `aborted`) | — |

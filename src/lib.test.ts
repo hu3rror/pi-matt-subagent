@@ -18,11 +18,11 @@ import {
   configKeyLabel,
   createRunRegistry,
   defaultConfig,
-  DEFAULT_RESEARCH_CHILD_EXTENSIONS,
   DEFAULT_RESEARCH_TOOLS,
   DEFAULT_RESEARCH_WALL_CLOCK_MS,
   discoverAgents,
   effectiveResearchChildExtensions,
+  researchChildAllowlist,
   EMBEDDED_ROLES,
   emptyUsage,
   estimateToolSurfaceTokens,
@@ -217,6 +217,7 @@ test("researchChildToolNames keeps built-in names even when the registry entry c
   assert.ok(result.names.has("read"), "shadowed read is a built-in name, so the child must get it");
   assert.ok(result.names.has("grep"), "shadowed grep is a built-in name, so the child must get it");
   assert.ok(result.names.has("write"), "unshadowed built-ins are present too");
+  assert.deepEqual(result.packageToolNames, [], "an empty knob adds no package tools");
   assert.deepEqual(result.packagesNotLoaded, []);
 });
 
@@ -228,6 +229,7 @@ test("researchChildToolNames with an empty knob reduces to the built-in names", 
     platform: "linux",
   });
   assert.deepEqual([...result.names].sort(), ["bash", "grep", "read"], "off-win32 the built-in powershell is excluded");
+  assert.deepEqual(result.packageToolNames, []);
   assert.deepEqual(result.packagesNotLoaded, []);
 });
 
@@ -248,6 +250,11 @@ test("researchChildToolNames unions knob-package tools and reports knob packages
   assert.ok(result.names.has("web_access"));
   assert.ok(result.names.has("query-docs"));
   assert.ok(!result.names.has("mystery"), "a non-built-in from a non-knob package must drop");
+  assert.deepEqual(
+    [...result.packageToolNames].sort(),
+    ["query-docs", "web_access"],
+    "the package half names exactly the knob packages' registered tools",
+  );
   assert.deepEqual(result.packagesNotLoaded, ["ghost-pkg"], "knob packages with no registered tool are reported");
 });
 
@@ -306,15 +313,29 @@ test("childLoadoutReport reports allowlisted tools missing from the session (dri
   assert.ok(lines[1].includes("allowlist missing from loadout: web_access"));
 });
 
-test("childLoadoutReport with an empty knob emits no loadout line but still checks drift", () => {
+test("childLoadoutReport with an empty knob says no query packages are configured, then checks drift", () => {
+  const lines = childLoadoutReport({
+    knob: [],
+    keptExtensionTools: [],
+    sessionToolNames: ["read", "bash"],
+    allowlist: ["read", "bash"],
+  });
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("[loadout] info · no query packages configured"), "the quiet default speaks one info line");
+  assert.ok(lines[0].includes("built-in tools only"));
+  assert.ok(!lines[0].includes("warn"), "the quiet default must not warn");
+});
+
+test("childLoadoutReport with an empty knob still surfaces an allowlist drift", () => {
   const lines = childLoadoutReport({
     knob: [],
     keptExtensionTools: ["web_access"],
     sessionToolNames: ["read", "bash"],
     allowlist: ["read", "web_access"],
   });
-  assert.equal(lines.length, 1);
-  assert.ok(lines[0].includes("allowlist missing from loadout: web_access"));
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].includes("[loadout] info · no query packages configured"));
+  assert.ok(lines[1].includes("allowlist missing from loadout: web_access"));
 });
 
 test("runStageLine formats a timestamped run-stage line with optional detail", () => {
@@ -350,6 +371,72 @@ test("resolveTools keeps powershell on win32 when it is actually available", () 
 test("resolveTools keeps the legacy win32 bash→powershell mapping without a registry", () => {
   assert.deepEqual(resolveTools(["bash", "read"], undefined, "win32"), ["powershell", "read"]);
   assert.deepEqual(resolveTools(["bash", "read"], undefined, "linux"), ["bash", "read"]);
+});
+
+const BUILT_INS = new Set(["read", "grep", "find", "ls", "bash", "write"]);
+
+test("researchChildAllowlist activates loaded package tools on top of role tools (issue #44)", () => {
+  const { tools, dropped } = researchChildAllowlist({
+    declared: ["read", "grep", "find", "ls", "bash", "write"],
+    availableToolNames: new Set([...BUILT_INS, "web_access", "query-docs"]),
+    platform: "win32",
+    packageTools: ["web_access", "query-docs"],
+    explicit: false,
+  });
+  assert.deepEqual(tools, ["read", "grep", "find", "ls", "bash", "write", "web_access", "query-docs"]);
+  assert.deepEqual(dropped, [], "everything declared resolves; package tools are added, not declared");
+});
+
+test("researchChildAllowlist keeps an explicit tools list authoritative (no activation)", () => {
+  const { tools, dropped } = researchChildAllowlist({
+    declared: ["read", "grep"],
+    availableToolNames: new Set([...BUILT_INS, "web_access"]),
+    platform: "win32",
+    packageTools: ["web_access"],
+    explicit: true,
+  });
+  assert.deepEqual(tools, ["read", "grep"], "the caller's list is exactly the allowlist");
+  assert.deepEqual(dropped, []);
+});
+
+test("researchChildAllowlist with an empty knob produces built-ins and no drift", () => {
+  const { tools, dropped } = researchChildAllowlist({
+    declared: ["read", "grep", "find", "ls", "bash", "write"],
+    availableToolNames: BUILT_INS,
+    platform: "win32",
+    packageTools: [],
+    explicit: false,
+  });
+  assert.deepEqual(tools, ["read", "grep", "find", "ls", "bash", "write"]);
+  assert.deepEqual(dropped, [], "no packages configured => nothing declared is dropped");
+});
+
+test("researchChildAllowlist recursion guard holds when the knob names this package", () => {
+  // The knob naming this extension's package makes the probe resolve its
+  // tool names; the final allowlist must still exclude them (ADR 0013).
+  const { tools, dropped } = researchChildAllowlist({
+    declared: ["read"],
+    availableToolNames: new Set([...BUILT_INS, ...TOOL_CONTRACTS.map((c) => c.name)]),
+    platform: "win32",
+    packageTools: TOOL_CONTRACTS.map((c) => c.name),
+    explicit: false,
+  });
+  assert.ok(!tools.includes("subagent"), "subagent never enters a research child");
+  assert.ok(!tools.includes("research"), "research never enters a research child");
+  assert.ok(!tools.includes("set-thinking-level"), "set-thinking-level never enters a research child");
+  assert.deepEqual(tools, ["read"], "only the declared built-in remains");
+  assert.deepEqual(dropped, [], "the guard is quiet: no drift is reported for filtered names");
+});
+
+test("researchChildAllowlist dedups overlapping declared and activated names", () => {
+  const { tools } = researchChildAllowlist({
+    declared: ["read", "web_access"],
+    availableToolNames: new Set([...BUILT_INS, "web_access"]),
+    platform: "win32",
+    packageTools: ["web_access", "read"],
+    explicit: false,
+  });
+  assert.deepEqual(tools, ["read", "web_access"], "no duplicates even when a package provides a built-in name");
 });
 
 test("emptyUsage returns an all-zero usage struct", () => {
@@ -391,12 +478,20 @@ test("the comment-sicko role declares only built-in tools (no extension dependen
   assert.deepEqual(resolveTools(declared, builtIns), ["read", "grep", "find", "ls", "bash"]);
 });
 
-test("the researcher role and default research tools include web and docs queries", () => {
+test("the researcher role and default research tools declare built-in names only (no package dependency)", () => {
+  // Issue #44 — activation follows load: the role no longer names package
+  // tools; a configured package's tools join the allowlist automatically.
+  const builtIns = ["read", "grep", "find", "ls", "bash", "write"];
   const roleTools = EMBEDDED_ROLES.researcher.tools ?? [];
+  assert.deepEqual(roleTools, builtIns);
+  assert.deepEqual(DEFAULT_RESEARCH_TOOLS, builtIns);
   for (const t of ["web_access", "query-docs", "resolve-library-id"]) {
-    assert.ok(roleTools.includes(t), `researcher role declares ${t}`);
-    assert.ok(DEFAULT_RESEARCH_TOOLS.includes(t), `default research tools include ${t}`);
+    assert.ok(!roleTools.includes(t), `researcher role must not declare package tool ${t}`);
+    assert.ok(!DEFAULT_RESEARCH_TOOLS.includes(t), `default research tools must not declare package tool ${t}`);
   }
+  // An unconfigured knob (empty) leaves the built-ins fully resolvable — no drift.
+  const resolved = resolveTools(roleTools, new Set(builtIns));
+  assert.deepEqual(resolved, builtIns);
 });
 
 test("a user agent overrides an embedded role by name", () => {
@@ -2103,20 +2198,13 @@ test("defaultConfig returns the built-in defaults, wall-clock linked to the rese
   assert.equal(c.logTailBytes, 4096);
   assert.equal(c.dispatchDefaultModel, undefined);
   assert.equal(c.dispatchDefaultThinkingLevel, undefined);
-  assert.equal(c.researchChildExtensions, undefined, "inherit is the default state");
+  assert.deepEqual(c.researchChildExtensions, [], "the quiet default is no packages");
 });
 
-test("effectiveResearchChildExtensions returns the curated two-package default when unset", () => {
-  assert.deepEqual(effectiveResearchChildExtensions(defaultConfig()), [...DEFAULT_RESEARCH_CHILD_EXTENSIONS]);
-  assert.deepEqual(DEFAULT_RESEARCH_CHILD_EXTENSIONS, [
-    "npm:@ssk_dev/pi-web-access-lean",
-    "npm:@upstash/context7-pi",
-  ]);
-});
-
-test("effectiveResearchChildExtensions honors an explicit empty array (network off)", () => {
-  const cfg = setConfigValue(defaultConfig(), "researchChildExtensions", []);
-  assert.deepEqual(effectiveResearchChildExtensions(cfg), []);
+test("the effective extensions list is the knob itself, with an empty quiet default", () => {
+  assert.deepEqual(effectiveResearchChildExtensions(defaultConfig()), [], "no curated fallback: unset means no packages");
+  const set = setConfigValue(defaultConfig(), "researchChildExtensions", ["npm:a"]);
+  assert.deepEqual(effectiveResearchChildExtensions(set), ["npm:a"]);
 });
 
 test("parseConfigFile decodes researchChildExtensions arrays and degrades malformed ones", () => {
@@ -2130,33 +2218,39 @@ test("parseConfigFile decodes researchChildExtensions arrays and degrades malfor
   ]) {
     const degraded = parseConfigFile(bad);
     assert.ok(degraded.degraded.has("researchChildExtensions"), bad);
-    assert.equal(degraded.effective.researchChildExtensions, undefined, bad);
+    assert.deepEqual(degraded.effective.researchChildExtensions, [], bad);
   }
 });
 
-test("parseConfigSetValue parses comma-separated package lists and clears with inherit", () => {
+test("parseConfigSetValue parses comma-separated package lists and rejects inherit/empty", () => {
   assert.deepEqual(parseConfigSetValue("researchChildExtensions", "npm:a,npm:b"), {
     ok: true,
     value: ["npm:a", "npm:b"],
   });
-  assert.deepEqual(parseConfigSetValue("researchChildExtensions", "inherit"), { ok: true, value: undefined });
-  assert.deepEqual(parseConfigSetValue("researchChildExtensions", ""), { ok: true, value: undefined });
+  // Nothing to inherit from (issue #44): the clear path is `config reset`.
+  assert.equal(parseConfigSetValue("researchChildExtensions", "inherit").ok, false);
+  assert.equal(parseConfigSetValue("researchChildExtensions", "").ok, false);
   assert.equal(parseConfigSetValue("researchChildExtensions", ",").ok, false);
 });
 
-test("serializeConfig omits an unset researchChildExtensions and round-trips a set one", () => {
-  assert.ok(!serializeConfig(defaultConfig()).includes("researchChildExtensions"));
+test("serializeConfig always writes the extensions knob (non-optional) and round-trips it", () => {
+  // Non-optional keys are always written; the quiet default is an explicit [].
+  assert.ok(serializeConfig(defaultConfig()).includes('"researchChildExtensions": []'));
   const cfg = setConfigValue(defaultConfig(), "researchChildExtensions", ["npm:a"]);
   const back = parseConfigFile(serializeConfig(cfg));
   assert.deepEqual(back.effective.researchChildExtensions, ["npm:a"]);
+  assert.deepEqual(parseConfigFile(serializeConfig(defaultConfig())).effective.researchChildExtensions, []);
 });
 
-test("configKeyLabel shows the effective package list for the extensions knob", () => {
+test("configKeyLabel describes the current loadout for the extensions knob", () => {
   const label = configKeyLabel("researchChildExtensions", parseConfigFile(undefined));
-  assert.ok(label.includes("npm:@ssk_dev/pi-web-access-lean"), "unset shows the effective default list");
+  assert.ok(label.includes("(none)"), "the quiet default displays as (none)");
   assert.ok(label.includes("[default]"));
   const custom = parseConfigFile(JSON.stringify({ researchChildExtensions: ["npm:custom"] }));
   assert.ok(configKeyLabel("researchChildExtensions", custom).includes("npm:custom [customized]"));
+  // A written-but-default value (explicit [] after any `config set`) labels default.
+  const writtenEmpty = parseConfigFile(JSON.stringify({ researchChildExtensions: [] }));
+  assert.ok(configKeyLabel("researchChildExtensions", writtenEmpty).includes("[default]"));
 });
 
 test("parseConfigFile(undefined/null/blank) is all defaults, nothing present or degraded", () => {
@@ -2235,6 +2329,11 @@ test("parseConfigSetValue validates a positive integer for numeric keys", () => 
     assert.equal(parseConfigSetValue("maxConcurrency", v).ok, false, v);
   }
   assert.equal(parseConfigSetValue("nope" as never, "3").ok, false, "unknown key rejected");
+  // Non-optional knobs have nothing to inherit from (issue #44): inherit/empty
+  // is rejected for them too, not silently "cleared".
+  assert.equal(parseConfigSetValue("maxConcurrency", "inherit").ok, false);
+  assert.equal(parseConfigSetValue("maxConcurrency", "").ok, false);
+  assert.equal(parseConfigSetValue("hideWorkflowPresets", "inherit").ok, false);
 });
 
 test("parseConfigSetValue accepts a non-empty model string and clears with empty/inherit", () => {

@@ -98,11 +98,11 @@ _Avoid_: 会话思考档位（那是 inherited 层）, 主会话档位
 _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 
 **extension config（扩展配置）**:
-本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，九个 config knob（issue #37 加 `researchChildExtensions`，issue #39 加 `roleDefaults`），惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`；`roleDefaults` 嵌套对象按 role 条目逐项降级），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
+本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，十个 config knob（issue #37 加 `researchChildExtensions`，issue #39 加 `roleDefaults`，issue #44 起 `researchChildExtensions` 非可选、空默认——无精选回退，`inherit` 对它无意义），惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`；`roleDefaults` 嵌套对象按 role 条目逐项降级），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
 _Avoid_: 设置面板, 配置文件（笼统）
 
 **config knob（配置旋钮）**:
-extension config 暴露的单个可调项，v1 十个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）、`hideWorkflowPresets`（布尔，默认 false；为 true 时扩展不注册三个内置 workflow preset，加载时读取故需 `/reload` 生效，issue #41）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
+extension config 暴露的单个可调项，v1 十个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`researchChildExtensions`（issue #37 加入的 research 子会话装载包列表；issue #44 起非可选、空默认——空即「不装任何查询包」的安静默认，装载即激活、角色无需声明包工具，`set` 接受逗号包列表、`config reset` 回到空默认、`inherit` 无意义）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）、`hideWorkflowPresets`（布尔，默认 false；为 true 时扩展不注册三个内置 workflow preset，加载时读取故需 `/reload` 生效，issue #41）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
 _Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:

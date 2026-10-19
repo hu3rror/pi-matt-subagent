@@ -1,5 +1,7 @@
 # Extension config surface: seven tunable knobs, lazily-created JSON, and a dispatch-default layer
 
+> **Updated by issue #44 (no default packages, activation follows load).** The #37 note below is superseded: `researchChildExtensions` is now non-optional with an empty default (the quiet default — built-in tools only); the curated two-package fallback and the `inherit` token for this knob are gone. Activation follows load: a configured package's tools join the research child's allowlist without a role declaration (an explicit caller `tools` list stays authoritative). ADR 0025 records the reversal.
+
 > **Updated by issue #37 (subagent tool fidelity).** The knob set grew from seven to eight with `researchChildExtensions` (optional; absent → the curated two-package default; explicit `[]` in the JSON file → no extensions). It is extension-package-level by design: loading (extensions) and activation (role tool declarations) stay separate concerns. The copy below describes the original seven.
 
 > **Updated by issue #40 (A-axis flip, 2026-10-08).** `dispatchDefaultThinkingLevel` is no longer the highest standing layer: a conversationally-declared session level (the last `set-thinking-level` call, transcript-derived, sticky) now sits above both it and `roleDefaults` while active — the config default resumes when no declaration is active.
