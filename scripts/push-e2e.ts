@@ -21,6 +21,12 @@
  *      `done`'s finally; `abort` is the wrapper's live-run termination path,
  *      shared with the manual kill).
  *
+ * Later gates extend the same seam: 5/5b pin the research-child loadout
+ * (issue #37/#44), 6 pins built-in shadowing (issue #43), and 7, 8, 9b pin the
+ * in-process lifecycle contract (issues #46/#47/#48): emission ordering
+ * against a live child, abort-before-start silence, and binding's effect on
+ * the child's output and loadout reporting.
+ *
  * Run (a working model / API key is required):
  *   pi -p --no-session --no-extensions -e extensions/subagent.ts -e scripts/push-e2e.ts "Count slowly from 1 to 25, one number per line, then say done"
  *
@@ -41,7 +47,14 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createResearchChildSession, probeChildToolNames, RESEARCH_STATUS_CUSTOM_TYPE } from "../extensions/subagent.ts";
-import { EMBEDDED_ROLES, researchChildAllowlist, resolveTools } from "../src/lib.ts";
+import {
+  EMBEDDED_ROLES,
+  SUBAGENT_CHILD_BOUND,
+  SUBAGENT_CHILD_DISPOSED,
+  SUBAGENT_CHILD_SESSION_CREATED,
+  researchChildAllowlist,
+  resolveTools,
+} from "../src/lib.ts";
 
 export default function (pi: ExtensionAPI) {
   const logPath = path.join(os.tmpdir(), "push-e2e.log");
@@ -191,6 +204,262 @@ export default function (pi: ExtensionAPI) {
         log("PUSH-E2E OK: gate 3 (crash isolation)");
       }
 
+      const declared = EMBEDDED_ROLES.researcher.tools ?? [];
+      for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
+        if (declared.includes(q)) throw new Error(`default researcher role still declares ${q} — activation-follows-load expects built-in names only`);
+      }
+
+      // Gates 7-9b — issue #48: the in-process lifecycle contract
+      // (#46/#47) observed against a live research child. This is the only
+      // seam that sees the factory's emission timing: a child wired like
+      // production (onLifecycle -> pi.events.emit) announces session-created
+      // synchronously after session creation and before bindExtensions, bound
+      // after binding resolves on the success path only, disposed in the
+      // run's finally.
+      const subscribeLifecycle = () => {
+        const events: Array<{ channel: string; payload: Record<string, unknown> }> = [];
+        const unsubs = [
+          pi.events.on(SUBAGENT_CHILD_SESSION_CREATED, (payload) =>
+            events.push({ channel: SUBAGENT_CHILD_SESSION_CREATED, payload: payload as Record<string, unknown> }),
+          ),
+          pi.events.on(SUBAGENT_CHILD_BOUND, (payload) =>
+            events.push({ channel: SUBAGENT_CHILD_BOUND, payload: payload as Record<string, unknown> }),
+          ),
+          pi.events.on(SUBAGENT_CHILD_DISPOSED, (payload) =>
+            events.push({ channel: SUBAGENT_CHILD_DISPOSED, payload: payload as Record<string, unknown> }),
+          ),
+        ];
+        return { events, unsubscribe: () => unsubs.forEach((u) => u()) };
+      };
+      const wireLikeProduction: NonNullable<Parameters<typeof createResearchChildSession>[0]["onLifecycle"]> = (
+        announcement,
+      ) => {
+        pi.events.emit(announcement.channel, announcement.payload);
+      };
+
+      // One shared child-run helper for every gate that only needs the child's
+      // output: create (with the session's captured cwd/model), track, tee to
+      // a string, await done. Gates 5/5b/6/9/9b all assert on this same
+      // output, so a factory-shape change cannot drift them apart (the
+      // loadout gates' own comment promises exactly this).
+      const runChildSession = async (opts: {
+        extensions: string[];
+        tools: string[];
+        systemPrompt: string;
+        task: string;
+        findingsPath: string;
+        parentSessionId?: string;
+        onLifecycle?: NonNullable<Parameters<typeof createResearchChildSession>[0]["onLifecycle"]>;
+      }): Promise<string> => {
+        const child = createResearchChildSession({
+          cwd: sessionCwd,
+          model: sessionModel,
+          thinkingLevel: "off",
+          extensions: opts.extensions,
+          tools: opts.tools,
+          systemPrompt: opts.systemPrompt,
+          task: opts.task,
+          findingsPath: opts.findingsPath,
+          parentSessionId: opts.parentSessionId,
+          onLifecycle: opts.onLifecycle,
+        });
+        children.push(child);
+        let out = "";
+        void (async () => {
+          for await (const chunk of child.output) out += chunk;
+        })().catch(() => {});
+        await child.done;
+        return out;
+      };
+
+      // Gate 7 — a real research child run emits the three events in the
+      // convention's order (created before bind, bound after, disposed in the
+      // finally), one stable sessionId across all three, and the parent id on
+      // created/bound only (the disposed payload omits the key).
+      {
+        const { events, unsubscribe } = subscribeLifecycle();
+        try {
+          const child = createResearchChildSession({
+            cwd: sessionCwd,
+            model: sessionModel,
+            thinkingLevel: "off",
+            tools: ["read", "grep"],
+            extensions: [],
+            systemPrompt: "You are a lifecycle check. Reply with exactly: pong",
+            task: "Reply with exactly: pong",
+            findingsPath: path.join(os.tmpdir(), "push-e2e-lifecycle-findings.md"),
+            parentSessionId: "e2e-parent",
+            onLifecycle: wireLikeProduction,
+          });
+          children.push(child);
+          await child.done;
+          const ids = events.map((e) => String(e.payload.sessionId));
+          const ok =
+            events.length === 3 &&
+            events[0].channel === SUBAGENT_CHILD_SESSION_CREATED &&
+            events[1].channel === SUBAGENT_CHILD_BOUND &&
+            events[2].channel === SUBAGENT_CHILD_DISPOSED &&
+            ids.every((id) => id.length > 0) &&
+            new Set(ids).size === 1 &&
+            events[0].payload.parentSessionId === "e2e-parent" &&
+            events[1].payload.parentSessionId === "e2e-parent" &&
+            !("parentSessionId" in events[2].payload);
+          log(
+            ok
+              ? `PUSH-E2E OK: gate 7 (emission order created → bound → disposed, stable sessionId ${ids[0]}, parent id on created/bound only)`
+              : `PUSH-E2E FAIL: gate 7 (channels=${events.map((e) => e.channel).join(",")}, sessionIds=${ids.join(",")})`,
+          );
+        } catch (err) {
+          log(`(7) lifecycle child FAILED: ${(err as Error).message}`);
+          log("PUSH-E2E FAIL: gate 7");
+        } finally {
+          unsubscribe();
+        }
+      }
+
+      // Gate 8 — an abort-before-start child (killed between session creation
+      // and binding) emits nothing on any lifecycle channel: the registry must
+      // never see a child that never ran. The synchronous abort() lands inside
+      // the async creation window, so the factory's post-creation abort check
+      // fires before any emission.
+      {
+        const { events, unsubscribe } = subscribeLifecycle();
+        try {
+          const doomed = createResearchChildSession({
+            cwd: sessionCwd,
+            model: sessionModel,
+            thinkingLevel: "off",
+            tools: ["read"],
+            extensions: [],
+            systemPrompt: "You are a lifecycle check.",
+            task: "reply with one word",
+            findingsPath: path.join(os.tmpdir(), "push-e2e-abort-before-start-findings.md"),
+          });
+          children.push(doomed);
+          doomed.abort();
+          let settle: "resolved" | "aborted" | "other" = "other";
+          try {
+            await doomed.done;
+            settle = "resolved";
+          } catch (err) {
+            settle = String((err as Error).message).includes("research child aborted before start")
+              ? "aborted"
+              : "other";
+          }
+          const ok = settle === "aborted" && events.length === 0;
+          log(
+            ok
+              ? "PUSH-E2E OK: gate 8 (abort-before-start child emits no lifecycle events)"
+              : `PUSH-E2E FAIL: gate 8 (settle=${settle}, events=${events.length})`,
+          );
+        } catch (err) {
+          log(`(8) abort-before-start child errored unexpectedly: ${(err as Error).message}`);
+          log("PUSH-E2E FAIL: gate 8");
+        } finally {
+          unsubscribe();
+        }
+      }
+
+      // Gate 9 / 9b — binding does not disturb the child's output or loadout
+      // reporting (parent issue #45's known-risk check). A real child binds
+      // (session_start fires, the loadout report is computed post-binding, the
+      // prompt starts) and must still speak the loadout line first, then the
+      // created/prompt stage lines in order, then its exact reply — nothing
+      // injected before the loadout line. The exact "pong" reply is a
+      // supporting behavioral check (the child followed the override's
+      // instruction exactly); the re-assembly verdict comes from the
+      // loadout-specific comments below.
+      {
+        const run = async (opts: {
+          label: string;
+          extensions: string[];
+          tools: string[];
+          firstLineCheck: (firstLine: string) => boolean;
+          okMessage: string;
+        }) => {
+          try {
+            const out = await runChildSession({
+              extensions: opts.extensions,
+              tools: opts.tools,
+              systemPrompt: "You are a loadout check. Reply with exactly: pong",
+              task: "Reply with exactly: pong",
+              findingsPath: path.join(os.tmpdir(), `push-e2e-bind-${opts.label}-findings.md`),
+              onLifecycle: wireLikeProduction,
+            });
+            const lines = out.split("\n").filter((l) => l.length > 0);
+            const firstLine = lines[0] ?? "";
+            const lastLine = lines[lines.length - 1] ?? "";
+            const createdIdx = lines.findIndex((l) => l.includes("[run] ") && l.includes("session created"));
+            const promptIdx = lines.findIndex((l) => l.includes("[run] ") && l.includes("prompt started"));
+            log(`(9${opts.label}) bound child output (${lines.length} lines):`);
+            lines.forEach((l) => log(`  ${JSON.stringify(l)}`));
+            const ok =
+              opts.firstLineCheck(firstLine) &&
+              lastLine === "pong" &&
+              createdIdx >= 1 &&
+              promptIdx > createdIdx &&
+              !lines.some((l) => l.includes("[child-loadout] allowlist missing"));
+            log(
+              ok
+                ? `PUSH-E2E OK: gate 9${opts.label} (${opts.okMessage})`
+                : `PUSH-E2E FAIL: gate 9${opts.label} (firstLine=${JSON.stringify(firstLine)}, lastLine=${JSON.stringify(lastLine)}, createdIdx=${createdIdx}, promptIdx=${promptIdx})`,
+            );
+          } catch (err) {
+            log(`(9${opts.label}) bound child FAILED: ${(err as Error).message}`);
+            log(`PUSH-E2E FAIL: gate 9${opts.label}`);
+          }
+        };
+
+        // The quiet default (empty knob): the loader keeps zero extensions,
+        // so the child's runner has no resources_discover handlers and
+        // extendResourcesFromExtensions returns before any rebuild — system
+        // prompt re-assembly is structurally impossible for this loadout.
+        // Observed live: the bound child speaks exactly the loadout line, the
+        // two stage lines, and the exact reply, with nothing injected — the
+        // re-assembly finding is closed (structurally absent, behaviorally
+        // unchanged).
+        await run({
+          label: "",
+          extensions: [],
+          tools: declared,
+          firstLineCheck: (firstLine) =>
+            firstLine.includes("[loadout] info · no query packages configured") && firstLine.includes("built-in tools only"),
+          okMessage: "loadout line first, stage lines intact, reply unchanged by binding",
+        });
+
+        // The loaded-package case is the only place re-assembly could fire: a
+        // knob package's resources_discover handlers would extend the child's
+        // resources and rebuild the system prompt. No knob package is
+        // installed here, so the case is unverifiable and fails loudly —
+        // matching gate 5b's stance — instead of claiming confirmation it did
+        // not make. When a package IS installed, the run below pins that the
+        // loadout line and the output stay unchanged.
+        try {
+          const knob = ["npm:@ssk_dev/pi-web-access-lean"];
+          const probe = probeChildToolNames(pi, knob);
+          if (probe.packageToolNames.length === 0) {
+            throw new Error("web-access-lean not installed — gate 9b cannot verify binding side effects with a loaded package");
+          }
+          const allowlist = researchChildAllowlist({
+            declared,
+            availableToolNames: probe.names,
+            platform: process.platform,
+            packageTools: probe.packageToolNames,
+            explicit: false,
+          }).tools;
+          await run({
+            label: "b",
+            extensions: knob,
+            tools: allowlist,
+            firstLineCheck: (firstLine) => firstLine.includes("[loadout] ok · loaded") && firstLine.includes("web_access"),
+            okMessage: "loaded package's loadout line first, stage lines intact, reply unchanged by binding",
+          });
+        } catch (err) {
+          log(`(9b) loaded-package binding gate FAILED: ${(err as Error).message}`);
+          log("PUSH-E2E FAIL: gate 9b");
+        }
+      }
+
       // Gate 1 finish — the child completion is independent of gates 2-3.
       try {
         await child.done;
@@ -224,22 +493,13 @@ export default function (pi: ExtensionAPI) {
         failMessage: string;
       }) => {
         try {
-          const child = createResearchChildSession({
-            cwd: sessionCwd,
-            model: sessionModel,
-            thinkingLevel: "off",
+          const out = await runChildSession({
             extensions: opts.extensions,
             tools: opts.tools,
             systemPrompt: "You are a loadout check. Reply with exactly: pong",
             task: "Reply with exactly: pong",
             findingsPath: path.join(os.tmpdir(), `push-e2e-knob-${opts.label}-findings.md`),
           });
-          children.push(child);
-          let out = "";
-          void (async () => {
-            for await (const chunk of child.output) out += chunk;
-          })().catch(() => {});
-          await child.done;
           const firstLine = out.split("\n")[0] ?? "";
           log(`(${opts.label}) knob child first line: ${JSON.stringify(firstLine)}`);
           const ok =
@@ -257,11 +517,6 @@ export default function (pi: ExtensionAPI) {
           log(`PUSH-E2E FAIL: gate ${opts.label}`);
         }
       };
-
-      const declared = EMBEDDED_ROLES.researcher.tools ?? [];
-      for (const q of ["web_access", "query-docs", "resolve-library-id"]) {
-        if (declared.includes(q)) throw new Error(`default researcher role still declares ${q} — activation-follows-load expects built-in names only`);
-      }
 
       // Gate 5 — the quiet default: an empty knob loads no packages, the
       // child carries built-in tools only, and the loadout speaks one `info`
@@ -323,22 +578,13 @@ export default function (pi: ExtensionAPI) {
       try {
         const shadowProbe = probeChildToolNames(pi, []);
         const shadowAllowlist = resolveTools(declared, shadowProbe.names) ?? [];
-        const child = createResearchChildSession({
-          cwd: sessionCwd,
-          model: sessionModel,
-          thinkingLevel: "off",
+        const out = await runChildSession({
           extensions: [],
           tools: shadowAllowlist,
           systemPrompt: "You are a loadout check. Reply with exactly: pong",
           task: "Reply with exactly: pong",
           findingsPath: path.join(os.tmpdir(), "push-e2e-shadow-findings.md"),
         });
-        children.push(child);
-        let out = "";
-        void (async () => {
-          for await (const chunk of child.output) out += chunk;
-        })().catch(() => {});
-        await child.done;
         log(`(6) shadow probe names: ${[...shadowProbe.names].sort().join(", ")}`);
         log(`(6) resolved allowlist: ${shadowAllowlist.join(", ")}`);
         const ok =
@@ -352,6 +598,7 @@ export default function (pi: ExtensionAPI) {
         log(`(6) shadow child FAILED: ${(err as Error).message}`);
         log("PUSH-E2E FAIL: gate 6");
       }
+
     })().catch((err) => {
       log(`push-e2e async body errored: ${(err as Error).stack ?? (err as Error).message}`);
     });

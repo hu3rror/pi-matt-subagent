@@ -273,13 +273,27 @@ export function createResearchChildSession(opts: {
       }
       session = created.session;
       researchChildren.add(session);
+      // The announcement stays a pure no-op at teardown: the parent bus is
+      // invalidated at session_shutdown, so an emission then throws the
+      // stale-context error and would turn a normal run into a confusing
+      // rejection. The runner already swallows exactly this error on the
+      // terminal push (#32). The match is scoped to pi's own error: this hook
+      // wraps a user subscriber too, and only pi's teardown error may be
+      // swallowed — a subscriber error stays loud.
+      const emitLifecycle = (announcement: SubagentChildAnnouncement) => {
+        try {
+          opts.onLifecycle?.(announcement);
+        } catch (err) {
+          if (!(err instanceof Error && err.message.includes("extension ctx is stale"))) throw err;
+        }
+      };
       // Lifecycle announcement #1 (ADR 0014 reversal, issue #47): the child
       // announces itself on the parent session's pi.events bus synchronously —
       // same call stack, no await after creation resolves — and immediately
       // before bindExtensions below, so a permission system registers the child
       // before its own session_start activates inside it. Pure announcement:
       // nothing is read back, and with no subscriber the emit is a no-op.
-      opts.onLifecycle?.(
+      emitLifecycle(
         buildSubagentChildAnnouncement(SUBAGENT_CHILD_SESSION_CREATED, session.sessionId, opts.parentSessionId),
       );
       let unsubscribe: (() => void) | undefined;
@@ -298,7 +312,7 @@ export function createResearchChildSession(opts: {
         // Lifecycle announcement #2 — the success path only: a throwing
         // bindExtensions propagates below, and the finally emits disposed
         // alone (a child that never bound is not announced as bound).
-        opts.onLifecycle?.(
+        emitLifecycle(
           buildSubagentChildAnnouncement(SUBAGENT_CHILD_BOUND, session.sessionId, opts.parentSessionId),
         );
         // issue #37 — a loadout self-report as the child's FIRST output line(s):
@@ -348,7 +362,7 @@ export function createResearchChildSession(opts: {
       } finally {
         // Lifecycle announcement #3 — the run's finally, on success and on
         // error alike, so no stale child entry outlives the run.
-        opts.onLifecycle?.(
+        emitLifecycle(
           buildSubagentChildAnnouncement(SUBAGENT_CHILD_DISPOSED, session.sessionId),
         );
         unsubscribe?.();
