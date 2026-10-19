@@ -1,4 +1,5 @@
 # Subagent marker and research toolCall audit: the two future-proofing seams
+> **Revised by issue #45 (research child lifecycle announcements).** The **Deliberate non-emission** section below is reversed: the research child now announces its lifecycle on the parent session's `pi.events` (`subagents:child:session-created` / `subagents:child:bound` / `subagents:child:disposed`) and binds its extensions before prompting, so a loaded permission system activates. ADR 0026 records the reversal; this ADR's subagent-marker and toolCall-audit decisions are unaffected.
 
 > [ZH] 冻结两条面向未来的 seam（父 issue #24，落地于 #25/#26）：① blocking 子进程环境携带 `PI_SUBAGENT_PARENT_SESSION=<父会话 id>`（gotgenes 现行 out-of-process 约定，per-spawn 注入，纯公告——本包只设置从不读取）；② research 子会话经 `tool_execution_start` 事件 → 子会话工厂可选 `onToolCall` 钩子，由 runner 把每次执行的工具调用追加为 `toolcalls.jsonl` 的一行 JSON（start-only，行 schema `{ts, toolCallId, toolName, args}`）。同时冻结两处刻意的不作为：不设 legacy `PI_SUBAGENT_CHILD`/`PI_SUBAGENT_NAME` 与 role 提示 `PI_SUBAGENT_ROLE`；不为 in-process research 子会话发出 gotgenes in-process 生命周期事件。
 

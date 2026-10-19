@@ -9,7 +9,7 @@
 _Avoid_: sub-agent, 后台任务
 
 **subagent marker（子代理标记）**:
-blocking 子进程环境里的纯公告变量 `PI_SUBAGENT_PARENT_SESSION`（gotgenes 现行 out-of-process 约定）：每次 spawn 注入**直接父会话**的 id，嵌套 subagent 各命名各自的直接父；本包只设置从不读取，消费方（权限问询转发、身份守卫等）在子进程侧读。值语义：有父会话 id 才携带（顶层手动 run 无标记），环境继承完整保留、不改调用方对象。legacy `PI_SUBAGENT_CHILD`/`PI_SUBAGENT_NAME` 与 role 提示 `PI_SUBAGENT_ROLE` 刻意不设；in-process research 子会话不经环境通道（无 spawn），也不发出任何 gotgenes in-process 生命周期事件（ADR 0014）。
+blocking 子进程环境里的纯公告变量 `PI_SUBAGENT_PARENT_SESSION`（gotgenes 现行 out-of-process 约定）：每次 spawn 注入**直接父会话**的 id，嵌套 subagent 各命名各自的直接父；本包只设置从不读取，消费方（权限问询转发、身份守卫等）在子进程侧读。值语义：有父会话 id 才携带（顶层手动 run 无标记），环境继承完整保留、不改调用方对象。legacy `PI_SUBAGENT_CHILD`/`PI_SUBAGENT_NAME` 与 role 提示 `PI_SUBAGENT_ROLE` 刻意不设。in-process 半边（ADR 0014 的刻意不发出已逆转，ADR 0026）：research 子会话不经环境通道，改在父会话 `pi.events` 上广播三个生命周期事件（`subagents:child:session-created` / `subagents:child:bound` / `subagents:child:disposed`，与权限系统订阅常量字符一致）——created 于绑定扩展前同步发出、bound 仅绑定成功后、disposed 于 run 的 finally（成败皆发）；无订阅方时每次广播都是静默 no-op，本包保持纯公告、从不读回。
 _Avoid_: child marker, PI_SUBAGENT_CHILD, 环境注入变量
 
 **role**:
