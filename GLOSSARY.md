@@ -128,3 +128,7 @@ _Avoid_: fake-pi harness, 契约测试（泛称）
 **help-on-demand（按需帮助）**:
 被明确推迟的 schema 瘦身方案（ADR 0012）：把公开 schema 的详细参数藏到 `help` 操作/文档，按需展开，以缩小模型可见 footprint（轻量 subagents 门面的做法）。基线建立后（2026-09-22）重新决策（ADR 0019）：采纳就地瘦身（Variant A，description 精简但全保留 + schema 描述去冗词，合计 1147→979 tokens），help 机制本身继续挂起；完整教学文本以 `SUBAGENT_HELP_TEXT` / `RESEARCH_HELP_TEXT` 常量原样保留并配防腐化测试，作为将来的结构性入口——接线即用、无需重写。
 _Avoid_: schema slimming（作为已采纳）, help 命令, 悬空的 "call help" 指引
+
+**publish flow（发布流）**:
+npm 包发布链路：push `v*` tag 触发 `.github/workflows/publish.yml`（GitHub Actions 直接流），经 Trusted Publisher（OIDC、零 token）`npm publish --provenance` 立即发布，无人工 2FA 闸门；前置条件为 npmjs.com 上该包的 Trusted Publisher 绑定已允许 `npm publish`（仅允许 stage 会 403）。bump 版本与打签名 tag 是执行 agent 的职责，push 需用户当轮确认；发布成功后由 agent 写分类 release notes 并创建 GitHub Release（workflow 不建占位 Release）。回滚：72 小时内 `npm unpublish <version>`（需本地登录），超期用 `npm deprecate`；首发例外——OIDC 无法创建尚不存在的包，首次发布须维护者本地 `npm publish`。
+_Avoid_: manual publish, 手动 npm publish 流程
