@@ -1622,6 +1622,66 @@ export function buildSubagentEnv(base: NodeJS.ProcessEnv, parentSessionId?: stri
 }
 
 /**
+ * The in-process half of the gotgenes subagent adapter convention (parent
+ * issue #45): the three `pi.events` channel names a research child announces
+ * its lifecycle on. Character-identical to the permission system's subscriber
+ * constants, so the two independently-declared sides cannot drift. Pure
+ * announcement: nothing in this package subscribes, and with no subscriber
+ * every emission is a no-op.
+ */
+export const SUBAGENT_CHILD_SESSION_CREATED = "subagents:child:session-created";
+export const SUBAGENT_CHILD_BOUND = "subagents:child:bound";
+export const SUBAGENT_CHILD_DISPOSED = "subagents:child:disposed";
+
+/** The three lifecycle channels as one union — the builder's channel contract. */
+export type SubagentChildChannel =
+  | typeof SUBAGENT_CHILD_SESSION_CREATED
+  | typeof SUBAGENT_CHILD_BOUND
+  | typeof SUBAGENT_CHILD_DISPOSED;
+
+/**
+ * The `session-created` / `bound` announcement payload: the child session id,
+ * plus the parent session id when the run has one. The parent id is omitted
+ * as a key (never `undefined`) when absent, so the payload stays honest for
+ * top-level manual runs.
+ */
+export interface SubagentChildLifecyclePayload {
+  sessionId: string;
+  parentSessionId?: string;
+}
+
+/**
+ * One lifecycle announcement, `{ channel, payload }`. `session-created` and
+ * `bound` carry `{ sessionId, parentSessionId? }`; `disposed` carries only
+ * `{ sessionId }`.
+ */
+export type SubagentChildAnnouncement =
+  | { channel: typeof SUBAGENT_CHILD_SESSION_CREATED; payload: SubagentChildLifecyclePayload }
+  | { channel: typeof SUBAGENT_CHILD_BOUND; payload: SubagentChildLifecyclePayload }
+  | { channel: typeof SUBAGENT_CHILD_DISPOSED; payload: { sessionId: string } };
+
+/**
+ * Builds one lifecycle announcement: a fresh `{ channel, payload }` with the
+ * child session id always present and the parent session id present exactly
+ * when given — the key is omitted, never `undefined`, otherwise. `disposed`
+ * carries only the child id even when a parent id is passed. Pure: the
+ * builder only shapes the announcement and never reads an event bus back.
+ */
+export function buildSubagentChildAnnouncement(
+  channel: SubagentChildChannel,
+  sessionId: string,
+  parentSessionId?: string,
+): SubagentChildAnnouncement {
+  if (channel === SUBAGENT_CHILD_DISPOSED) return { channel, payload: { sessionId } };
+  const payload: SubagentChildLifecyclePayload =
+    parentSessionId === undefined ? { sessionId } : { sessionId, parentSessionId };
+  // Both remaining channels share the payload type; the branch below exists
+  // only to narrow `channel` for the discriminated-union return type.
+  if (channel === SUBAGENT_CHILD_SESSION_CREATED) return { channel, payload };
+  return { channel, payload };
+}
+
+/**
  * `research`'s registered output schema (ADR 0017): the machine-readable
  * receipt returned as `structuredContent` on every successful call — exactly
  * the three string fields of `ResearchHandle`, mirrored from the same object

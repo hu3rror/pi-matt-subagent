@@ -12,6 +12,7 @@ import {
   buildDispatchArgs,
   buildResearchFullParams,
   buildResearchPrompt,
+  buildSubagentChildAnnouncement,
   buildSubagentEnv,
   configToLimits,
   CONFIG_KEYS,
@@ -77,6 +78,9 @@ import {
   splitModelRef,
   toolErrorDetails,
   toolErrorMessage,
+  SUBAGENT_CHILD_BOUND,
+  SUBAGENT_CHILD_DISPOSED,
+  SUBAGENT_CHILD_SESSION_CREATED,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_HELP_TEXT,
   SUBAGENT_INPUT_KEYS,
@@ -3033,6 +3037,55 @@ test("buildSubagentEnv never mutates the caller's base", () => {
   assert.deepEqual(base, snapshot, "the caller's object is untouched");
 });
 
+// ---------------------------------------------------------------------------
+// S24 — buildSubagentChildAnnouncement: the pure in-process half of the
+// subagent adapter convention (parent issue #45). The channel names are pinned
+// character-exact so the two independently-declared sides (this package, the
+// permission system) cannot drift; the payload shapes, the omitted-key rule,
+// and disposed's id-only payload follow the convention's spec. Pure
+// announcement: nothing is read back.
+// ---------------------------------------------------------------------------
+
+test("the lifecycle channel constants are the exact strings the convention specifies", () => {
+  assert.equal(SUBAGENT_CHILD_SESSION_CREATED, "subagents:child:session-created");
+  assert.equal(SUBAGENT_CHILD_BOUND, "subagents:child:bound");
+  assert.equal(SUBAGENT_CHILD_DISPOSED, "subagents:child:disposed");
+});
+
+test("buildSubagentChildAnnouncement returns { channel, payload } with the session id", () => {
+  const created = buildSubagentChildAnnouncement(SUBAGENT_CHILD_SESSION_CREATED, "child-1");
+  assert.equal(created.channel, "subagents:child:session-created");
+  assert.deepEqual(created.payload, { sessionId: "child-1" });
+  const bound = buildSubagentChildAnnouncement(SUBAGENT_CHILD_BOUND, "child-1");
+  assert.equal(bound.channel, "subagents:child:bound");
+  assert.deepEqual(bound.payload, { sessionId: "child-1" });
+  const disposed = buildSubagentChildAnnouncement(SUBAGENT_CHILD_DISPOSED, "child-1");
+  assert.equal(disposed.channel, "subagents:child:disposed");
+  assert.deepEqual(disposed.payload, { sessionId: "child-1" });
+});
+
+test("buildSubagentChildAnnouncement carries parentSessionId exactly when given", () => {
+  const created = buildSubagentChildAnnouncement(SUBAGENT_CHILD_SESSION_CREATED, "child-1", "parent-0");
+  assert.deepEqual(created.payload, { sessionId: "child-1", parentSessionId: "parent-0" });
+  const bound = buildSubagentChildAnnouncement(SUBAGENT_CHILD_BOUND, "child-1", "parent-0");
+  assert.deepEqual(bound.payload, { sessionId: "child-1", parentSessionId: "parent-0" });
+});
+
+test("buildSubagentChildAnnouncement omits the parentSessionId key (not undefined) when absent", () => {
+  const bound = buildSubagentChildAnnouncement(SUBAGENT_CHILD_BOUND, "child-1");
+  assert.equal("parentSessionId" in bound.payload, false, "the key must be absent, not undefined");
+  assert.deepEqual(bound.payload, { sessionId: "child-1" });
+  assert.equal(Object.keys(bound.payload).length, 1);
+  const created = buildSubagentChildAnnouncement(SUBAGENT_CHILD_SESSION_CREATED, "child-1");
+  assert.equal("parentSessionId" in created.payload, false);
+});
+
+test("disposed carries only the session id even when a parent id is passed", () => {
+  const a = buildSubagentChildAnnouncement(SUBAGENT_CHILD_DISPOSED, "child-1", "parent-0");
+  assert.equal(a.channel, "subagents:child:disposed");
+  assert.deepEqual(a.payload, { sessionId: "child-1" });
+  assert.equal("parentSessionId" in a.payload, false);
+});
 test("buildDispatchArgs puts fixed flags first, then optional flags, then the task", () => {
   const args = buildDispatchArgs({
     model: "prov/m",
