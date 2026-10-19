@@ -37,6 +37,7 @@ import {
   createReadOnlyTools,
   DefaultResourceLoader,
   type ExtensionAPI,
+  type ExtensionError,
   getAgentDir,
   parseFrontmatter,
   SessionManager,
@@ -47,6 +48,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 
 import {
   buildDispatchArgs,
+  buildSubagentChildAnnouncement,
   buildSubagentEnv,
   childLoadoutReport,
   createRunRegistry,
@@ -99,6 +101,9 @@ import {
   SET_THINKING_LEVEL_DESCRIPTION,
   SET_THINKING_LEVEL_PARAMS,
   splitModelRef,
+  SUBAGENT_CHILD_SESSION_CREATED,
+  SUBAGENT_CHILD_BOUND,
+  SUBAGENT_CHILD_DISPOSED,
   SUBAGENT_FULL_PARAMS,
   SUBAGENT_TOOL_DESCRIPTION,
   SUBAGENT_TOOL_PARAMS,
@@ -118,6 +123,7 @@ import {
   type RunEntry,
   type RunPatch,
   type RunRegistry,
+  type SubagentChildAnnouncement,
   type ThinkingLevel,
   type ToolCallEvent,
   type UsageStats,
@@ -179,6 +185,14 @@ export function createResearchChildSession(opts: {
   findingsPath: string;
   /** Optional synchronous audit hook (toolCall audit): invoked once per executed tool call. */
   onToolCall?: (call: ToolCallEvent) => void;
+  /** The parent session id (the research tool's own session), announced on `session-created`/`bound` payloads; absent when no parent session. */
+  parentSessionId?: string;
+  /**
+   * Optional synchronous lifecycle hook (ADR 0014 reversal, parent issue #45): invoked once per
+   * lifecycle announcement with the #46 `{ channel, payload }` contract. The extension wires it to
+   * the parent session's `pi.events` bus; pure announcement — nothing is ever read back.
+   */
+  onLifecycle?: (announcement: SubagentChildAnnouncement) => void;
 }): ResearchChildSession {
   const chunks: string[] = [];
   let ended = false;
@@ -259,52 +273,85 @@ export function createResearchChildSession(opts: {
       }
       session = created.session;
       researchChildren.add(session);
-      // issue #37 — a loadout self-report as the child's FIRST output line(s):
-      // the knob-package tools the loader filter actually kept, and any
-      // allowlist names missing from the session. Tee'd into the per-run log
-      // before the session ever prompts, so a loadout regression (a package
-      // that no longer loads, a renamed/retired tool) surfaces at start time
-      // instead of as model-side tool-not-found loops. The knob line reports
-      // the LOADOUT (what the loader kept), not the session's allowlist-
-      // filtered `getAllTools()`: a caller that restricts `tools` must not
-      // misread a healthy loadout as a package failure (observed false
-      // negative: `NO knob packages registered` with the packages installed
-      // and kept by the filter).
-      const knobExtensions = loader.getExtensions().extensions.filter((e) => isKnobPackage(e));
-      const keptKnobTools = knobExtensions.flatMap((e) => [...e.tools.keys()]);
-      for (const line of childLoadoutReport({
-        knob,
-        keptExtensionTools: keptKnobTools,
-        sessionToolNames: session.getAllTools().map((t) => t.name),
-        allowlist: opts.tools ?? [],
-      })) {
-        pushChunk(line);
-      }
-      const modelRef = opts.model as { provider?: string; id?: string } | undefined;
-      pushChunk(
-        runStageLine(
-          "session created",
-          modelRef?.provider && modelRef.id ? `model=${modelRef.provider}/${modelRef.id}` : "model inherited",
-        ),
+      // Lifecycle announcement #1 (ADR 0014 reversal, issue #47): the child
+      // announces itself on the parent session's pi.events bus synchronously —
+      // same call stack, no await after creation resolves — and immediately
+      // before bindExtensions below, so a permission system registers the child
+      // before its own session_start activates inside it. Pure announcement:
+      // nothing is read back, and with no subscriber the emit is a no-op.
+      opts.onLifecycle?.(
+        buildSubagentChildAnnouncement(SUBAGENT_CHILD_SESSION_CREATED, session.sessionId, opts.parentSessionId),
       );
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === "message_end" && event.message) {
-          const text = assistantTextOfMessage(event.message);
-          if (text) pushChunk(`${text}\n`);
-        } else if (event.type === "tool_execution_start") {
-          // ToolCall audit seam: every executed tool call is dispatched through
-          // the optional onToolCall hook with its final arguments — start
-          // events only, no results. The runner owns the file; nothing here
-          // touches the output stream or the UI.
-          opts.onToolCall?.({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
-        }
-      });
+      let unsubscribe: (() => void) | undefined;
       try {
+        // Binding activates the child's loaded extensions (issue #47): their
+        // session_start handlers now fire (the permission system's child-side
+        // service publishes there), unhandled MCP servers are reported, and
+        // resources_discover may re-assemble the system prompt. mode "print"
+        // keeps the headless child headless; onError surfaces extension errors
+        // to stderr instead of dropping them silently.
+        await session.bindExtensions({
+          mode: "print",
+          onError: (error) =>
+            console.error(`[matt-subagent] research child extension error (${error.extensionPath} · ${error.event}): ${error.error}`),
+        });
+        // Lifecycle announcement #2 — the success path only: a throwing
+        // bindExtensions propagates below, and the finally emits disposed
+        // alone (a child that never bound is not announced as bound).
+        opts.onLifecycle?.(
+          buildSubagentChildAnnouncement(SUBAGENT_CHILD_BOUND, session.sessionId, opts.parentSessionId),
+        );
+        // issue #37 — a loadout self-report as the child's FIRST output line(s):
+        // computed after bindExtensions so the report reflects the child's
+        // post-binding callable state (a session_start handler registering a
+        // tool cannot make the self-report a lie). Tee'd into the per-run log
+        // before the session ever prompts, so a loadout regression (a package
+        // that no longer loads, a renamed/retired tool) surfaces at start time
+        // instead of as model-side tool-not-found loops. The knob line reports
+        // the LOADOUT (what the loader kept), not the session's allowlist-
+        // filtered `getAllTools()`: a caller that restricts `tools` must not
+        // misread a healthy loadout as a package failure (observed false
+        // negative: `NO knob packages registered` with the packages installed
+        // and kept by the filter).
+        const knobExtensions = loader.getExtensions().extensions.filter((e) => isKnobPackage(e));
+        const keptKnobTools = knobExtensions.flatMap((e) => [...e.tools.keys()]);
+        for (const line of childLoadoutReport({
+          knob,
+          keptExtensionTools: keptKnobTools,
+          sessionToolNames: session.getAllTools().map((t) => t.name),
+          allowlist: opts.tools ?? [],
+        })) {
+          pushChunk(line);
+        }
+        const modelRef = opts.model as { provider?: string; id?: string } | undefined;
+        pushChunk(
+          runStageLine(
+            "session created",
+            modelRef?.provider && modelRef.id ? `model=${modelRef.provider}/${modelRef.id}` : "model inherited",
+          ),
+        );
+        unsubscribe = session.subscribe((event) => {
+          if (event.type === "message_end" && event.message) {
+            const text = assistantTextOfMessage(event.message);
+            if (text) pushChunk(`${text}\n`);
+          } else if (event.type === "tool_execution_start") {
+            // ToolCall audit seam: every executed tool call is dispatched through
+            // the optional onToolCall hook with its final arguments — start
+            // events only, no results. The runner owns the file; nothing here
+            // touches the output stream or the UI.
+            opts.onToolCall?.({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+          }
+        });
         if (abortController.signal.aborted) throw new Error("research child aborted before start");
         pushChunk(runStageLine("prompt started"));
         await session.prompt(opts.task);
       } finally {
-        unsubscribe();
+        // Lifecycle announcement #3 — the run's finally, on success and on
+        // error alike, so no stale child entry outlives the run.
+        opts.onLifecycle?.(
+          buildSubagentChildAnnouncement(SUBAGENT_CHILD_DISPOSED, session.sessionId),
+        );
+        unsubscribe?.();
         researchChildren.delete(session);
         try {
           session.dispose();
@@ -1528,7 +1575,20 @@ export default function (pi: ExtensionAPI) {
               }
             },
           },
-          (childOpts) => createResearchChildSession(childOpts),
+          (childOpts) =>
+            createResearchChildSession({
+              ...childOpts,
+              // The research tool's own session id: the child announces its
+              // immediate parent, mirroring the blocking path's per-spawn
+              // marker (buildSubagentEnv). Absent at top level — the payload
+              // builder then omits the key.
+              parentSessionId: ctx.sessionManager.getSessionId(),
+              // The parent session's bus: a synchronous emit, no-op with no
+              // subscriber (pure announcement — nothing is read back).
+              onLifecycle: (announcement) => {
+                pi.events.emit(announcement.channel, announcement.payload);
+              },
+            }),
         );
       } catch (err) {
         // A runner-level failure after the run was registered (e.g. the tmp
