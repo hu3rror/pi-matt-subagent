@@ -786,9 +786,9 @@ test("runBackgroundResearch omits the drift report when everything resolves", (t
   assert.ok(!fs.readFileSync(handle.logPath, "utf8").includes("research-drift"));
 });
 
-test("runBackgroundResearch resolves tools for the child against the registry", () => {
+test("runBackgroundResearch resolves tools for the child against the registry", (t) => {
   const calls: Array<{ tools?: string[] }> = [];
-  runBackgroundResearch(
+  const handle = runBackgroundResearch(
     {
       cwd: "/w",
       task: "T",
@@ -802,6 +802,9 @@ test("runBackgroundResearch resolves tools for the child against the registry", 
       return fakeChild();
     },
   );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
   assert.deepEqual(calls[0]?.tools, ["grep", "find", "ls"], "declared fff names degrade to built-ins");
 });
 
@@ -1093,9 +1096,9 @@ test("a manual kill pushes aborted even when the child stream never ends", async
 // ADR 0013 — the research child is restricted to built-in tools: the
 // extension's own tool names (subagent, research) must never reach its
 // allowlist, even though the main session's registry contains them.
-test("runBackgroundResearch never hands the extension's own tools to the child", () => {
+test("runBackgroundResearch never hands the extension's own tools to the child", (t) => {
   const calls: Array<{ tools?: string[] }> = [];
-  runBackgroundResearch(
+  const handle = runBackgroundResearch(
     {
       cwd: "/w",
       task: "T",
@@ -1109,12 +1112,15 @@ test("runBackgroundResearch never hands the extension's own tools to the child",
       return fakeChild();
     },
   );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
   assert.deepEqual(calls[0]?.tools, ["read"], "subagent/research must never reach a research child allowlist");
 });
 
-test("runBackgroundResearch drops extension tools without a tool registry too", () => {
+test("runBackgroundResearch drops extension tools without a tool registry too", (t) => {
   const calls: Array<{ tools?: string[] }> = [];
-  runBackgroundResearch(
+  const handle = runBackgroundResearch(
     {
       cwd: "/w",
       task: "T",
@@ -1127,6 +1133,9 @@ test("runBackgroundResearch drops extension tools without a tool registry too", 
       return fakeChild();
     },
   );
+  t.after(() => {
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
   assert.deepEqual(calls[0]?.tools, ["write"]);
 });
 

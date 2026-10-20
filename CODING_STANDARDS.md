@@ -44,4 +44,5 @@ Rules for code written in this repository. Agent behavior rules live in `AGENTS.
 ## Repo conventions
 
 - TypeScript in strict mode; typecheck with `npm run typecheck` (`tsc --noEmit`) and test with `npm test` (`node --test` on `src/*.test.ts`). Run both before considering a change done.
+- A test cleans up everything it creates, including artifacts a routine under test writes on its behalf (e.g. `runBackgroundResearch`'s `pi-research-*` tmpdir): a full `npm test` run must leave the system temp dir as it found it.
 - The package is ESM (`"type": "module"` in `package.json`); modules use ESM `import`/`export`.

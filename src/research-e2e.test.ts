@@ -234,7 +234,9 @@ async function runWithCapture(
     },
   );
   await done;
-  return { childOpts: childOpts!, logText: fs.readFileSync(handle.logPath, "utf8"), tmpDir: dir };
+  const logText = fs.readFileSync(handle.logPath, "utf8");
+  fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  return { childOpts: childOpts!, logText, tmpDir: dir };
 }
 
 test("case 1: role tools only reach the child when nothing is configured or activated", async (t) => {
