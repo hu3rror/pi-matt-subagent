@@ -1,6 +1,3 @@
-// Seam: pure protocol layer — the JSON-lines blocking child protocol
-// (message_end / tool_result_end dispatch, usage accumulation) and the
-// escalating-kill abort path, pinned under `node --test` with no pi runtime.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createResultAccumulator, escalateKill, type SingleResult } from "./blocking-protocol.ts";

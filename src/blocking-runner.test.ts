@@ -1,7 +1,3 @@
-// Seam: the orchestration module — single / parallel / chain flows driven
-// against the REAL run registry with a FAKE runner, so the registry
-// bookkeeping (register → status flips → terminal patch → abort sweep) and
-// the failure exits are pinned without spawning a real pi process.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Message } from "@earendil-works/pi-ai";
@@ -272,7 +268,6 @@ test("a worker resolving after an abort sweep keeps the run aborted (no frozen-u
         first = false;
         throw new Error("Subagent was aborted");
       }
-      // Resolve after the sweep has already terminalized this run's entry.
       await new Promise((r) => setTimeout(r, 10));
       return okResult(t.agentName, "late");
     },
@@ -500,7 +495,6 @@ test("firstInvalidPlanThinkingLevel passes unset and valid per-task levels", () 
     firstInvalidPlanThinkingLevel({ mode: "chain", steps: [{ agent: "a", task: "1", thinkingLevel: "xhigh" }] }),
     undefined,
   );
-  // single mode has no per-task field — never flagged
   assert.equal(firstInvalidPlanThinkingLevel({ mode: "single", agent: "a", task: "1" }), undefined);
 });
 

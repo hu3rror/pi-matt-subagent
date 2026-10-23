@@ -402,7 +402,6 @@ export function setRoleDefaultField(
   } else if (field === "model") {
     entry.model = value;
   } else {
-    // parseRoleDefaultFieldValue already narrowed the value to a level.
     entry.thinkingLevel = value as ThinkingLevel;
   }
   if (Object.keys(entry).length === 0) delete roleDefaults[role];
@@ -1675,9 +1674,6 @@ export function buildSubagentChildAnnouncement(
   if (channel === SUBAGENT_CHILD_DISPOSED) return { channel, payload: { sessionId } };
   const payload: SubagentChildLifecyclePayload =
     parentSessionId === undefined ? { sessionId } : { sessionId, parentSessionId };
-  // Both remaining channels share the payload type; the branch below exists
-  // only to narrow `channel` for the discriminated-union return type.
-  if (channel === SUBAGENT_CHILD_SESSION_CREATED) return { channel, payload };
   return { channel, payload };
 }
 

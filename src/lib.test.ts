@@ -243,9 +243,6 @@ test("researchChildToolNames unions knob-package tools and reports knob packages
     registryTools: [
       { name: "web_access", sourcePath: "/n/node_modules/@ssk_dev/pi-web-access-lean/index.ts" },
       { name: "query-docs", sourcePath: "/n/node_modules/@upstash/context7-pi/extensions/index.ts" },
-      // A package that is NOT in the knob: its tool must drop (not a
-      // built-in, not provided by a kept knob package) and its package must
-      // not be reported (only knob packages are drift-reported).
       { name: "mystery", sourcePath: "/n/node_modules/some-other-pkg/x.ts" },
     ],
     knob: ["npm:@ssk_dev/pi-web-access-lean", "npm:@upstash/context7-pi", "npm:ghost-pkg"],
@@ -493,7 +490,6 @@ test("the researcher role and default research tools declare built-in names only
     assert.ok(!roleTools.includes(t), `researcher role must not declare package tool ${t}`);
     assert.ok(!DEFAULT_RESEARCH_TOOLS.includes(t), `default research tools must not declare package tool ${t}`);
   }
-  // An unconfigured knob (empty) leaves the built-ins fully resolvable — no drift.
   const resolved = resolveTools(roleTools, new Set(builtIns));
   assert.deepEqual(resolved, builtIns);
 });
@@ -919,7 +915,6 @@ test("runBackgroundResearch kills at the wall-clock cap, marks the findings, and
   assert.equal(typeof timer, "function", "a wall-clock timer must be scheduled");
   timer!();
   assert.equal(pending.abortCalls, 1, "the child must be aborted at the cap");
-  // onExit fires only after the tee has drained the child's output into the log
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(exits, [{ status: "terminated" }]);
   const text = fs.readFileSync(findingsPath, "utf8");
@@ -1004,7 +999,6 @@ test("wall-clock kill pushes terminated even when the child stream never ends (b
   const state = { abortCalls: 0 };
   const child = fakeChild({
     output: (async function* () {
-      // Never yields, never ends: the tee's for-await suspends forever.
       await new Promise<void>(() => {});
     })(),
     abort: () => state.abortCalls++,
@@ -1204,9 +1198,6 @@ test("the toolCall audit writes only to toolcalls.jsonl, never the output log", 
   });
   hook!({ toolCallId: "c", toolName: "bash", args: { command: "ls" } });
   await new Promise((r) => setTimeout(r, 20));
-  // the output log is a 1:1 tee of the child's output stream (the UI
-  // stream), so an untouched log also proves the stream is untouched — the
-  // audit writes only to its own file
   assert.equal(fs.readFileSync(handle.logPath, "utf8"), "assistant text\n");
   const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
   const line = JSON.parse(fs.readFileSync(toolCallsPath, "utf8").trim());
@@ -1238,8 +1229,6 @@ test("a toolCall audit serialization failure is swallowed and writes no line", a
   });
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(exits, [{ status: "succeeded" }], "the run settles normally");
-  // an unserializable arg (BigInt) must not throw out of the hook and must
-  // write no line — a debug artifact can never kill a research run
   const toolCallsPath = path.join(path.dirname(handle.logPath), "toolcalls.jsonl");
   assert.doesNotThrow(() => hook!({ toolCallId: "c", toolName: "bash", args: { n: 1n } }));
   assert.equal(fs.readFileSync(toolCallsPath, "utf8"), "");
@@ -2247,7 +2236,6 @@ test("parseConfigSetValue parses comma-separated package lists and rejects inher
 });
 
 test("serializeConfig always writes the extensions knob (non-optional) and round-trips it", () => {
-  // Non-optional keys are always written; the quiet default is an explicit [].
   assert.ok(serializeConfig(defaultConfig()).includes('"researchChildExtensions": []'));
   const cfg = setConfigValue(defaultConfig(), "researchChildExtensions", ["npm:a"]);
   const back = parseConfigFile(serializeConfig(cfg));
@@ -2261,7 +2249,6 @@ test("configKeyLabel describes the current loadout for the extensions knob", () 
   assert.ok(label.includes("[default]"));
   const custom = parseConfigFile(JSON.stringify({ researchChildExtensions: ["npm:custom"] }));
   assert.ok(configKeyLabel("researchChildExtensions", custom).includes("npm:custom [customized]"));
-  // A written-but-default value (explicit [] after any `config set`) labels default.
   const writtenEmpty = parseConfigFile(JSON.stringify({ researchChildExtensions: [] }));
   assert.ok(configKeyLabel("researchChildExtensions", writtenEmpty).includes("[default]"));
 });
@@ -2967,9 +2954,6 @@ test("the preserved help texts carry the full teaching text (help-on-demand entr
   assert.ok(RESEARCH_HELP_TEXT.includes("checkpointed"), "the checkpoint guarantee survives in the help text");
 });
 
-// The role prompt's decision-bearing clauses, pinned as facts (the same
-// anti-rot pattern as the help text): the register is not testable, the rules
-// are. Deleting a clause must fail this test.
 test("the comment-sicko prompt pins its decision-bearing clauses", () => {
   const prompt = EMBEDDED_ROLES["comment-sicko"].systemPrompt;
   assert.ok(prompt.includes("a comment dies unless a closed exception saves it"), "delete-by-default survives");

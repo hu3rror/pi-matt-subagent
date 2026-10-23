@@ -80,8 +80,6 @@ export interface BlockingPlanResult {
   details: SubagentDetails;
 }
 
-// The single source for the blocking default limits is the extension config
-// defaults, so the two cannot drift.
 const DEFAULT_LIMITS: Required<BlockingPlanLimits> = configToLimits(defaultConfig());
 
 /**
@@ -276,7 +274,6 @@ export async function runBlockingPlan(opts: {
     };
   }
 
-  // parallel
   if (plan.tasks.length > limits.maxTasksPerCall) {
     return tooMany("parallel tasks", plan.tasks.length, limits.maxTasksPerCall);
   }

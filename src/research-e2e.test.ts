@@ -1,11 +1,3 @@
-// Seam C — end-to-end background semantics (ADR 0013) with FAKE child
-// sessions against the REAL wall-clock watcher and REAL file writes.
-// Proves the runner's contract without invoking the pi CLI, a model, or the
-// in-process createAgentSession wiring:
-//   the caller returns immediately (does not wait for the child session),
-//   and a terminal state fires onExit exactly once with the resolved status,
-//   the teed log lands on disk, and a wall-clock kill appends the slim
-//   `research-terminated` marker.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -37,8 +29,6 @@ test("background research writes findings without blocking the caller (fake chil
     fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
   });
 
-  // The caller returned immediately: the handle is available synchronously
-  // while the child still sleeps, and onExit has not fired yet.
   assert.equal(typeof handle.researchId, "string");
   assert.deepEqual(exits, [], "onExit must not have fired while the child sleeps");
 
@@ -89,7 +79,6 @@ test("a runaway researcher is killed by the wall-clock cap and marked (real time
   assert.ok(text.includes("research-terminated"), "findings must carry the termination marker");
   assert.ok(text.includes("reason: wall_clock_exceeded"), "reason must be the wall clock");
   assert.match(text, /at: \d{4}-\d{2}-\d{2}T/, "the marker carries a real timestamp");
-  // the teed log grew: the flood was written to the per-run log before the kill
   assert.ok(fs.statSync(handle.logPath).size > 0, "the per-run log must carry the teed output");
 });
 
@@ -142,7 +131,6 @@ test("a manual kill resolves aborted with no marker (real timers)", async (t) =>
     fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
   });
 
-  // the child hangs forever; the manual kill settles it
   setTimeout(() => controller.abort(), 300);
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && exits.length === 0) {
@@ -171,8 +159,6 @@ test("an abort signal firing before a resolved child done settles aborted — th
       abortSignal: controller.signal,
       onExit: (info) => exits.push(info),
     },
-    // The child's prompt resolves immediately — the abort below fires
-    // synchronously before the resolved `done`'s settle microtask.
     () => fakeChild({ done: Promise.resolve() }),
   );
   t.after(() => {
@@ -189,10 +175,6 @@ test("an abort signal firing before a resolved child done settles aborted — th
 });
 
 test("the allowlist handed to the research child keeps built-in names shadowed in the parent registry (issue #43)", async (t) => {
-  // The fixed probe's output for a main-session registry where read/grep
-  // come from a shadowing package and an empty knob: built-ins ∪ nothing, so
-  // the shadowed names stay available to the child, which does not load the
-  // shadowing extension.
   const available = researchChildToolNames({
     builtinNames: new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]),
     registryTools: [
