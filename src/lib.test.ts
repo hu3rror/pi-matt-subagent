@@ -2428,31 +2428,31 @@ test("parseRoleDefaultsKey accepts only the three-part dotted form", () => {
 });
 
 test("parseRoleDefaultFieldValue validates per-field values and clears with empty/inherit", () => {
-  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "low"), { ok: true, value: "low" });
-  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "inherit"), { ok: true, value: undefined });
-  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", ""), { ok: true, value: undefined });
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "low"), { ok: true, value: { field: "thinkingLevel", value: "low" } });
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", "inherit"), { ok: true, value: { field: "thinkingLevel", value: undefined } });
+  assert.deepEqual(parseRoleDefaultFieldValue("thinkingLevel", ""), { ok: true, value: { field: "thinkingLevel", value: undefined } });
   assert.equal(parseRoleDefaultFieldValue("thinkingLevel", "turbo").ok, false);
-  assert.deepEqual(parseRoleDefaultFieldValue("model", "openai/gpt-x"), { ok: true, value: "openai/gpt-x" });
-  assert.deepEqual(parseRoleDefaultFieldValue("model", "inherit"), { ok: true, value: undefined });
-  assert.deepEqual(parseRoleDefaultFieldValue("model", ""), { ok: true, value: undefined });
+  assert.deepEqual(parseRoleDefaultFieldValue("model", "openai/gpt-x"), { ok: true, value: { field: "model", value: "openai/gpt-x" } });
+  assert.deepEqual(parseRoleDefaultFieldValue("model", "inherit"), { ok: true, value: { field: "model", value: undefined } });
+  assert.deepEqual(parseRoleDefaultFieldValue("model", ""), { ok: true, value: { field: "model", value: undefined } });
 });
 
 test("setRoleDefaultField sets and clears fields immutably, pruning empty roles", () => {
   const base = defaultConfig();
-  const withLow = setRoleDefaultField(base, "standards-reviewer", "thinkingLevel", "low");
+  const withLow = setRoleDefaultField(base, "standards-reviewer", { field: "thinkingLevel", value: "low" });
   assert.deepEqual(withLow.roleDefaults, { "standards-reviewer": { thinkingLevel: "low" } });
   assert.equal(base.roleDefaults, undefined, "source untouched");
-  const withModel = setRoleDefaultField(withLow, "standards-reviewer", "model", "openai/gpt-x");
+  const withModel = setRoleDefaultField(withLow, "standards-reviewer", { field: "model", value: "openai/gpt-x" });
   assert.deepEqual(withModel.roleDefaults, { "standards-reviewer": { thinkingLevel: "low", model: "openai/gpt-x" } });
-  const cleared = setRoleDefaultField(withModel, "standards-reviewer", "thinkingLevel", undefined);
+  const cleared = setRoleDefaultField(withModel, "standards-reviewer", { field: "thinkingLevel", value: undefined });
   assert.deepEqual(cleared.roleDefaults, { "standards-reviewer": { model: "openai/gpt-x" } });
-  const pruned = setRoleDefaultField(cleared, "standards-reviewer", "model", undefined);
+  const pruned = setRoleDefaultField(cleared, "standards-reviewer", { field: "model", value: undefined });
   assert.equal(pruned.roleDefaults, undefined, "empty role entry prunes the whole knob");
 });
 
 test("serializeConfig omits an unset roleDefaults and round-trips a set one", () => {
   assert.ok(!serializeConfig(defaultConfig()).includes("roleDefaults"));
-  const cfg = setRoleDefaultField(defaultConfig(), "fact-finder", "thinkingLevel", "off");
+  const cfg = setRoleDefaultField(defaultConfig(), "fact-finder", { field: "thinkingLevel", value: "off" });
   const text = serializeConfig(cfg);
   const back = parseConfigFile(text);
   assert.deepEqual(back.effective.roleDefaults, { "fact-finder": { thinkingLevel: "off" } });

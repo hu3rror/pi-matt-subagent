@@ -952,7 +952,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(parsed.reason, "error");
         return;
       }
-      const next = setRoleDefaultField(readConfigStatus().effective, roleKey.role, roleKey.field, parsed.value);
+      const next = setRoleDefaultField(readConfigStatus().effective, roleKey.role, parsed.value);
       await writeConfig(serializeConfig(next));
       ctx.ui.notify(`config set ${key} \u2192 ${configLabelForKey(key, readConfigStatus())}`, "info");
       return;

@@ -103,6 +103,10 @@ export interface RoleDefault {
 /** The editable field of a `roleDefaults.<role>` entry (issue #39). */
 export type RoleDefaultField = "model" | "thinkingLevel";
 
+/** One `roleDefaults.<role>` field edit: the field paired with its validated value; `undefined` clears. */
+export type RoleDefaultEdit =
+  | { field: "model"; value: string | undefined }
+  | { field: "thinkingLevel"; value: ThinkingLevel | undefined };
 /** `roleDefaults`: `{ "<role>": { model?, thinkingLevel? } }`. */
 export type RoleDefaults = Record<string, RoleDefault>;
 
@@ -376,11 +380,15 @@ export function parseRoleDefaultsKey(key: string): { role: string; field: RoleDe
 export function parseRoleDefaultFieldValue(
   field: RoleDefaultField,
   rawValue: string,
-): { ok: true; value: string | ThinkingLevel | undefined } | { ok: false; reason: string } {
+): { ok: true; value: RoleDefaultEdit } | { ok: false; reason: string } {
   const trimmed = rawValue.trim();
-  if (trimmed === "" || trimmed === "inherit") return { ok: true, value: undefined };
-  if (field === "model") return { ok: true, value: trimmed };
-  if (isThinkingLevel(trimmed)) return { ok: true, value: trimmed };
+  if (trimmed === "" || trimmed === "inherit") {
+    return field === "model"
+      ? { ok: true, value: { field: "model", value: undefined } }
+      : { ok: true, value: { field: "thinkingLevel", value: undefined } };
+  }
+  if (field === "model") return { ok: true, value: { field: "model", value: trimmed } };
+  if (isThinkingLevel(trimmed)) return { ok: true, value: { field: "thinkingLevel", value: trimmed } };
   return { ok: false, reason: `roleDefaults thinkingLevel must be one of ${THINKING_LEVELS.join(", ")} (or inherit), got "${rawValue}"` };
 }
 
@@ -392,17 +400,16 @@ export function parseRoleDefaultFieldValue(
 export function setRoleDefaultField(
   cfg: EffectiveConfig,
   role: string,
-  field: RoleDefaultField,
-  value: string | ThinkingLevel | undefined,
+  edit: RoleDefaultEdit,
 ): EffectiveConfig {
   const roleDefaults: RoleDefaults = { ...(cfg.roleDefaults ?? {}) };
   const entry: RoleDefault = { ...(roleDefaults[role] ?? {}) };
-  if (value === undefined) {
-    delete entry[field];
-  } else if (field === "model") {
-    entry.model = value;
+  if (edit.value === undefined) {
+    delete entry[edit.field];
+  } else if (edit.field === "model") {
+    entry.model = edit.value;
   } else {
-    entry.thinkingLevel = value as ThinkingLevel;
+    entry.thinkingLevel = edit.value;
   }
   if (Object.keys(entry).length === 0) delete roleDefaults[role];
   else roleDefaults[role] = entry;
