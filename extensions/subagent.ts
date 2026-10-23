@@ -773,10 +773,21 @@ export default function (pi: ExtensionAPI) {
     // At teardown there is no footer left to keep in sync (story 7's
     // convergence only applies to a live session).
     footerUi = undefined;
+    // Settle each live run `aborted` before disposing its child: pi's dispose
+    // resolves the in-flight prompt and the runner's first terminal settle
+    // wins, so without this a cut-short child's done would resolve the run
+    // `succeeded` (ADR 0027). At teardown the push cannot land (stale ctx) —
+    // the run log's terminal line is the honest record.
+    try {
+      for (const controller of researchAborts.values()) controller.abort();
+    } catch {
+      /* the settle must never skip the cleanup below */
+    }
     subagentRuns.clear();
     researchAborts.clear();
     // Session-scoped research lifetime (ADR 0013): dispose every in-process
-    // child session that is still alive so no orphaned work outlives the session.
+    // child session still alive; the runner has already settled, so a disposed
+    // child's done cannot override the terminal status.
     for (const child of researchChildren) {
       try {
         child.dispose();

@@ -25,12 +25,12 @@ _Avoid_: synchronous, wait, join
 _Avoid_: async, fire-and-forget, detached
 
 **child session（子会话）**:
-执行一次后台 research run 的进程内会话（ADR 0013 的 in-process second session，`createAgentSession` + `SessionManager.inMemory()`），承载 role=researcher 的 subagent 实例——subagent 是「委托执行」，子会话是「在哪执行、输出怎么送回来」。`push` 边界引用的「输出流先于 done 结束」契约即其传输属性；生命周期会话作用域，`session_shutdown` 时 dispose。与主会话相对。
+执行一次后台 research run 的进程内会话（ADR 0013 的 in-process second session，`createAgentSession` + `SessionManager.inMemory()`），承载 role=researcher 的 subagent 实例——subagent 是「委托执行」，子会话是「在哪执行、输出怎么送回来」。`push` 边界引用的「输出流先于 done 结束」契约即其传输属性；生命周期会话作用域，`session_shutdown` 时经 per-run abort controller 落定 `aborted` 后 dispose 兜底（ADR 0027）。与主会话相对。
 _Avoid_: 子进程, worker, in-process 第二会话
 
 **push（推送交付）**:
 后台 subagent 到达任一终态（succeeded / failed / terminated / aborted）时，扩展经 `pi.sendMessage`（`deliverAs: "followUp"` + `triggerTurn: true`）把结果摘要与 findings 路径推进主会话上下文的语义——主会话空闲时立即触发新回合，正在回合中则排队到当前回合工具调用结束。推送内容成为被触发回合的 prompt，须措辞为「读取 findings 文件」的指令；另由消息渲染器（`pi.registerMessageRenderer`）负责转录显示。手动 kill（aborted）同样推送，告知主 agent 研究已被停止。
-两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，工具错误信号即模型可见信号（见 tool error）；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。
+两个边界：推送覆盖**已启动**的后台 run 到达终态——运行未启动即失败（runner 级错误）不推送，工具错误信号即模型可见信号（见 tool error）；送达保证上，自然完成（succeeded/failed）以后台子会话的输出流随运行结束正常终止为契约（日志完整落盘后再推送），击杀路径（terminated/aborted）则即使输出流永不结束（挂死的模型调用无视 abort）也经有界兜底保证送达。会话 teardown（session_shutdown）时推送无法送达（dead ctx，stale 错误被吞）：静默可接受的前提是状态诚实——被切断的 run 落 `aborted` 而非假 `succeeded`（ADR 0027），run log 的 `terminal · <status>` 行是 teardown 后的诚实面。
 _Avoid_: notify, callback, poll
 
 **two-axis review**:
@@ -74,7 +74,7 @@ _Avoid_: saturation, 信息饱和
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
-一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`aborted` 是用户主动终止——blocking 期间 Esc 整体中止，或空闲时手动 kill 一个 running 的 background research（见 run management）；`terminated` 严格保留给 background research 被 wall-clock 硬上限击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；手动 kill 从不记作 terminated。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`aborted` 是用户主动终止——blocking 期间 Esc 整体中止，或空闲时手动 kill 一个 running 的 background research（见 run management）；会话 teardown（session_shutdown）时仍在运行的 research run 也落为 aborted——被会话结束切断，而非假 succeeded（ADR 0027）；`terminated` 严格保留给 background research 被 wall-clock 硬上限击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；手动 kill 从不记作 terminated。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
 _Avoid_: pending, blocked, 状态机
 
 **run management（运行管理）**:

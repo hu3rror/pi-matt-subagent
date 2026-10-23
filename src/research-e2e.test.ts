@@ -153,6 +153,41 @@ test("a manual kill resolves aborted with no marker (real timers)", async (t) =>
   assert.ok(!fs.existsSync(findingsPath), "no termination marker on a manual kill");
 });
 
+test("an abort signal firing before a resolved child done settles aborted — the teardown race", async (t) => {
+  // The runner half of the teardown race (ADR 0027): pi's dispose resolves a
+  // cut-short child's `done` like a natural completion, so the abort signal's
+  // terminal settle must win over the later resolved `done`. The real-pi
+  // end-to-end gate is `scripts/research-teardown-e2e.ts`.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d4-e2e-"));
+  const findingsPath = path.join(dir, "findings.md");
+  const exits: ResearchExitInfo[] = [];
+  const controller = new AbortController();
+  const handle = runBackgroundResearch(
+    {
+      cwd: dir,
+      task: "T",
+      findingsPath,
+      agents: [embeddedResearcher()],
+      abortSignal: controller.signal,
+      onExit: (info) => exits.push(info),
+    },
+    // The child's prompt resolves immediately — the abort below fires
+    // synchronously before the resolved `done`'s settle microtask.
+    () => fakeChild({ done: Promise.resolve() }),
+  );
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(handle.logPath), { recursive: true, force: true });
+  });
+
+  controller.abort();
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && exits.length === 0) {
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.deepEqual(exits, [{ status: "aborted" }]);
+});
+
 test("the allowlist handed to the research child keeps built-in names shadowed in the parent registry (issue #43)", async (t) => {
   // The fixed probe's output for a main-session registry where read/grep
   // come from a shadowing package and an empty knob: built-ins ∪ nothing, so

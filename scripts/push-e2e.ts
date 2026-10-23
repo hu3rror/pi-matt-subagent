@@ -39,6 +39,14 @@
  * countdown prompt keeps the turn busy) — an immediate triggerTurn push when
  * the agent is not streaming would start a competing turn. Keep the prompt
  * long enough that the push lands while the first turn is still running.
+ *
+ * Session-lifetime caveat: one-shot `-p` ends the session right after the
+ * first turn, while the async body continues running later gates. Gates that
+ * run after the session ends execute in a dead session and FAIL with the
+ * stale-ctx error or an aborted child: 5b/6/9/9b fail reliably, and 5/7/8 can
+ * too when the countdown turn is short. Dev-only harness artifact, not a
+ * regression — the same gates pass in a session that outlives the first turn
+ * (an RPC idle session or a real TUI); verify those gates there.
  */
 
 import * as fs from "node:fs";

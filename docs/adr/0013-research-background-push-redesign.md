@@ -1,5 +1,7 @@
 # Research redesign: in-process session, push delivery, one wall-clock cap
 
+> **Revised by ADR 0027 (research teardown status honesty).** The consequence below ("children are disposed on `session_shutdown`") is refined: teardown now settles each live run through its per-run abort controller (`aborted`) first, and dispose remains the hard-unwind backstop — a disposed child can no longer resolve the run `succeeded`. Everything else is unchanged.
+
 > **Revised by issue #44 (no default packages, activation follows load).** Decision (1) of the #37 revision is reversed: the child no longer loads the approved query packages by default. `researchChildExtensions` is non-optional with an empty default (built-in tools only, no network), and activation follows load — a configured package's tools join the child's allowlist without any role declaration (an explicit caller `tools` list stays authoritative). ADR 0025 records the reversal.
 
 > **Revised by issue #37 (subagent tool fidelity).** Two decisions in this ADR changed: (1) the child is no longer built with `noExtensions: true` / "only built-in tools" — it loads exactly the approved query packages (`researchChildExtensions`; default `npm:@ssk_dev/pi-web-access-lean` + `npm:@upstash/context7-pi`) via an extension-loading override, keeping the anti-recursion property structurally (this extension's subagent/research never match the knob); (2) the wall-clock default is 45 minutes, not 60. Everything else below is unchanged.
