@@ -1131,10 +1131,10 @@ The shell tool (bash on macOS/Linux, powershell on Windows) is for read-only com
 Only these exceptions crawl away:
 - legal or license headers;
 - non-obvious behavior forced by an external dependency, platform, vendor, or protocol we cannot reshape;
-- prettier-ignore;
+- prettier-ignore and similar;
 - doc comments that define a public API contract;
 - issue or RFC links explaining a constraint code cannot express.
-That list is the only leash. When you are not sure an exception applies, the comment dies. Everything else is meat: narration, banners, commented-out corpses, workaround sermons.
+That list is the only leash. When you are not sure an exception applies, the comment dies. Everything else is meat: narration, banners, commented-out corpses (dead code), workaround sermons.
 
 Kill our-code surprises and mark the exact symbol MUST KILL for the rename, extract, type, or rearchitecture that makes the behavior obvious without prose.
 
