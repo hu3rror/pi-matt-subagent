@@ -4,6 +4,26 @@ One section per release, newest first. After an update, pi shows the entries new
 the version you last ran, at your next fresh launch (it reads this file through
 `pi.changelogPath` / `CHANGELOG.md`). v0.1.0, v0.1.1 and v0.3.0 have no notes.
 
+## [0.14.3] - 2026-11-04
+
+### Highlights
+
+Estimated costs are now marked as estimates. The usage line prefixes a catalog figure with `~` and prints provider-billed totals bare, so a real bill and a computed guess no longer look alike. The package also ships `CHANGELOG.md`, so pi can show what changed after an update, and dependencies move to pi 1.5.0.
+
+### Features
+
+- **Estimate marker in the usage line.** `UsageStats` carries `costFromProvider`, aggregated by pi's rule: a sum is provider-reported only when every part is. `formatUsageLine` writes a catalog estimate as `~$0.0012` and a billed total as `$0.0012`; a run with no usage part seen stays unmarked. Tool results, error lines and `/subagents` rows all render the marker.
+- **This changelog ships with the package** (`files` in `package.json`). pi reads it through `pi.changelogPath` / `CHANGELOG.md` and shows the entries newer than your last version at the next fresh launch; `AGENTS.md` keeps the file in sync at release time.
+
+### Docs & Chore
+
+- pi packages synced to 1.5.0 (`pi-ai`, `pi-agent-core`, `pi-coding-agent`, `pi-tui`). Import surface, typecheck and tests unchanged.
+- GLOSSARY gains the `cost provenance` entry.
+
+### Full Changelog
+
+https://github.com/hu3rror/pi-matt-subagent/compare/v0.14.2...v0.14.3
+
 ## [0.14.2] - 2026-10-23
 
 ### Highlights
