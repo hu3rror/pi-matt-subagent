@@ -15,6 +15,10 @@ Estimated costs are now marked as estimates. The usage line prefixes a catalog f
 - **Estimate marker in the usage line.** `UsageStats` carries `costFromProvider`, aggregated by pi's rule: a sum is provider-reported only when every part is. `formatUsageLine` writes a catalog estimate as `~$0.0012` and a billed total as `$0.0012`; a run with no usage part seen stays unmarked. Tool results, error lines and `/subagents` rows all render the marker.
 - **This changelog ships with the package** (`files` in `package.json`). pi reads it through `pi.changelogPath` / `CHANGELOG.md` and shows the entries newer than your last version at the next fresh launch; `AGENTS.md` keeps the file in sync at release time.
 
+### Fixes
+
+- **`comment-sicko` keep-list parity.** The embedded prompt again matches the canonical rule file: the `prettier-ignore` exception keeps its "and similar" tail, and commented-out code keeps the `(dead code)` qualifier. Rule content only; the persona register is unchanged.
+
 ### Docs & Chore
 
 - pi packages synced to 1.5.0 (`pi-ai`, `pi-agent-core`, `pi-coding-agent`, `pi-tui`). Import surface, typecheck and tests unchanged.
