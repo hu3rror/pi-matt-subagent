@@ -42,12 +42,12 @@ test("accumulator accumulates usage across assistant message_ends (add fields, l
   const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
   acc.onStdout(
     JSON.stringify(
-      usageEvent("a", { input: 10, output: 20, cacheRead: 1, cacheWrite: 2, cost: { total: 0.5 }, totalTokens: 100 }),
+      usageEvent("a", { input: 10, output: 20, cacheRead: 1, cacheWrite: 2, cost: { total: 0.5, totalFromProvider: true }, totalTokens: 100 }),
     ) + "\n",
   );
   acc.onStdout(
     JSON.stringify(
-      usageEvent("b", { input: 30, output: 40, cacheRead: 3, cacheWrite: 4, cost: { total: 0.7 }, totalTokens: 300 }),
+      usageEvent("b", { input: 30, output: 40, cacheRead: 3, cacheWrite: 4, cost: { total: 0.7, totalFromProvider: true }, totalTokens: 300 }),
     ) + "\n",
   );
   const r = acc.finish();
@@ -57,7 +57,19 @@ test("accumulator accumulates usage across assistant message_ends (add fields, l
   assert.equal(r.usage.cacheRead, 4);
   assert.equal(r.usage.cacheWrite, 6);
   assert.equal(r.usage.cost, 1.2);
+  assert.equal(r.usage.costFromProvider, true, "every part billed");
   assert.equal(r.usage.contextTokens, 300, "contextTokens is last-wins, not accumulated");
+});
+
+test("combined cost is an estimate when any part is one", () => {
+  const acc = createResultAccumulator({ agent: "a", agentSource: "embedded", task: "t" });
+  acc.onStdout(
+    JSON.stringify(usageEvent("a", { input: 1, output: 1, cost: { total: 0.5, totalFromProvider: true } })) + "\n",
+  );
+  acc.onStdout(JSON.stringify(usageEvent("b", { input: 1, output: 1, cost: { total: 0.7 } })) + "\n");
+  const r = acc.finish();
+  assert.equal(r.usage.cost, 1.2);
+  assert.equal(r.usage.costFromProvider, false, "one estimate part marks the whole run as an estimate");
 });
 
 test("accumulator tolerates assistant messages without usage (no crash, no accounting)", () => {
@@ -66,6 +78,7 @@ test("accumulator tolerates assistant messages without usage (no crash, no accou
   const r = acc.finish();
   assert.equal(r.usage.turns, 1);
   assert.equal(r.usage.input, 0);
+  assert.equal(r.usage.costFromProvider, undefined, "no usage part leaves provenance unknown");
 });
 
 test("accumulator captures model, stopReason, and errorMessage from assistant messages", () => {

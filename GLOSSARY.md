@@ -89,6 +89,10 @@ _Avoid_: status panel, 面板
 一次 subagent 运行在派发前解析出的档位意图。决策源层级（issue #39 取代 ADR 0005/0018/0020 的旧序，2026-10-08 修订起平继承）为 per-task/per-step level > per-call override（`input.thinkingOverride`）> **declared（会话声明档位，见 declared thinking level，issue #40）** > `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> role preset（embedded/frontmatter 档位）> **inherited**（主会话档位**原样透传**，不再减一：conversationally 声明的深度原样到达无预置角色，off 亦原样传）。公开 `thinkingLevel` 参数已从两个工具移除（随机性来源），`set-thinking-level` 工具是模型改变档位的唯一可见通道。per-task/per-step level 是未在模型面 schema 声明、经 pi 透传原样读到的字段（pi 校验只拒不剥，ADR 0020），非法值在派发前响亮报错（parallel 为 `Invalid thinkingLevel on tasks[i]`、chain 为 `steps[i]`）。`hasModel` 短路只跳过继承层——role 自带 model（frontmatter/embedded）或 `roleDefaults.<role>.model` 钉模型的角色都属于钉模型，declared/roleDefaults/config/preset 显式档位仍生效。它回答「我们要求这个 run 用多大思考力度」；派发前按目标模型能力**预 clamp**（见 clamp），run 记录**请求档位与生效档位**双值，用量行在两者不一致时标注 `high (req: xhigh)`（此前子进程内 clamp 静默、父进程只记录请求值——ADR 0018 透明度）。派发模型的链两工具统一为 per-call 优先：per-call 覆盖 > role 钉的模型 > `roleDefaults` 模型 > 配置默认 > 继承主会话模型（ADR 0022）。用量行的展示形态沿用 pi 主 footer 的模型样式：`(provider) id • <档位>`，`off` 写作 `thinking off`，未设档写作 `default`。
 _Avoid_: 思考强度, reasoning effort, thinking intensity
 
+**cost provenance（成本来源）**:
+用量行 `$` 段的计价来源：供应商实报的账单成本（pi `Usage.cost.totalFromProvider === true`，目前仅 OpenRouter 返回）与按目录费率算出的估价（缺省）。blocking 运行沿用 pi 的合并规则——每一段用量都实报，合计才算实报；估价在行上以 `~` 前缀标出（`~$0.0012`），实报无标记。research 运行不带用量，无此段。
+_Avoid_: 精确成本, 真实账单, pricing
+
 **declared thinking level（声明思考档位）**:
 会话中经 `set-thinking-level` 工具显式声明、供子代理派发使用的档位意图（issue #40 A 轴 flip 引入）。值是会话转录里**最后一个** `set-thinking-level` 调用的**请求值**（非主会话生效值），以转录为唯一事实源：换模型/续会话都不会改变它（粘性），也不写任何持久化——会话作用域，新会话从配置默认开始。它是唯一有第一等「谁声明的」信号的档位——上游会话事件（`thinking_level_change`/`thinking_level_select`）不带来源，换模型重算（US17）与工具调用发出相同事件，故声明不能从会话档位本身读出。位于派发优先级中 per-call override 之下、`roleDefaults` 之上（conversational instruction highest，原 #39 意图）；要改深度就再声明一次（无 unset）。
 _Avoid_: 会话思考档位（那是 inherited 层）, 主会话档位

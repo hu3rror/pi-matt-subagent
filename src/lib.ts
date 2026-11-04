@@ -1025,6 +1025,11 @@ export interface UsageStats {
   cacheRead: number;
   cacheWrite: number;
   cost: number;
+  /**
+   * True only when every usage part billed this cost; false once any part is an estimate;
+   * undefined while no usage part has been seen.
+   */
+  costFromProvider?: boolean;
   contextTokens: number;
   turns: number;
 }
@@ -2437,7 +2442,7 @@ export function formatUsageLine(
   if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
   if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
   if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-  if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+  if (usage.cost) parts.push(`${usage.costFromProvider === true ? "" : "~"}$${usage.cost.toFixed(4)}`);
   if (opts.showContext && usage.contextTokens && usage.contextTokens > 0) {
     parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
   }

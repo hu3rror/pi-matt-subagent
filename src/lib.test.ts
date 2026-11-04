@@ -1761,7 +1761,7 @@ test("formatRunSnapshot renders last output, usage, and paths when present", () 
   assert.ok(text.includes("3 turns"), "usage turns");
   assert.ok(text.includes("↑1.2k"), "usage input");
   assert.ok(text.includes("↓800"), "usage output");
-  assert.ok(text.includes("$0.0012"), "usage cost");
+  assert.ok(text.includes("~$0.0012"), "usage cost is marked as an estimate");
   assert.ok(text.includes("/tmp/f.md"), "findings path");
   assert.ok(text.includes("/tmp/research.log"), "log path");
 });
@@ -2058,12 +2058,17 @@ test("getResultOutput surfaces failure detail on error and final output otherwis
 
 test("formatUsageLine pluralizes turns and adds context/model only on request", () => {
   const usage = { input: 1200, output: 800, cacheRead: 0, cacheWrite: 0, cost: 0.0012, contextTokens: 2000, turns: 3 };
-  assert.equal(formatUsageLine(usage), "3 turns ↑1.2k ↓800 $0.0012");
+  assert.equal(formatUsageLine(usage), "3 turns ↑1.2k ↓800 ~$0.0012", "catalog-estimate cost is marked ~");
+  assert.equal(
+    formatUsageLine({ ...usage, costFromProvider: true }),
+    "3 turns ↑1.2k ↓800 $0.0012",
+    "provider-billed cost is unmarked",
+  );
   const single = { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
   assert.equal(formatUsageLine(single), "1 turn ↑10", "singular turn without ctx or model");
   assert.equal(
     formatUsageLine(usage, { model: "prov/m", thinking: "high", showContext: true }),
-    "3 turns ↑1.2k ↓800 $0.0012 ctx:2.0k (prov) m • high",
+    "3 turns ↑1.2k ↓800 ~$0.0012 ctx:2.0k (prov) m • high",
   );
   const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
   assert.equal(formatUsageLine(zero), "", "an all-zero usage line is empty");

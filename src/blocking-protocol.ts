@@ -100,6 +100,8 @@ export function createResultAccumulator(opts: {
           result.usage.cacheRead += usage.cacheRead || 0;
           result.usage.cacheWrite += usage.cacheWrite || 0;
           result.usage.cost += usage.cost?.total || 0;
+          result.usage.costFromProvider =
+            (result.usage.costFromProvider ?? true) && usage.cost?.totalFromProvider === true;
           result.usage.contextTokens = usage.totalTokens || 0;
         }
         if (!result.model && msg.model) result.model = msg.model;
