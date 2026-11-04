@@ -20,7 +20,8 @@
     "src",
     "README.md",
     "README.zh-CN.md",
-    "GLOSSARY.md"
+    "GLOSSARY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test src/*.test.ts",
