@@ -65,7 +65,7 @@ export interface RunnerTask {
 export interface RunnerSeam {
   runTask(
     task: RunnerTask,
-    opts: { signal?: AbortSignal; onProgress: (partial: SingleResult) => void },
+    opts: { signal?: AbortSignal; onProgress: (partial: SingleResult) => void; runId: string },
   ): Promise<SingleResult>;
 }
 
@@ -164,13 +164,14 @@ export async function runBlockingPlan(opts: {
   /**
    * One delegated execution's registry flow, shared by single / chain steps /
    * parallel tasks: register (or flip a pre-registered queued run to running),
-   * run through the runner seam, patch the terminal state, and mark aborted on
-   * a runner throw. Both the live-progress update and the terminal patch are
+   * run through the runner seam, patch the terminal state, and settle a runner
+   * throw as aborted (when the caller aborted) or failed. Both the live-progress update and the terminal patch are
    * guarded by an active-status check so a parallel abort sweep that already
    * terminalized the run cannot produce a frozen-update throw — the progress
    * one inside the runner's stdout data handler (where a throw would escape
-   * into the event loop), the patch one inside a settled promise. The abort
-   * mark is guarded the same way for the same reason.
+   * into the event loop), the patch one inside a settled promise. The failure
+   * mark is guarded the same way, and it is a failure rather than an abort
+   * unless the caller aborted (a core lost mid-run must not read as "aborted").
    */
   const runStep = async (
     task: RunnerTask,
@@ -184,6 +185,7 @@ export async function runBlockingPlan(opts: {
     try {
       const result = await runner.runTask(task, {
         signal,
+        runId,
         onProgress: (partial) => {
           const out = lastAssistantText(partial.messages);
           // The abort sweep may have terminalized this run while the worker
@@ -223,7 +225,9 @@ export async function runBlockingPlan(opts: {
       return result;
     } catch (err) {
       const r = registry.get(runId);
-      if (r && isActiveRunStatus(r.status)) registry.update(runId, { status: "aborted" });
+      if (r && isActiveRunStatus(r.status)) {
+        registry.update(runId, { status: signal?.aborted ? "aborted" : "failed" });
+      }
       throw err;
     }
   };
@@ -324,7 +328,9 @@ export async function runBlockingPlan(opts: {
     // overview shows the truth instead of zombie queued entries.
     for (const id of runIds) {
       const r = registry.get(id);
-      if (r && isActiveRunStatus(r.status)) registry.update(id, { status: "aborted" });
+      if (r && isActiveRunStatus(r.status)) {
+        registry.update(id, { status: signal?.aborted ? "aborted" : "failed" });
+      }
     }
     throw err;
   }

@@ -76,6 +76,7 @@ const CONFIG_KEY_SPECS = [
     kind: "boolean" as const,
     optional: false as const,
   },
+  { key: "carrier", kind: "carrier" as const, optional: false as const },
 ] as const;
 type ConfigKind = (typeof CONFIG_KEY_SPECS)[number]["kind"];
 interface ConfigKeySpec {
@@ -110,6 +111,16 @@ export type RoleDefaultEdit =
 /** `roleDefaults`: `{ "<role>": { model?, thinkingLevel? } }`. */
 export type RoleDefaults = Record<string, RoleDefault>;
 
+/** Where a blocking child runs: pi's own pipe, or a terminal on a running herdr-core. */
+export type Carrier = "spawn" | "hc";
+
+/** The two carrier values, in the order the config surface offers them. */
+export const CARRIERS: readonly Carrier[] = ["spawn", "hc"];
+
+export function isCarrier(value: unknown): value is Carrier {
+  return value === "spawn" || value === "hc";
+}
+
 export interface EffectiveConfig {
   maxTasksPerCall: number;
   maxConcurrency: number;
@@ -136,6 +147,13 @@ export interface EffectiveConfig {
    */
   researchChildExtensions: string[];
   /**
+   * Execution carrier for blocking runs (issue #52): `spawn` pipes the child
+   * into pi as before; `hc` runs it in a named terminal on a running
+   * herdr-core and falls back to `spawn` for a run whose core is unusable.
+   * Read at dispatch, so flipping it needs no restart.
+   */
+  carrier: Carrier;
+  /**
    * True hides the three built-in workflow presets (`/code-review`,
    * `/design-it-twice`, `/research`) from `/` completion (issue #41). Read at
    * extension load, so a change needs `/reload`. Never gates the tools or
@@ -157,6 +175,7 @@ export function defaultConfig(): EffectiveConfig {
     roleDefaults: undefined,
     researchChildExtensions: [],
     hideWorkflowPresets: false,
+    carrier: "spawn",
   };
 }
 
@@ -199,6 +218,9 @@ function decodeConfigValue(
   }
   if (spec.kind === "boolean") {
     return typeof value === "boolean" ? { valid: true, value } : { valid: false };
+  }
+  if (spec.kind === "carrier") {
+    return isCarrier(value) ? { valid: true, value } : { valid: false };
   }
   if (value === null) {
     return spec.optional ? { valid: true, value: undefined } : { valid: false };
@@ -334,6 +356,11 @@ export function parseConfigSetValue(
     return { ok: false, reason: `${key} must be "true" or "false", got "${rawValue}"` };
   }
   const trimmed = rawValue.trim();
+  if (spec.kind === "carrier") {
+    return isCarrier(trimmed)
+      ? { ok: true, value: trimmed }
+      : { ok: false, reason: `${key} must be "spawn" or "hc", got "${rawValue}"` };
+  }
   // The inherit/empty clearing rule exists only for optional knobs (a value
   // the run then inherits from the main session). Non-optional knobs have
   // nothing to inherit from, so `inherit` is not a valid input for them.

@@ -21,7 +21,6 @@
  * override bundled roles by name.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -56,6 +55,7 @@ import {
   configToLimits,
   CONFIG_FILE_NAME,
   CONFIG_KEYS,
+  CARRIERS,
   configKeyLabel,
   configKeySpec,
   defaultConfig,
@@ -131,9 +131,18 @@ import {
 
 import {
   createResultAccumulator,
-  escalateKill,
   type SingleResult,
 } from "../src/blocking-protocol.ts";
+
+import {
+  createCarrierRunner,
+  createHcTransport,
+  spawnTransport,
+  type ChildTransport,
+  type PrepareOutcome,
+} from "../src/blocking-carrier.ts";
+
+import { createHcClient, type HcClient } from "../src/hc-client.ts";
 
 import {
   assistantTextOfMessage,
@@ -590,30 +599,33 @@ const readDeclaredLevel = (ctx: {
   sessionManager: { getBranch(): unknown[] };
 }) => findDeclaredThinkingLevel(ctx.sessionManager.getBranch() as unknown as DeclaredLevelEntry[]);
 
-async function runSingleAgent(
+async function prepareSingleAgent(
   defaultCwd: string,
   dispatchDefaults: DispatchDefaults,
   agents: AgentConfig[],
   agentTask: RunnerTask,
-  signal: AbortSignal | undefined,
   onProgress: (partial: SingleResult) => void,
   availableToolNames: ReadonlySet<string>,
   resolveModel: (ref: string) => Model<any> | undefined,
-): Promise<SingleResult> {
+  runId: string,
+): Promise<PrepareOutcome> {
   const { agentName, task, cwd, step } = agentTask;
   const agent = agents.find((a) => a.name === agentName);
 
   if (!agent) {
     const available = formatAgentList(agents);
     return {
-      agent: agentName,
-      agentSource: "unknown",
-      task,
-      exitCode: 1,
-      messages: [],
-      stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-      usage: emptyUsage(),
-      step,
+      kind: "failed",
+      result: {
+        agent: agentName,
+        agentSource: "unknown",
+        task,
+        exitCode: 1,
+        messages: [],
+        stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+        usage: emptyUsage(),
+        step,
+      },
     };
   }
 
@@ -646,6 +658,22 @@ async function runSingleAgent(
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
+  const cleanup = () => {
+    if (tmpPromptPath) {
+      try {
+        fs.unlinkSync(tmpPromptPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (tmpPromptDir) {
+      try {
+        fs.rmdirSync(tmpPromptDir);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
 
   try {
     if (agent.systemPrompt.trim()) {
@@ -661,80 +689,35 @@ async function runSingleAgent(
       promptPath: tmpPromptPath ?? undefined,
       task,
     });
-    let wasAborted = false;
-    let accumulated: SingleResult | undefined;
 
-    // The protocol accumulator (src/blocking-protocol.ts) owns the child's
-    // JSON-lines protocol and usage accounting; this adapter owns only the
-    // process lifecycle: spawn, stdio wiring, abort escalation, exitCode patch.
-    const exitCode = await new Promise<number>((resolve) => {
-      const acc = createResultAccumulator({
-        agent: agentName,
-        agentSource: agent.source,
-        task,
-        step,
-        model,
-        thinkingLevel: thinking,
-        requestedThinking,
-        onProgress,
-      });
-      const invocation = getPiInvocation(args);
-      const proc = spawn(invocation.command, invocation.args, {
-        cwd: cwd ?? defaultCwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        // Per-spawn injection, so nested subagents each name their immediate
-        // parent (buildSubagentEnv, lib.ts). Pure announcement.
-        env: buildSubagentEnv(process.env, dispatchDefaults.parentSessionId),
-      });
-
-      proc.stdout.on("data", (data) => acc.onStdout(data.toString()));
-      proc.stderr.on("data", (data) => acc.onStderr(data.toString()));
-
-      proc.on("close", (code) => {
-        accumulated = acc.finish();
-        resolve(code ?? 0);
-      });
-
-      proc.on("error", () => {
-        // Spawn failure: Node emits error then close; finish is idempotent so
-        // the second call is a no-op.
-        accumulated = acc.finish();
-        resolve(1);
-      });
-
-      if (signal) {
-        const escalation = escalateKill(proc);
-        const onAbort = () => {
-          wasAborted = true;
-          escalation.send();
-        };
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-        // Exit within grace cancels the SIGKILL backstop.
-        proc.on("close", () => escalation.dispose());
-      }
+    const accumulator = createResultAccumulator({
+      agent: agentName,
+      agentSource: agent.source,
+      task,
+      step,
+      model,
+      thinkingLevel: thinking,
+      requestedThinking,
+      onProgress,
     });
 
-    const currentResult = accumulated as SingleResult;
-    currentResult.exitCode = exitCode;
-    if (wasAborted) throw new Error("Subagent was aborted");
-    return currentResult;
-  } finally {
-    if (tmpPromptPath) {
-      try {
-        fs.unlinkSync(tmpPromptPath);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (tmpPromptDir) {
-      try {
-        fs.rmdirSync(tmpPromptDir);
-      } catch {
-        /* ignore */
-      }
-    }
+    return {
+      kind: "ready",
+      prepared: {
+        spec: {
+          invocation: getPiInvocation(args),
+          cwd: cwd ?? defaultCwd,
+          env: buildSubagentEnv(process.env, dispatchDefaults.parentSessionId),
+          accumulator,
+          runId,
+          role: agent.name,
+        },
+        cleanup,
+      },
+    };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
 }
 
@@ -751,9 +734,17 @@ export default function (pi: ExtensionAPI) {
   // `/subagents` autocomplete and the model picker list only models whose
   // provider has working credentials — the same source pi's own /model uses.
   let availableModels: { ref: string; provider: string }[] = [];
+  let hcClient: HcClient | undefined;
+  const getHcClient = (): HcClient => (hcClient ??= createHcClient());
+  const disposeHcClient = () => {
+    const client = hcClient;
+    hcClient = undefined;
+    void client?.dispose();
+  };
 
   pi.on("session_start", (_event, ctx) => {
     availableModels = ctx.modelRegistry.getAvailable().map((m) => ({ ref: `${m.provider}/${m.id}`, provider: m.provider }));
+    disposeHcClient();
   });
   // Registry update that tolerates the already-terminal race: the first
   // terminal status wins, and a late backfill (logPath) can race the push, so
@@ -767,6 +758,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.on("session_shutdown", () => {
+    disposeHcClient();
     // Drop the cached tool context first: the footer hook it feeds lives on a
     // UI that may already be tearing down, and a throw from its onChange
     // callback inside clear() would skip the child-session disposal below.
@@ -1050,6 +1042,11 @@ export default function (pi: ExtensionAPI) {
         return setConfig(ctx, key, sel === "inherit (clear)" ? "inherit" : sel);
       }
     }
+    if (spec?.kind === "carrier") {
+      const sel = await ctx.ui.select(`${key}`, [...CARRIERS]);
+      if (sel === undefined) return;
+      return setConfig(ctx, key, sel);
+    }
     // The extensions knob has nothing to inherit from (issue #44): the hint
     // names its input shape, and `config reset <key>` returns it to the quiet
     // default — no "inherit" token is offered.
@@ -1174,6 +1171,9 @@ export default function (pi: ExtensionAPI) {
             suggestions = THINKING_LEVELS.filter((l) => l.startsWith(partial)).map((l) =>
               suggest(`config set ${key} ${l}`, l),
             );
+          }
+          if (spec?.kind === "carrier") {
+            suggestions = CARRIERS.filter((c) => c.startsWith(partial)).map((c) => suggest(`config set ${key} ${c}`, c));
           }
         }
       } else if (fixed[0] === "kill" || fixed[0] === "tail") {
@@ -1315,26 +1315,32 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const runner: RunnerSeam = {
-        runTask(task, opts) {
-          return runSingleAgent(
+      // The carrier knob is read here, at dispatch, so flipping it needs no
+      // restart (issue #52). `hc` degrades per run to `spawn` with a warning
+      // when the core or a POSIX shell is missing — never a silent, empty run.
+      const transport: ChildTransport =
+        config.carrier === "hc" ? createHcTransport({ client: getHcClient() }) : spawnTransport;
+      const runner: RunnerSeam = createCarrierRunner({
+        transport,
+        onWarn: (message) => {
+          try {
+            ctx.ui.notify(message, "warning");
+          } catch {
+            /* a dead UI must not fail the run */
+          }
+        },
+        prepare: (task, prepareOpts) =>
+          prepareSingleAgent(
             ctx.cwd,
             dispatchDefaults,
             agents,
-            {
-              agentName: task.agentName,
-              task: task.task,
-              cwd: task.cwd,
-              step: task.step,
-              thinkingLevel: task.thinkingLevel,
-            },
-            opts.signal,
-            opts.onProgress,
+            task,
+            prepareOpts.onProgress,
             availableToolNames,
             resolveSubagentModel,
-          );
-        },
-      };
+            prepareOpts.runId,
+          ),
+      });
 
       // ADR 0016 — the conversion point (decided Q1=A): the orchestrator
       // keeps throwing its tool error internally (its tests pin that

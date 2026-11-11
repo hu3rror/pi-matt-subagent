@@ -92,11 +92,32 @@ test("single mode marks the run aborted and rethrows when the runner aborts", as
   const registry = createRunRegistry();
   const runner: RunnerSeam = { async runTask() { throw new Error("Subagent was aborted"); } };
   await assert.rejects(
-    runBlockingPlan({ plan: { mode: "single", agent: "r1", task: "t" }, runner, registry, agents: noAgents }),
+    runBlockingPlan({
+      plan: { mode: "single", agent: "r1", task: "t" },
+      runner,
+      registry,
+      agents: noAgents,
+      signal: AbortSignal.abort(),
+    }),
     /Subagent was aborted/,
   );
   const [run] = registry.snapshot();
   assert.equal(run.status, "aborted");
+});
+
+test("a runner throw with no caller abort settles the run failed, not aborted", async () => {
+  const registry = createRunRegistry();
+  const runner: RunnerSeam = {
+    async runTask() {
+      throw new Error("carrier hc: herdr-core lost terminal sa-run-1 (t7) during run run-1");
+    },
+  };
+  await assert.rejects(
+    runBlockingPlan({ plan: { mode: "single", agent: "r1", task: "t" }, runner, registry, agents: noAgents }),
+    /herdr-core lost terminal/,
+  );
+  const [run] = registry.snapshot();
+  assert.equal(run.status, "failed");
 });
 
 test("an unknown agent resolves to the unknown source and fails through the normal path", async () => {
@@ -251,6 +272,7 @@ test("parallel mode marks every still-active run aborted when the runner aborts"
       runner,
       registry,
       agents: noAgents,
+      signal: AbortSignal.abort(),
     }),
     /Subagent was aborted/,
   );
@@ -278,6 +300,7 @@ test("a worker resolving after an abort sweep keeps the run aborted (no frozen-u
       runner,
       registry,
       agents: noAgents,
+      signal: AbortSignal.abort(),
     }),
     /Subagent was aborted/,
   );
@@ -401,6 +424,7 @@ test("a late progress event after an abort sweep is dropped, not a frozen-update
       runner,
       registry,
       agents: noAgents,
+      signal: AbortSignal.abort(),
     }),
     /Subagent was aborted/,
   );

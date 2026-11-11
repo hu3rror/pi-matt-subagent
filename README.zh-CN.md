@@ -96,6 +96,7 @@ pi install <path-to-this-repo>
 | `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对七个内置角色生效，不再是死配置）；未设时 → 继承主会话档位（原样） |
 | `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
 | `hideWorkflowPresets` | `false` | 隐藏三个内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）——适合已安装对应 skills（覆盖同一工作流）的用户。扩展加载时读取，需 `/reload` 生效。不影响三个工具与 `/subagents` |
+| `carrier` | `spawn` | blocking 子agent 在哪里运行：`spawn`（pi 自己的管道，默认）或 `hc`（在运行中的 herdr-core 上开一个名为 `sa-<run id>` 的终端，可列出、attach、kill）。`hc` 需要可达的 core 与 POSIX `sh`；两者缺一即该次运行告警并回退到 `spawn`。分发时读取，无需 `/reload` |
 
 `hideWorkflowPresets` 开启后，输入被隐藏的 preset 名称与任何未知 `/` 命令一样：文本原样发给模型。
 
@@ -108,6 +109,7 @@ pi install <path-to-this-repo>
 /subagents config set roleDefaults.researcher.model openai/gpt-x
 /subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean
 /subagents config set hideWorkflowPresets true
+/subagents config set carrier hc
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset

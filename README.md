@@ -96,6 +96,7 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the seven embedded roles, no longer dead config); absent → inherited (main-session level as-is) |
 | `roleDefaults` | (inherit) | Per-role dispatch customization: `{ "<role>": { model?, thinkingLevel? } }`. `roleDefaults.<role>.thinkingLevel` beats the config default and the role's own preset; `roleDefaults.<role>.model` beats the config default model. Edit via dotted keys: `config set roleDefaults.standards-reviewer.thinkingLevel low` |
 | `hideWorkflowPresets` | `false` | Hides the three workflow presets (`/code-review`, `/design-it-twice`, `/research`) from `/` completion — for users with the matching skills installed, which cover the same workflows. Read at extension load, so needs `/reload`. Never gates the three tools or `/subagents` |
+| `carrier` | `spawn` | Where a blocking child runs: `spawn` (pi's own pipe, the default) or `hc` (a named `sa-<run id>` terminal on a running herdr-core, so you can list, attach to, or kill it). `hc` needs a reachable core and a POSIX `sh`; without either, that run warns and falls back to `spawn`. Read at dispatch, no `/reload` |
 
 When `hideWorkflowPresets` is on, typing a hidden preset name behaves like any unknown `/` command: the text goes to the model unchanged.
 
@@ -108,6 +109,7 @@ Drive it from `/subagents config`:
 /subagents config set roleDefaults.researcher.model openai/gpt-x
 /subagents config set researchChildExtensions npm:@ssk_dev/pi-web-access-lean
 /subagents config set hideWorkflowPresets true
+/subagents config set carrier hc
 /subagents config reset roleDefaults.standards-reviewer.thinkingLevel
 /subagents config reset maxConcurrency
 /subagents config reset

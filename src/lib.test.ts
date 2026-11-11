@@ -3318,3 +3318,43 @@ test("configKeyLabel renders the boolean knob with default/customized markers", 
   const custom = parseConfigFile('{"hideWorkflowPresets": true}');
   assert.equal(configKeyLabel("hideWorkflowPresets", custom), "hideWorkflowPresets = true [customized]");
 });
+
+test("defaultConfig sets carrier to spawn so an unconfigured install is unchanged", () => {
+  assert.equal(defaultConfig().carrier, "spawn");
+});
+
+test("parseConfigFile decodes carrier and degrades unknown values to spawn", () => {
+  const hc = parseConfigFile('{"carrier": "hc"}');
+  assert.equal(hc.effective.carrier, "hc");
+  assert.ok(hc.present.has("carrier"));
+  assert.equal(hc.degraded.has("carrier"), false);
+
+  const degraded = parseConfigFile('{"carrier": "herdr"}');
+  assert.equal(degraded.effective.carrier, "spawn");
+  assert.ok(degraded.degraded.has("carrier"));
+
+  const nonString = parseConfigFile('{"carrier": 7}');
+  assert.equal(nonString.effective.carrier, "spawn");
+  assert.ok(nonString.degraded.has("carrier"));
+});
+
+test("parseConfigSetValue accepts only spawn and hc for carrier", () => {
+  assert.deepEqual(parseConfigSetValue("carrier", "spawn"), { ok: true, value: "spawn" });
+  assert.deepEqual(parseConfigSetValue("carrier", "hc"), { ok: true, value: "hc" });
+  assert.deepEqual(parseConfigSetValue("carrier", " hc "), { ok: true, value: "hc" });
+  assert.ok(!parseConfigSetValue("carrier", "herdr").ok);
+  assert.ok(!parseConfigSetValue("carrier", "inherit").ok);
+  assert.ok(!parseConfigSetValue("carrier", "").ok);
+});
+
+test("configKeyLabel renders the carrier knob with default/customized markers", () => {
+  assert.equal(configKeyLabel("carrier", parseConfigFile(undefined)), "carrier = spawn [default]");
+  const custom = parseConfigFile('{"carrier": "hc"}');
+  assert.equal(configKeyLabel("carrier", custom), "carrier = hc [customized]");
+});
+
+test("setConfigValue + serializeConfig round-trips the carrier knob", () => {
+  const next = setConfigValue(defaultConfig(), "carrier", "hc");
+  assert.equal(next.carrier, "hc");
+  assert.equal(parseConfigFile(serializeConfig(next)).effective.carrier, "hc");
+});
