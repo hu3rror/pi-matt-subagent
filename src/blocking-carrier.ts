@@ -82,6 +82,8 @@ export interface HcTransportDeps {
   removeRunDir?: (dir: string) => void;
   /** Seconds per `terminal.wait` check-in. */
   checkInSeconds?: number;
+  /** Fires once with the address as soon as the terminal exists, before it is waited on. */
+  onStarted?: (terminal: string) => void;
 }
 
 function makeTempRunDir(): string {
@@ -122,7 +124,12 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
           outPath: path.join(dir, "stdout.jsonl"),
           errPath: path.join(dir, "stderr.log"),
         },
-        { client: deps.client, signal: opts.signal, checkInSeconds: deps.checkInSeconds },
+        {
+          client: deps.client,
+          signal: opts.signal,
+          checkInSeconds: deps.checkInSeconds,
+          onStarted: deps.onStarted,
+        },
       );
 
       if (!outcome.ok) {

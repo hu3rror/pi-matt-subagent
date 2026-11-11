@@ -146,6 +146,8 @@ import { createHcClient, type HcClient } from "../src/hc-client.ts";
 
 import { createResearchChildFactory } from "../src/research-carrier.ts";
 
+import { createSessionTerminals } from "../src/terminal-teardown.ts";
+
 import {
   assistantTextOfMessage,
   formatUsageLine,
@@ -747,15 +749,17 @@ export default function (pi: ExtensionAPI) {
   let availableModels: { ref: string; provider: string }[] = [];
   let hcClient: HcClient | undefined;
   const getHcClient = (): HcClient => (hcClient ??= createHcClient());
-  const disposeHcClient = () => {
+  const sessionTerminals = createSessionTerminals({ client: getHcClient });
+  const endHcSession = async (onWarn?: (message: string) => void) => {
+    await sessionTerminals.teardown(onWarn);
     const client = hcClient;
     hcClient = undefined;
     void client?.dispose();
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     availableModels = ctx.modelRegistry.getAvailable().map((m) => ({ ref: `${m.provider}/${m.id}`, provider: m.provider }));
-    disposeHcClient();
+    await endHcSession((message) => notifyWarning(ctx, message));
   });
   // Registry update that tolerates the already-terminal race: the first
   // terminal status wins, and a late backfill (logPath) can race the push, so
@@ -768,8 +772,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_shutdown", () => {
-    disposeHcClient();
+  pi.on("session_shutdown", async (_event, ctx) => {
     // Drop the cached tool context first: the footer hook it feeds lives on a
     // UI that may already be tearing down, and a throw from its onChange
     // callback inside clear() would skip the child-session disposal below.
@@ -799,6 +802,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     researchChildren.clear();
+    await endHcSession((message) => notifyWarning(ctx, message));
   });
 
   pi.registerMessageRenderer(RESEARCH_STATUS_CUSTOM_TYPE, (message, { expanded, outputPad }, theme) => {
@@ -1330,7 +1334,9 @@ export default function (pi: ExtensionAPI) {
       // restart (issue #52). `hc` degrades per run to `spawn` with a warning
       // when the core or a POSIX shell is missing — never a silent, empty run.
       const transport: ChildTransport =
-        config.carrier === "hc" ? createHcTransport({ client: getHcClient() }) : spawnTransport;
+        config.carrier === "hc"
+          ? createHcTransport({ client: getHcClient(), onStarted: (terminal) => sessionTerminals.track(terminal) })
+          : spawnTransport;
       const runner: RunnerSeam = createCarrierRunner({
         transport,
         onWarn: (message) => notifyWarning(ctx, message),
@@ -1558,6 +1564,7 @@ export default function (pi: ExtensionAPI) {
       const researchChildFactory = createResearchChildFactory({
         carrier: config.carrier,
         client: getHcClient,
+        onStarted: (terminal) => sessionTerminals.track(terminal),
         inProcess: (childOpts) =>
           createResearchChildSession({
             ...childOpts,

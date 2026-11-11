@@ -227,6 +227,55 @@ test("a terminal that never started rejects done with the core's reason", async 
   assert.match(String(failure), /could not start \(unavailable: no core\)/);
 });
 
+test("the session teardown learns the terminal address as soon as the child starts", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tracked: string[] = [];
+  const session = createHcResearchChildSession(childOpts(path.join(dir, "research.log")), {
+    client: runningCore(),
+    invocation: scriptInvocation('process.stdout.write("working\\n"); setTimeout(() => process.exit(0), 5000);'),
+    sh: "/bin/sh",
+    onStarted: (terminal) => tracked.push(terminal),
+  });
+
+  const drained = drain(session);
+  const outFile = path.join(dir, "research.log.terminal.out");
+  while (!fs.existsSync(outFile) || fs.statSync(outFile).size === 0) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(tracked, ["t1"], "the address is recorded before the child has to be waited on");
+
+  session.abort();
+  await drained;
+});
+
+test("the carrier factory hands each hc terminal to the session teardown", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tracked: string[] = [];
+  const core: HcClient = {
+    call: async (method) => {
+      if (method === "terminal.run") return { ok: true, result: { address: "t9" } };
+      if (method === "terminal.wait") return { ok: true, result: { ended: true, exit_code: 0 } };
+      if (method === "terminal.kill") return { ok: true, result: { address: "t9" } };
+      return { ok: true, result: undefined };
+    },
+    capabilities: () => undefined,
+    dispose: async () => {},
+  };
+  const factory = createResearchChildFactory({
+    carrier: "hc",
+    client: () => core,
+    inProcess: () => fakeChild(),
+    findShell: () => "/bin/sh",
+    onStarted: (terminal) => tracked.push(terminal),
+  });
+
+  const session = factory(childOpts(path.join(dir, "research.log")));
+  await drain(session);
+  await session.done;
+
+  assert.deepEqual(tracked, ["t9"]);
+});
+
 test("the carrier factory falls back to the in-process child when no POSIX shell exists", (t) => {
   const dir = researchDir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

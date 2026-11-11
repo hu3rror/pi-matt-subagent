@@ -140,6 +140,7 @@ export function createHcResearchChildSession(
         );
       }
       terminal = address;
+      deps.onStarted?.(address);
       for (;;) {
         pump();
         if (aborted) {
@@ -189,6 +190,8 @@ export interface HcResearchChildDeps {
   checkInSeconds?: number;
   /** Surfaces a kill that could not stop the terminal. */
   onWarn?: (message: string) => void;
+  /** Fires once with the address as soon as the terminal exists, before it is waited on. */
+  onStarted?: (terminal: string) => void;
 }
 
 export interface ResearchChildFactoryInput {
@@ -202,6 +205,8 @@ export interface ResearchChildFactoryInput {
   findShell?: () => string | undefined;
   /** Surfaces a per-run degradation (the `hc` carrier falling back to in-process, a kill that missed). */
   onWarn?: (message: string) => void;
+  /** Fires once with each terminal address the run starts. */
+  onStarted?: (terminal: string) => void;
 }
 
 /**
@@ -219,7 +224,12 @@ export function createResearchChildFactory(input: ResearchChildFactoryInput): Cr
       );
       return input.inProcess(opts);
     }
-    return createHcResearchChildSession(opts, { client: input.client(), sh: shell, onWarn: input.onWarn });
+    return createHcResearchChildSession(opts, {
+      client: input.client(),
+      sh: shell,
+      onWarn: input.onWarn,
+      onStarted: input.onStarted,
+    });
   };
 }
 

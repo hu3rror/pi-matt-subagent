@@ -298,6 +298,37 @@ test("the hc carrier kills the terminal when the run is aborted", async () => {
   assert.deepEqual(killed, ["t3"]);
 });
 
+test("the hc carrier reports each started terminal to the session teardown", async () => {
+  const controller = new AbortController();
+  const tracked: string[] = [];
+  const core: HcClient = {
+    call: async (method) => {
+      if (method === "terminal.run") return { ok: true, result: { address: "t3" } };
+      if (method === "terminal.wait") {
+        controller.abort();
+        return { ok: false, failure: "killed", message: "aborted" };
+      }
+      return { ok: true, result: undefined };
+    },
+    capabilities: () => undefined,
+    dispose: async () => {},
+  };
+  const runner = createCarrierRunner({
+    transport: createHcTransport({
+      client: core,
+      findShell: () => "/bin/sh",
+      onStarted: (terminal) => tracked.push(terminal),
+    }),
+    prepare: () => ready("run-track"),
+  });
+
+  await assert.rejects(
+    runner.runTask(task, { onProgress: () => {}, runId: "run-track", signal: controller.signal }),
+    /Subagent was aborted/,
+  );
+  assert.deepEqual(tracked, ["t3"]);
+});
+
 test("the hc carrier warns when an aborted run's terminal cannot be killed", async () => {
   const controller = new AbortController();
   const warnings: string[] = [];

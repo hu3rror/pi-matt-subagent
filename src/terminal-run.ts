@@ -26,6 +26,8 @@ export interface TerminalRunDeps {
   checkInSeconds?: number;
   /** Reads one output file; a missing file reads as empty (the command may never have started writing). */
   readText?: (file: string) => string;
+  /** Fires once with the address as soon as the terminal exists, before it is waited on. */
+  onStarted?: (terminal: string) => void;
 }
 
 /**
@@ -129,6 +131,7 @@ export async function runInTerminal(
       message: "terminal.run answered without a terminal address, so the run may have started",
     };
   }
+  deps.onStarted?.(terminal);
   let aborted = signal?.aborted === true;
   const onAbort = () => {
     aborted = true;
