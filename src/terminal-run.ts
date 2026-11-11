@@ -83,7 +83,8 @@ interface WaitResultLike {
   exit_code?: number | null;
 }
 
-function terminalAddress(result: unknown): string | undefined {
+/** The terminal address `terminal.run` answers with, or undefined when it answered without one. */
+export function terminalAddress(result: unknown): string | undefined {
   const address = (result as { address?: unknown } | null)?.address;
   return typeof address === "string" && address !== "" ? address : undefined;
 }

@@ -144,6 +144,8 @@ import {
 
 import { createHcClient, type HcClient } from "../src/hc-client.ts";
 
+import { createResearchChildFactory } from "../src/research-carrier.ts";
+
 import {
   assistantTextOfMessage,
   formatUsageLine,
@@ -417,6 +419,15 @@ const RESEARCH_STATUS_COLORS: Record<ResearchStatusDetails["status"] | "unknown"
   aborted: "dim",
   unknown: "dim",
 };
+
+/** Surfaces a per-run degradation as a UI warning; a dead UI must not fail the run. */
+function notifyWarning(ctx: { ui: { notify(message: string, level: "warning"): void } }, message: string): void {
+  try {
+    ctx.ui.notify(message, "warning");
+  } catch {
+    /* ignore */
+  }
+}
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
@@ -1322,13 +1333,7 @@ export default function (pi: ExtensionAPI) {
         config.carrier === "hc" ? createHcTransport({ client: getHcClient() }) : spawnTransport;
       const runner: RunnerSeam = createCarrierRunner({
         transport,
-        onWarn: (message) => {
-          try {
-            ctx.ui.notify(message, "warning");
-          } catch {
-            /* a dead UI must not fail the run */
-          }
-        },
+        onWarn: (message) => notifyWarning(ctx, message),
         prepare: (task, prepareOpts) =>
           prepareSingleAgent(
             ctx.cwd,
@@ -1550,6 +1555,25 @@ export default function (pi: ExtensionAPI) {
       // resolves the run `aborted` and the push below delivers the outcome.
       const abortController = new AbortController();
       researchAborts.set(runId, abortController);
+      const researchChildFactory = createResearchChildFactory({
+        carrier: config.carrier,
+        client: getHcClient,
+        inProcess: (childOpts) =>
+          createResearchChildSession({
+            ...childOpts,
+            // The research tool's own session id: the child announces its
+            // immediate parent, mirroring the blocking path's per-spawn
+            // marker (buildSubagentEnv). Absent at top level — the payload
+            // builder then omits the key.
+            parentSessionId: ctx.sessionManager.getSessionId(),
+            // The parent session's bus: a synchronous emit, no-op with no
+            // subscriber (pure announcement — nothing is read back).
+            onLifecycle: (announcement) => {
+              pi.events.emit(announcement.channel, announcement.payload);
+            },
+          }),
+        onWarn: (message) => notifyWarning(ctx, message),
+      });
 
       let handle: ResearchHandle;
       try {
@@ -1566,6 +1590,7 @@ export default function (pi: ExtensionAPI) {
             packageTools,
             agents,
             extensions: knob,
+            runId,
             abortSignal: abortController.signal,
             // Fires exactly once at a terminal state: settle the registry entry
             // and push the outcome into the main context — content worded as an
@@ -1606,20 +1631,7 @@ export default function (pi: ExtensionAPI) {
               }
             },
           },
-          (childOpts) =>
-            createResearchChildSession({
-              ...childOpts,
-              // The research tool's own session id: the child announces its
-              // immediate parent, mirroring the blocking path's per-spawn
-              // marker (buildSubagentEnv). Absent at top level — the payload
-              // builder then omits the key.
-              parentSessionId: ctx.sessionManager.getSessionId(),
-              // The parent session's bus: a synchronous emit, no-op with no
-              // subscriber (pure announcement — nothing is read back).
-              onLifecycle: (announcement) => {
-                pi.events.emit(announcement.channel, announcement.payload);
-              },
-            }),
+          researchChildFactory,
         );
       } catch (err) {
         // A runner-level failure after the run was registered (e.g. the tmp

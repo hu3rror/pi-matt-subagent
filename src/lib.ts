@@ -1588,6 +1588,11 @@ export interface ResearchRunOptions {
    * list (issue #44 — activation follows load).
    */
   packageTools?: string[];
+  /**
+   * The registry run id handed to the child factory as the carrier's terminal
+   * identity; defaults to the runner's own research id when absent.
+   */
+  runId?: string;
   /** Injectable timer deps for the wall-clock watcher (tests). */
   watcherDeps?: ResearchWatcherDeps;
   /** Manual-kill signal (/subagents kill): aborts the child and resolves the run `aborted`. */
@@ -1619,6 +1624,10 @@ export interface ResearchWatcherDeps {
  * first, then optional --model / --thinking / --tools, then the role prompt
  * via --append-system-prompt (file path, keeping prompt text out of argv),
  * then the task positionally.
+ *
+ * `extensions` is the optional package loadout (issue #53): absent leaves the
+ * invocation untouched, `[]` passes `--no-extensions` (built-in tools only),
+ * and each entry opens `--extension`.
  */
 export function buildDispatchArgs(opts: {
   model?: string;
@@ -1626,11 +1635,14 @@ export function buildDispatchArgs(opts: {
   tools?: string[];
   availableToolNames?: ReadonlySet<string>;
   promptPath?: string;
+  extensions?: string[];
   task: string;
 }): string[] {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
+  if (opts.extensions?.length === 0) args.push("--no-extensions");
+  for (const extension of opts.extensions ?? []) args.push("--extension", extension);
   const tools = resolveTools(opts.tools, opts.availableToolNames);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   if (opts.promptPath) args.push("--append-system-prompt", opts.promptPath);
@@ -1790,6 +1802,14 @@ export type CreateChildSession = (opts: {
   task: string;
   findingsPath: string;
   /**
+   * The run's log file. The runner's tee is the only writer of it; a carrier
+   * that runs the child outside this process (issue #53) writes its own files
+   * beside it instead of into it, so the log never gets a byte twice.
+   */
+  logPath: string;
+  /** The registry run id: the carrier's terminal identity for this run. */
+  runId: string;
+  /**
    * Optional synchronous hook invoked once per executed tool call (the child
    * session's `tool_execution_start` event). The runner uses it to append the
    * per-run toolCall audit; tests capture it through the same seam. Optional
@@ -1928,6 +1948,8 @@ export function runBackgroundResearch(
       systemPrompt,
       task: opts.task,
       findingsPath: opts.findingsPath,
+      logPath,
+      runId: opts.runId ?? researchId,
       onToolCall,
     });
   } catch (err) {

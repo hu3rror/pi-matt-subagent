@@ -316,3 +316,23 @@ test("case 4: an empty knob hands the child built-ins only, with no drift", asyn
   assert.deepEqual(childOpts.tools, ["read", "grep", "find", "ls", "bash", "write"]);
   assert.ok(!logText.includes("[research-drift]"), "the quiet default carries no drift");
 });
+
+test("the child factory receives the run's log path and carrier terminal identity", async (t) => {
+  const def = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    availableToolNames: BUILT_INS,
+  });
+  t.after(() => fs.rmSync(def.tmpDir, { recursive: true, force: true }));
+  assert.equal(path.basename(def.childOpts.logPath), "research.log", "the factory gets the log the runner tees");
+  assert.match(def.childOpts.runId, /^pi-research-/, "defaults to the runner's own research id");
+
+  const registered = await runWithCapture({
+    task: "T",
+    agents: [embeddedResearcher()],
+    availableToolNames: BUILT_INS,
+    runId: "run-abcd1234",
+  });
+  t.after(() => fs.rmSync(registered.tmpDir, { recursive: true, force: true }));
+  assert.equal(registered.childOpts.runId, "run-abcd1234", "the registry run id wins when the caller has one");
+});
