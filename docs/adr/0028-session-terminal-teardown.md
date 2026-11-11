@@ -16,8 +16,8 @@ Both `hc` carriers start a terminal through `terminal.run` (`src/terminal-run.ts
 The extension owns one `SessionTerminals` tracker per loaded extension (`src/terminal-teardown.ts`): a set of terminal addresses, `track()`ed by both carriers at the moment the terminal exists (`onStarted` on the blocking `HcTransport`, `onStarted` on the research child), and drained by an async `session_shutdown` handler:
 
 1. `terminal.kill` every tracked address.
-2. If the kill answered with a terminal still `live`, warn and leave it (a kill that missed is not a removal we may force).
-3. Otherwise `terminal.rm` it — the terminal is `finished`, so the remove is legal; a failed remove warns.
+2. Keep only an answer that settles the terminal `finished`: a `live` answer, or an answer without a `state`, warns and leaves the terminal (a kill that missed, or that proves nothing, is not a removal we may force).
+3. `terminal.rm` the `finished` ones — the remove is legal there; a failed remove warns.
 
 The teardown runs **before** the client is disposed (the client is what reaches the terminals) and **after** the run registry is cleared, so a terminal that does not stop can never turn a finished run into a failure: shutdown has no failure channel, and a run already settled terminal stays settled. Warnings are the only report, and at shutdown they may not land at all: the UI is already tearing down (`notifyWarning` swallows the stale-context throw, the condition ADR 0027 records), so a terminal that could not be stopped is visible only in `hc ls --all`.
 
@@ -29,4 +29,4 @@ The tracker resolves the hc client lazily (`client: () => HcClient`), so a sessi
 - A **hard** kill of pi — SIGKILL, crash, the parent shell dying — never reaches `session_shutdown`. Nested terminals (pi inside an hc terminal) end with pi's program per hc's default; parentless terminals (pi in a plain terminal) keep running and finished ones stay listed. Recovery is manual: `hc ls --all`, then `hc kill <t>` and `hc rm <t>`. Making pi the parent of its own terminals would be a different design (`outlive_parent`/`keep` decisions, identity plumbing); #54 does not take it.
 - The teardown is per loaded extension instance, so the records die with the extension; nothing persists across pi restarts.
 - Research children already kill their own terminal on abort (`src/research-carrier.ts`); the tracker then sees a `finished` terminal and removes it. Killing an already-finished terminal is legal (it answers with the terminal), so the two paths do not conflict.
-- Tests: `src/terminal-teardown.test.ts` pins the fake-port contract (kill then remove, finished-only, warnings for a missed kill/remove, an empty session making no call, and a second teardown doing nothing); `src/blocking-carrier.test.ts` and `src/research-carrier.test.ts` pin the tracking callback firing with the terminal address.
+- Tests: `src/terminal-teardown.test.ts` pins the fake-port contract (kill then remove, finished-only, warnings for a missed kill/remove or an answer without a state, an empty session making no call, and a second teardown doing nothing); `src/blocking-carrier.test.ts` and `src/research-carrier.test.ts` pin the tracking callback firing with the terminal address.
