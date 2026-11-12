@@ -17,6 +17,6 @@ Issue #57: a research child dies when `researchChildExtensions` names a package 
 
 - Upgrading users hit by the reported crash get a child that starts; the duplicate install is real but no longer fatal.
 - A version range pinned in the knob is advisory on the `hc` carrier: when the settings already load the package, the settings' resolved version wins. The trade is deliberate — the alternative is the crash the issue reports — and the run log names the spec that was left out.
-- A genuine startup failure (a package whose tools really clash with another) still fails the run, now with the child's own words in the warning instead of a bare exit code.
+- A genuine startup failure still fails the run, now with the child's own words in the warning instead of a bare exit code. After the de-duplication that path is not conflict-specific: any non-zero child exit reports its stderr tail, and pointing the knob at a missing extension path reproduces it.
 - A settings entry that carries its own extension allow-list still counts as loading its package: if that filter excludes the extension the knob wanted, the child reports no knob tools (`[loadout] warn`) instead of failing to start — the run log stays the honest surface.
 - ADR 0025's "exactly the knob's packages" now carries this exception: settings-loaded packages are not re-requested, and each package appears once.
