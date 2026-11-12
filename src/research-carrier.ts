@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 
 import { blockingTerminalName } from "./blocking-carrier.ts";
+import { createFileTail } from "./file-tail.ts";
 import type { HcClient } from "./hc-client.ts";
 import {
   buildDispatchArgs,
@@ -24,8 +24,6 @@ export const RESEARCH_TERMINAL_CHECK_IN_SECONDS = 1;
 
 /** The `kind` label a research terminal carries, beside `run` and `role`. */
 export const RESEARCH_TERMINAL_KIND = "research";
-
-const READ_CHUNK_BYTES = 64 * 1024;
 
 /** The options a carrier-based research factory receives from the run. */
 export type ResearchChildOptions = Parameters<CreateChildSession>[0];
@@ -94,10 +92,7 @@ export function createHcResearchChildSession(
     }
   })();
 
-  // A decoder per file: one character may straddle two reads, and `toString`
-  // per chunk would corrupt it.
-  const decoders = { out: new StringDecoder("utf8"), err: new StringDecoder("utf8") };
-  const offsets = { out: 0, err: 0 };
+  const tails = { out: createFileTail(outPath), err: createFileTail(errPath) };
   // The child's stdout is its JSON event stream (pi --mode json), so the same
   // bytes that feed the log also carry the tool audit the in-process child
   // reports through `opts.onToolCall`.
@@ -111,11 +106,8 @@ export function createHcResearchChildSession(
   };
   const pump = () => {
     for (const key of ["out", "err"] as const) {
-      const file = key === "out" ? outPath : errPath;
-      const read = readAppended(file, offsets[key]);
-      offsets[key] = read.offset;
-      if (read.bytes.length === 0) continue;
-      const text = decoders[key].write(read.bytes);
+      const text = tails[key].read();
+      if (text === "") continue;
       if (key === "out") audit(text);
       push(text);
     }
@@ -272,26 +264,6 @@ function stderrTail(file: string): string {
   return lines.length > tail.length ? `…\n${tail.join("\n")}` : tail.join("\n");
 }
 
-function readAppended(file: string, offset: number): { bytes: Buffer; offset: number } {
-  let fd: number;
-  try {
-    fd = fs.openSync(file, "r");
-  } catch (err) {
-    // The shell has not created the file yet; anything else is a real read error.
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { bytes: Buffer.alloc(0), offset };
-    throw err;
-  }
-  try {
-    const size = fs.fstatSync(fd).size;
-    if (size <= offset) return { bytes: Buffer.alloc(0), offset };
-    const length = Math.min(size - offset, READ_CHUNK_BYTES);
-    const bytes = Buffer.allocUnsafe(length);
-    const read = fs.readSync(fd, bytes, 0, length, offset);
-    return { bytes: bytes.subarray(0, read), offset: offset + read };
-  } finally {
-    fs.closeSync(fd);
-  }
-}
 
 function reportToolCall(line: string, onToolCall: (call: ToolCallEvent) => void): void {
   let event: unknown;
