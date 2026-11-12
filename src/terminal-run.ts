@@ -54,7 +54,11 @@ export function shellQuote(value: string): string {
 
 export function toShellScript(invocation: TerminalInvocation, outPath: string, errPath: string): string {
   const command = [invocation.command, ...invocation.args].map(shellQuote).join(" ");
-  return `${command} > ${shellQuote(outPath)} 2> ${shellQuote(errPath)}; exit $?`;
+  const codePath = shellQuote(`${outPath}.exit`);
+  return [
+    `{ ${command} 2> ${shellQuote(errPath)}; echo $? > ${codePath}; } | tee ${shellQuote(outPath)}`,
+    `exit "$(cat ${codePath} 2>/dev/null || echo 1)"`,
+  ].join("\n");
 }
 
 /**

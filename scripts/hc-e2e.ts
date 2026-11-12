@@ -8,9 +8,10 @@
  *
  *   1. prerequisites — `hc` on PATH and a reachable core; a missing piece fails
  *      with a message that names it;
- *   2. terminal — an `sa-*` terminal carrying this run's token appears on the
- *      core while the child runs. An unusable core warns and silently falls
- *      back to `spawn`, so this is what proves the hc carrier actually ran;
+ *   2. terminal + screen — an `sa-*` terminal carrying this run's token appears
+ *      on the core while the child runs, and its screen shows the child's JSON
+ *      output. An unusable core warns and silently falls back to `spawn`, so
+ *      the terminal is what proves the hc carrier actually ran;
  *   3. read-back — the tool result in the run log carries the child's exit code
  *      and its output. A blocking run keeps no per-run log of its own: the
  *      carrier drains `pi-hc-run-<id>/stdout.jsonl` and deletes that dir when
@@ -83,6 +84,18 @@ function hc(args: string[]): Promise<string> {
 
 async function hcJson<T>(args: string[]): Promise<T> {
   return JSON.parse(await hc(args)) as T;
+}
+
+/** pi's JSON mode prints one `{"type":...}` event per line; the screen must carry those. */
+const jsonEventMarker = '"type":"';
+
+async function screenShowsOutput(address: string): Promise<{ seen: boolean; error?: string }> {
+  try {
+    const read = await hcJson<{ text?: string }>(["read", address, "--json"]);
+    return { seen: (read.text ?? "").includes(jsonEventMarker) };
+  } catch (err) {
+    return { seen: false, error: (err as Error).message };
+  }
 }
 
 async function listTerminals(): Promise<TerminalRow[]> {
@@ -159,6 +172,8 @@ async function main(): Promise<void> {
   let agentDir: string | null = null;
   let pi: ChildProcess | null = null;
   let runTerminal: TerminalDetail | null = null;
+  let screenSeen = false;
+  let screenReadError = "";
   let teardownGateFailed = false;
   try {
     agentDir = prepareAgentDir(workDir);
@@ -214,6 +229,11 @@ async function main(): Promise<void> {
         if (!(detail.argv ?? []).some((arg) => arg.includes(token))) continue;
         runTerminal = detail;
       }
+      if (runTerminal && !screenSeen) {
+        const screen = await screenShowsOutput(runTerminal.address);
+        screenSeen = screen.seen;
+        if (screen.error) screenReadError = screen.error;
+      }
     }
 
     fs.writeFileSync(runLogPath, stdout);
@@ -236,7 +256,14 @@ async function main(): Promise<void> {
     if (terminalLabels.kind !== "blocking") {
       throw new Error(`the run's terminal carries kind=${terminalLabels.kind ?? "(unlabelled)"}; expected kind=blocking`);
     }
+    if (!screenSeen) {
+      const readError = screenReadError ? `; last screen read failed: ${screenReadError}` : "";
+      throw new Error(
+        `terminal ${runTerminal.address} (${terminalName}) never showed the child's JSON on its screen while the run was live${readError}`,
+      );
+    }
     console.log(`HC-E2E OK: the run executed in terminal ${runTerminal.address} (${terminalName}, kind=blocking)`);
+    console.log("HC-E2E OK: the run terminal showed the child's output on screen");
 
     const event = parseEvents(runLogPath, stdout)
       .filter((candidate) => candidate.type === "tool_execution_end" && candidate.toolName === "subagent")

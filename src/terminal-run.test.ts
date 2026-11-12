@@ -1,5 +1,6 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -30,13 +31,48 @@ test("shellQuote survives single quotes, spaces, and metacharacters", () => {
   assert.equal(shellQuote("a b; $(rm -rf /)"), "'a b; $(rm -rf /)'");
 });
 
-test("toShellScript redirects both streams into files and forwards the exit code", () => {
+test("toShellScript mirrors stdout to the screen, keeps stderr in a file, and reports the child's exit code", () => {
   const script = toShellScript(
     { command: "/usr/bin/node", args: ["--version", "a b"] },
     "/tmp/out.jsonl",
     "/tmp/err.log",
   );
-  assert.equal(script, `'/usr/bin/node' '--version' 'a b' > '/tmp/out.jsonl' 2> '/tmp/err.log'; exit $?`);
+  assert.equal(
+    script,
+    [
+      `{ '/usr/bin/node' '--version' 'a b' 2> '/tmp/err.log'; echo $? > '/tmp/out.jsonl.exit'; } | tee '/tmp/out.jsonl'`,
+      `exit "$(cat '/tmp/out.jsonl.exit' 2>/dev/null || echo 1)"`,
+    ].join("\n"),
+  );
+});
+
+test("the script mirrors the child's stdout to the screen and keeps the child's exit code", () => {
+  const dir = fs.mkdtempSync(path.join(tmp, "mirror-"));
+  const out = path.join(dir, "out.txt");
+  const err = path.join(dir, "err.txt");
+  const script = toShellScript(
+    { command: "/bin/sh", args: ["-c", "printf 'a\\nb\\n'; printf 'boom\\n' >&2; exit 7"] },
+    out,
+    err,
+  );
+  const run = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8" });
+  assert.equal(run.status, 7);
+  assert.equal(run.stdout, "a\nb\n");
+  assert.equal(fs.readFileSync(out, "utf8"), "a\nb\n");
+  assert.equal(fs.readFileSync(err, "utf8"), "boom\n");
+});
+
+test("the script fails the run when the exit code never lands", () => {
+  const dir = fs.mkdtempSync(path.join(tmp, "nocode-"));
+  const out = path.join(dir, "out.txt");
+  const err = path.join(dir, "err.txt");
+  fs.mkdirSync(`${out}.exit`);
+  const run = spawnSync("/bin/sh", ["-c", toShellScript({ command: "/bin/echo", args: ["hi"] }, out, err)], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 1);
+  assert.equal(run.stdout, "hi\n");
+  assert.equal(fs.readFileSync(out, "utf8"), "hi\n");
 });
 
 test("findSh resolves sh from PATH even when earlier entries have none", () => {
@@ -83,7 +119,10 @@ test("runInTerminal starts the terminal with the shell script and reads the file
   assert.deepEqual(params.argv, [
     "/bin/sh",
     "-c",
-    `'/bin/echo' 'it'\\''s' 'a '\\''quoted'\\'' arg' > '${outPath}' 2> '${errPath}'; exit $?`,
+    [
+      `{ '/bin/echo' 'it'\\''s' 'a '\\''quoted'\\'' arg' 2> '${errPath}'; echo $? > '${outPath}.exit'; } | tee '${outPath}'`,
+      `exit "$(cat '${outPath}.exit' 2>/dev/null || echo 1)"`,
+    ].join("\n"),
   ]);
   assert.equal(params.cwd, tmp);
   assert.equal(params.name, "sa-run-1");
