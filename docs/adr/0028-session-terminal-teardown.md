@@ -6,7 +6,7 @@
 
 Both `hc` carriers start a terminal through `terminal.run` (`src/terminal-run.ts`, `src/research-carrier.ts`) and then wait on it. The request passes no `parent`, no `rm`, and no `keep`:
 
-- hc's default parent is "the terminal it is started from". When pi itself runs inside an hc terminal, the child is nested under that terminal and — per hc's documented default — ends when the parent's program ends. When pi runs anywhere else there is no terminal identity in the environment, the terminal gets **no parent**, and nothing in hc ends it when pi goes away.
+- hc's default parent is "the terminal it is started from", but that default applies only to a caller it can identify: this port sends no `caller`, and a `terminal.run` through `hc connect` comes back with `parent: null` even when the calling pi itself sits in a core terminal (measured in ADR 0029). So the terminal gets **no parent wherever pi runs**, and nothing in hc ends it when pi goes away.
 - No `rm`, so a finished terminal stays in the listing until someone removes it.
 
 `session_shutdown` disposed the hc client and cleared the registries, but never touched the terminals themselves. The leftovers were visible in a live core: finished `zsh`/`sh` terminals from earlier sessions (`hc ls --all`) with no run behind them.
@@ -26,7 +26,7 @@ The tracker resolves the hc client lazily (`client: () => HcClient`), so a sessi
 ## Consequences
 
 - On a graceful end of the session (quit, reload, session switch) both carriers' terminals are killed and the finished ones are removed; the listing no longer collects orphans from normal use.
-- A **hard** kill of pi — SIGKILL, crash, the parent shell dying — never reaches `session_shutdown`. Nested terminals (pi inside an hc terminal) end with pi's program per hc's default; parentless terminals (pi in a plain terminal) keep running and finished ones stay listed. Recovery is manual: `hc ls --all`, then `hc kill <t>` and `hc rm <t>`. Making pi the parent of its own terminals would be a different design (`outlive_parent`/`keep` decisions, identity plumbing); #54 does not take it.
+- A **hard** kill of pi — SIGKILL, crash, the parent shell dying — never reaches `session_shutdown`. No terminal this port starts is nested (no `caller` is sent, ADR 0029), so every one of them keeps running and finished ones stay listed. Recovery is manual: `hc ls --all`, then `hc kill <t>` and `hc rm <t>`. Making pi the parent of its own terminals would be a different design (`outlive_parent`/`keep` decisions, identity plumbing); #54 does not take it.
 - The teardown is per loaded extension instance, so the records die with the extension; nothing persists across pi restarts.
 - Research children already kill their own terminal on abort (`src/research-carrier.ts`); the tracker then sees a `finished` terminal and removes it. Killing an already-finished terminal is legal (it answers with the terminal), so the two paths do not conflict.
 - Tests: `src/terminal-teardown.test.ts` pins the fake-port contract (kill then remove, finished-only, warnings for a missed kill/remove or an answer without a state, an empty session making no call, and a second teardown doing nothing); `src/blocking-carrier.test.ts` and `src/research-carrier.test.ts` pin the tracking callback firing with the terminal address.

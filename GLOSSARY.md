@@ -25,8 +25,8 @@ _Avoid_: synchronous, wait, join
 _Avoid_: async, fire-and-forget, detached
 
 **child session（子会话）**:
-执行一次后台 research run 的进程内会话（ADR 0013 的 in-process second session，`createAgentSession` + `SessionManager.inMemory()`），承载 role=researcher 的 subagent 实例——subagent 是「委托执行」，子会话是「在哪执行、输出怎么送回来」。`push` 边界引用的「输出流先于 done 结束」契约即其传输属性；生命周期会话作用域，`session_shutdown` 时经 per-run abort controller 落定 `aborted` 后 dispose 兜底（ADR 0027）。与主会话相对。
-_Avoid_: 子进程, worker, in-process 第二会话
+执行一次后台 research run 的会话，承载 role=researcher 的 subagent 实例——subagent 是「委托执行」，子会话是「在哪执行、输出怎么送回来」。默认 carrier=spawn 时是进程内会话（ADR 0013 的 in-process second session，`createAgentSession` + `SessionManager.inMemory()`）；carrier=hc 时是 herdr-core 终端里的独立 `pi` 进程（ADR 0029），两种实现共享同一 `{ output, done, abort }` 形状。`push` 边界引用的「输出流先于 done 结束」契约即其传输属性；生命周期会话作用域，`session_shutdown` 时经 per-run abort controller 落定 `aborted` 后 dispose 兜底（ADR 0027）。与主会话相对。
+_Avoid_: worker, 把两种载体都当成进程内会话
 
 **push（推送交付）**:
 后台 subagent 到达任一终态（succeeded / failed / terminated / aborted）时，扩展经 `pi.sendMessage`（`deliverAs: "followUp"` + `triggerTurn: true`）把结果摘要与 findings 路径推进主会话上下文的语义——主会话空闲时立即触发新回合，正在回合中则排队到当前回合工具调用结束。推送内容成为被触发回合的 prompt，须措辞为「读取 findings 文件」的指令；另由消息渲染器（`pi.registerMessageRenderer`）负责转录显示。手动 kill（aborted）同样推送，告知主 agent 研究已被停止。
@@ -74,7 +74,7 @@ _Avoid_: saturation, 信息饱和
 _Avoid_: session store, 状态表
 
 **run status（运行状态）**:
-一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`aborted` 是用户主动终止——blocking 期间 Esc 整体中止，或空闲时手动 kill 一个 running 的 background research（见 run management）；会话 teardown（session_shutdown）时仍在运行的 research run 也落为 aborted——被会话结束切断，而非假 succeeded（ADR 0027）；`terminated` 严格保留给 background research 被 wall-clock 硬上限击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；手动 kill 从不记作 terminated。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。
+一个 subagent 运行的生命周期状态，枚举冻结为 `queued / running / succeeded / failed / aborted / terminated`。`queued` 是并行模式里等并发槽（`MAX_CONCURRENCY`）的任务；`aborted` 是用户主动终止——blocking 期间 Esc 整体中止，或空闲时手动 kill 一个 running 的 background research（见 run management）；会话 teardown（session_shutdown）时仍在运行的 research run 也落为 aborted——被会话结束切断，而非假 succeeded（ADR 0027）；`terminated` 严格保留给 background research 被 wall-clock 硬上限击杀的终态（靠 findings 里的 `research-terminated` marker 判定）；手动 kill 从不记作 terminated。终态（succeeded/failed/aborted/terminated）冻结，不可再更新。TODO 原文的 `blocked` 无现实对应（本插件无重试/等待），已删除。carrier=hc 时还有一处边界：从 pi 外部 kill 掉的终端落 `failed` 而非 `aborted`——扩展只看到子进程非零退出，只有 abort 杠杆（kill 命令、会话结束、墙钟）才落 `aborted`（ADR 0029）。
 _Avoid_: pending, blocked, 状态机
 
 **run management（运行管理）**:
@@ -101,17 +101,21 @@ _Avoid_: 会话思考档位（那是 inherited 层）, 主会话档位
 按目标模型能力映射表把请求的档位落到该模型实际使用的档位（不支持 reasoning 的模型只有 `off`）。本扩展在派发前用与子进程同一套 pi-ai 函数预 clamp，父进程与子进程结果天然一致；请求与生效不一致即被标注（`high (req: xhigh)`），一致或未请求时行为与展示均不变。模型声明「支持」某档（映射到字符串）时 clamp 不介入——降级发生在 API 层；只有映射为 `null`（如 kimi-k3 的 `minimal`/`xhigh`）或无 reasoning 才触发 clamp，且 pi-ai 先向上找再向下找（kimi-k3 请求 `minimal`→`low` 抬升、请求 `xhigh`→`max`）。clamp 语义是「模型能力映射」，能力层从不做减一；决策源层（见 dispatch thinking level）对继承档位原样透传、也不按模型能力换算——档位与模型解耦，换模型不会自动换算档位（ADR 0018）。
 _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 
+**carrier（执行载体）**:
+子 agent 在哪儿执行，以及由此换来的人可观察性（issue #50，ADR 0029）。取值两个，派发时按 extension config 读取：`spawn`（默认）——blocking 子进程走 pi 自己的管道，research 走进程内子会话；`hc`——两者都在运行中的 herdr-core 上开成终端（名字 `sa-<run id 前 8 位>`，标签 `run`/`kind`/`role`），可从 pi 外部列出、attach、单独 kill。载体只换执行位置：结果对象、退出码处理、push 与 run status 在两种载体下一致，工具参数不因载体而变。失败按时机分，且两种载体并不对称：blocking 的启动期失败（core 不可达、探测失败、`terminal.run` 报错、没有 POSIX `sh`）告警并只对该次 run 回退 `spawn`；research 只在缺 `sh` 时回退进程内子会话，core 卡在这一步就直接判该次 run 失败。任一载体运行中丢了 core 就判该 run 失败并点名终端与 run id——不重跑、不伪造空成功。终端不挂 parent（不传 `caller`），回收靠会话结束时的显式 kill（ADR 0028）。此处「载体」指**在哪执行**；本仓库另一个「载体」用法指错误怎么报（见 tool error），两者无关。
+_Avoid_: 后端, 传输层, runner（与 RunnerSeam 混用）
+
 **extension config（扩展配置）**:
-本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，十个 config knob（issue #37 加 `researchChildExtensions`，issue #39 加 `roleDefaults`，issue #44 起 `researchChildExtensions` 非可选、空默认——无精选回退，`inherit` 对它无意义），惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`；`roleDefaults` 嵌套对象按 role 条目逐项降级），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
+本扩展的用户级持久化设置面（ADR 0018）：`~/.pi/agent/extensions/matt-subagent.json`，十一个 config knob（issue #37 加 `researchChildExtensions`，issue #39 加 `roleDefaults`，issue #52 加 `carrier`，issue #44 起 `researchChildExtensions` 非可选、空默认——无精选回退，`inherit` 对它无意义），惰性生成——加载扩展从不写盘，仅 `set`/`reset` 创建全量自文档化 JSON，删除文件即重置全部默认。读取按 key 逐项做结构校验（未知键忽略、非法值逐项降级默认并标 `degraded`；`roleDefaults` 嵌套对象按 role 条目逐项降级），每次工具运行读一次、改动对下一次派发生效无需 `/reload`。与 run management 相对：一个是「怎么跑」（派发前行为），一个是「跑得怎么样」（运行后状态）。
 _Avoid_: 设置面板, 配置文件（笼统）
 
 **config knob（配置旋钮）**:
-extension config 暴露的单个可调项，v1 十个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`researchChildExtensions`（issue #37 加入的 research 子会话装载包列表；issue #44 起非可选、空默认——空即「不装任何查询包」的安静默认，装载即激活、角色无需声明包工具，`set` 接受逗号包列表、`config reset` 回到空默认、`inherit` 无意义）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）、`hideWorkflowPresets`（布尔，默认 false；为 true 时扩展不注册三个内置 workflow preset，加载时读取故需 `/reload` 生效，issue #41）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
+extension config 暴露的单个可调项，v1 十一个：`maxTasksPerCall`（并行 tasks 与 chain steps 双口）、`maxConcurrency`、`perTaskOutputCap`、`researchWallClockMs`（既是 research 默认墙钟也是 `input.maxWallClockMs` 的硬天花板，只收紧）、`researchChildExtensions`（issue #37 加入的 research 子会话装载包列表；issue #44 起非可选、空默认——空即「不装任何查询包」的安静默认，装载即激活、角色无需声明包工具，`set` 接受逗号包列表、`config reset` 回到空默认、`inherit` 无意义）、`logTailBytes`（`/subagents tail` 的字节读上限）、`dispatchDefaultModel`、`dispatchDefaultThinkingLevel`（后两者为空/`inherit` 时回退继承主会话；issue #39 起 `dispatchDefaultThinkingLevel` 提到 role preset 之上）、`roleDefaults`（按角色的 `{ model?, thinkingLevel? }` 定制，点分键 `roleDefaults.<role>.<field>` 编辑，`roleDefaults.<role>.thinkingLevel` 压过 config 默认与 role preset、`roleDefaults.<role>.model` 压过 config 默认模型）、`hideWorkflowPresets`（布尔，默认 false；为 true 时扩展不注册三个内置 workflow preset，加载时读取故需 `/reload` 生效，issue #41）、`carrier`（blocking 与 research 子 agent 在哪里执行：`spawn` 默认走 pi 自己的管道与进程内子会话，`hc` 在运行中的 herdr-core 上开命名终端；派发时读取故无需 `/reload`，启动期失败处理见 carrier 词条——issue #52）。reset 分两级：`config reset <key>` 只从文件删该键（未知/新版本键幸存；点分键只删嵌套字段并剪除空 role），`config reset` 重建全默认。
 _Avoid_: 可设置项（泛指）, option（与工具参数混淆）
 
 **tool error（工具错误信号）**:
 工具调用未完成时通过**返回** `isError: true` 显式报错（pi ≥0.99.1 起 harness 认可返回载体；此前只从 throw 派生，返回字段是死代码——ADR 0010 该版本前提已失效，被 ADR 0016 supersede）。覆盖规则：**调用完成 → 成功结果（声明处带结构化 receipt）；调用未完成 → `isError: true`，文案逐字不变**。subagent 的未完成分支：blocking 失败（single 失败 / chain 失败步 / 中止，`aborted` 与 runSingleAgent 的 abort throw 一致）、参数校验失败（含 Available agents 恢复文案）、project-agent 拒绝；转换点在工具边界（try/catch 包编排层，编排层与 `formatBlockingToolError` 仍 throw、测试钉死该契约），失败结果的 `details.error` 携带该 run 终态信息（status/agent/source/usage/model/thinking，由纯函数 `toolErrorDetails` 从 registry 本次调用增量映射，renderResult 渲染富错误行——Q2=b）。明文例外：parallel 聚合保持成功语义（部分失败是交付物）、input-JSON 解析保持 loud throw（ADR 0011）。research 的未完成分支（拒批 / 未知 model / 启动失败）已随结构化 receipt 一并迁移到本规则（ADR 0017）：同样返回 `isError: true`、文案逐字不变；启动失败先落 registry `failed`、不推送（run 从未启动、无 log）。成功调用声明 `outputSchema` 并返回 `structuredContent`（见 structuredContent 词条），错误分支不带 receipt。
-_Avoid_: throw 为载体, 假成功（未完成调用却成功标记）
+_Avoid_: 以 throw 为错误载体, 假成功（未完成调用却成功标记）
 
 **structuredContent（结构化结果）**:
 声明 `outputSchema` 的工具在成功结果里返回的机器可读字段（pi ≥0.99.1，`AgentToolResult.structuredContent`）；codemode 脚本等程序化消费方直接拿结构化 receipt，无需解析文本。本扩展仅 research 声明（ADR 0017）：`RESEARCH_RESULT_SCHEMA` = TypeBox of `ResearchHandle`（`researchId` / `findingsPath` / `logPath`，全 string、全必填），成功分支 `structuredContent` 与 `details` 同源（同一对象内容）；未完成（错误标记）分支不带。`outputSchema` 不进 provider 层——模型面 token 不受影响（token benchmark 只量 description + parameters；内置 bash 亦声明）。subagent 不声明（无消费方，保 token 面）。
