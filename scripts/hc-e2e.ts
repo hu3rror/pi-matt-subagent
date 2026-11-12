@@ -55,6 +55,7 @@ interface TerminalDetail {
 interface ChildResult {
   exitCode?: number | null;
   stderr?: string;
+  usage?: { turns?: number };
 }
 
 interface ToolResult {
@@ -67,6 +68,7 @@ interface SessionEvent {
   toolName?: string;
   isError?: boolean;
   result?: ToolResult;
+  partialResult?: ToolResult;
 }
 
 function hcSync(args: string[]) {
@@ -173,6 +175,7 @@ async function main(): Promise<void> {
   let pi: ChildProcess | null = null;
   let runTerminal: TerminalDetail | null = null;
   let screenSeen = false;
+  let liveTurns: number | undefined;
   let screenReadError = "";
   let teardownGateFailed = false;
   try {
@@ -182,7 +185,7 @@ async function main(): Promise<void> {
     let terminalReadError = "";
     const prompt =
       `Call the subagent tool now, exactly once. Use agent = "fact-finder" and task = ` +
-      `"${token} Reply with exactly the single word ${expectedAnswer} and nothing else. Do not read files and do not run commands." ` +
+      `"${token} First run the bash tool with the command \`sleep 4\`, then reply with exactly the single word ${expectedAnswer} and nothing else. Do not read files." ` +
       `After the subagent tool returns, reply with exactly: done.`;
 
     let stdout = "";
@@ -229,6 +232,16 @@ async function main(): Promise<void> {
         if (!(detail.argv ?? []).some((arg) => arg.includes(token))) continue;
         runTerminal = detail;
       }
+      if (runTerminal && liveTurns === undefined) {
+        // The log is still being written: parse only the lines that ended.
+        const complete = stdout.slice(0, stdout.lastIndexOf("\n") + 1);
+        const events = parseEvents(runLogPath, complete).filter((event) => event.toolName === "subagent");
+        const ended = events.some((event) => event.type === "tool_execution_end");
+        const turns = events
+          .filter((event) => event.type === "tool_execution_update")
+          .at(-1)?.partialResult?.details?.results?.[0]?.usage?.turns;
+        if (!ended && turns !== undefined && turns > 0) liveTurns = turns;
+      }
       if (runTerminal && !screenSeen) {
         const screen = await screenShowsOutput(runTerminal.address);
         screenSeen = screen.seen;
@@ -264,6 +277,12 @@ async function main(): Promise<void> {
     }
     console.log(`HC-E2E OK: the run executed in terminal ${runTerminal.address} (${terminalName}, kind=blocking)`);
     console.log("HC-E2E OK: the run terminal showed the child's output on screen");
+    if (liveTurns === undefined) {
+      throw new Error(
+        `the run log carried no live progress while the run was live — an hc run's info box would stay empty until the terminal ends: ${runLogPath}`,
+      );
+    }
+    console.log(`HC-E2E OK: the run reported live progress mid-run (turns=${liveTurns}) before the terminal ended`);
 
     const event = parseEvents(runLogPath, stdout)
       .filter((candidate) => candidate.type === "tool_execution_end" && candidate.toolName === "subagent")

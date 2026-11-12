@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createFileTail } from "./file-tail.ts";
 import type { HcClient, HcResult } from "./hc-client.ts";
 
 export interface TerminalInvocation {
@@ -28,6 +29,8 @@ export interface TerminalRunDeps {
   readText?: (file: string) => string;
   /** Fires once with the address as soon as the terminal exists, before it is waited on. */
   onStarted?: (terminal: string) => void;
+  /** Hands over the stdout appended since the previous check-in; the outcome still carries the whole file. */
+  onStdout?: (delta: string) => void;
 }
 
 /**
@@ -136,6 +139,11 @@ export async function runInTerminal(
     };
   }
   deps.onStarted?.(terminal);
+  const stdoutTail = deps.onStdout ? createFileTail(request.outPath) : undefined;
+  const pumpStdout = () => {
+    if (!stdoutTail || !deps.onStdout) return;
+    for (let delta = stdoutTail.read(); delta !== ""; delta = stdoutTail.read()) deps.onStdout(delta);
+  };
   let aborted = signal?.aborted === true;
   const onAbort = () => {
     aborted = true;
@@ -156,6 +164,7 @@ export async function runInTerminal(
   try {
     while (true) {
       if (aborted) return await killTerminal();
+      pumpStdout();
       const waited = await client.call(
         "terminal.wait",
         { terminal, ...(deps.checkInSeconds === undefined ? {} : { timeout: deps.checkInSeconds }) },
@@ -168,6 +177,7 @@ export async function runInTerminal(
       const result = waited.result as WaitResultLike | null;
       // `ended: false` is a bounded check-in, not a failure: keep waiting.
       if (!result?.ended) continue;
+      pumpStdout();
       return {
         ok: true,
         terminal,

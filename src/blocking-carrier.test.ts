@@ -89,6 +89,45 @@ function runningCore(): HcClient {
   };
 }
 
+function coreStaysLiveUntilChildExit(onEnded: () => void): HcClient {
+  const terminals = new Map<string, { child: ReturnType<typeof spawn> }>();
+  let seq = 0;
+  return {
+    call: async (method, params): Promise<HcResult> => {
+      if (method === "terminal.run") {
+        const run = params as { argv: string[]; cwd: string; env: Record<string, string> };
+        const address = `t${++seq}`;
+        const child = spawn(run.argv[0], run.argv.slice(1), {
+          cwd: run.cwd,
+          env: { ...process.env, ...run.env },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        child.stdout?.resume();
+        child.stderr?.resume();
+        terminals.set(address, { child });
+        return { ok: true, result: { address } };
+      }
+      if (method === "terminal.wait") {
+        const { terminal } = params as { terminal: string };
+        const record = terminals.get(terminal);
+        if (!record) return { ok: false, failure: "protocol", message: "no such terminal" };
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (record.child.exitCode === null) return { ok: true, result: { terminal, ended: false, reason: "timeout" } };
+        onEnded();
+        return { ok: true, result: { terminal, ended: true, reason: "exit", exit_code: record.child.exitCode } };
+      }
+      if (method === "terminal.kill") {
+        const { terminal } = params as { terminal: string };
+        terminals.get(terminal)?.child.kill("SIGKILL");
+        return { ok: true, result: { address: terminal } };
+      }
+      return { ok: true, result: undefined };
+    },
+    capabilities: () => undefined,
+    dispose: async () => {},
+  };
+}
+
 test("a run's terminal is named and labelled for its run id", () => {
   assert.equal(blockingTerminalName("run-abcdef123456"), "sa-run-abcd");
   assert.equal(blockingTerminalName("!!weird!!"), "sa---weird-");
@@ -120,7 +159,7 @@ test("progress events reach the accumulator over the hc carrier", async () => {
     const inner = spec.accumulator;
     spec.accumulator = {
       onStdout: (chunk) => {
-        seen.push("stdout");
+        seen.push(chunk);
         inner.onStdout(chunk);
       },
       onStderr: (chunk) => inner.onStderr(chunk),
@@ -140,7 +179,54 @@ test("progress events reach the accumulator over the hc carrier", async () => {
   });
 
   await runner.runTask(task, { onProgress: () => {}, runId: "run-progress" });
-  assert.deepEqual(seen, ["stdout"]);
+  const fed = seen.join("").split("\n").filter((line) => line !== "");
+  assert.equal(fed.length, 1);
+  assert.equal(JSON.parse(fed[0]).type, "message_end");
+});
+
+const LIVE_CHILD_SCRIPT = `
+const line = (text) => JSON.stringify({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25, totalFromProvider: true }, totalTokens: 15 },
+  },
+}) + "\\n";
+process.stdout.write(line("one"));
+setTimeout(() => { process.stdout.write(line("two")); process.exit(0); }, 400);
+`;
+
+test("an hc run reports usage while it is live and counts each event once", async () => {
+  let ended = false;
+  const live: number[] = [];
+  const runner = createCarrierRunner({
+    transport: createHcTransport({ client: coreStaysLiveUntilChildExit(() => (ended = true)), findShell: () => "/bin/sh" }),
+    prepare: (): PrepareOutcome => ({
+      kind: "ready",
+      prepared: {
+        spec: {
+          ...readySpec("run-live"),
+          invocation: { command: process.execPath, args: ["-e", LIVE_CHILD_SCRIPT] },
+          accumulator: createResultAccumulator({
+            agent: "general",
+            agentSource: "embedded",
+            task: "say hello",
+            onProgress: (partial) => {
+              if (!ended) live.push(partial.usage.turns);
+            },
+          }),
+        },
+        cleanup: () => {},
+      },
+    }),
+  });
+
+  const result = await runner.runTask(task, { runId: "run-live", onProgress: () => {} });
+
+  assert.equal(live[0], 1);
+  assert.equal(result.usage.turns, 2);
+  assert.equal(result.usage.input, 20);
 });
 
 test("a prepare failure returns its result without running a transport", async () => {

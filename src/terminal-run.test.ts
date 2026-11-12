@@ -277,3 +277,65 @@ test("runInTerminal says the terminal may still run when the kill fails", async 
     terminal: "t7",
   });
 });
+
+test("runInTerminal hands the stdout appended between check-ins to onStdout", async () => {
+  fs.writeFileSync(outPath, "");
+  fs.rmSync(errPath, { force: true });
+  let waits = 0;
+  const seen: Array<{ wait: number; text: string }> = [];
+  const client = fakeHcClient({
+    onCall: ({ method }) => {
+      if (method === "terminal.run") return { ok: true, result: { address: "t7" } };
+      if (method === "terminal.wait") {
+        waits++;
+        if (waits === 1) {
+          fs.appendFileSync(outPath, '{"type":"message_end"}\n');
+          return checkedIn;
+        }
+        fs.appendFileSync(outPath, '{"type":"tool_result_end"}\n');
+        return ended(0);
+      }
+      return { ok: true, result: undefined };
+    },
+  });
+
+  const outcome = await runInTerminal(request, {
+    client,
+    checkInSeconds: 5,
+    onStdout: (text) => seen.push({ wait: waits, text }),
+  });
+
+  assert.deepEqual(seen, [
+    { wait: 1, text: '{"type":"message_end"}\n' },
+    { wait: 2, text: '{"type":"tool_result_end"}\n' },
+  ]);
+  assert.equal(outcome.ok && outcome.stdout, seen.map((each) => each.text).join(""));
+});
+
+test("a silent stretch between check-ins hands over nothing and lets the run finish", async () => {
+  fs.writeFileSync(outPath, "");
+  fs.rmSync(errPath, { force: true });
+  let waits = 0;
+  const seen: Array<{ wait: number; text: string }> = [];
+  const client = fakeHcClient({
+    onCall: ({ method }) => {
+      if (method === "terminal.run") return { ok: true, result: { address: "t7" } };
+      if (method === "terminal.wait") {
+        waits++;
+        if (waits < 3) return checkedIn;
+        fs.appendFileSync(outPath, '{"type":"message_end"}\n');
+        return ended(0);
+      }
+      return { ok: true, result: undefined };
+    },
+  });
+
+  const outcome = await runInTerminal(request, {
+    client,
+    checkInSeconds: 5,
+    onStdout: (delta) => seen.push({ wait: waits, text: delta }),
+  });
+
+  assert.deepEqual(seen, [{ wait: 3, text: '{"type":"message_end"}\n' }]);
+  assert.equal(outcome.ok && outcome.exitCode, 0);
+});

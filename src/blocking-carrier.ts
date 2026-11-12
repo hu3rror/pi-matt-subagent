@@ -35,6 +35,8 @@ export function blockingTerminalName(runId: string): string {
   return `sa-${suffix || "run"}`;
 }
 
+const BLOCKING_TERMINAL_CHECK_IN_SECONDS = 1;
+
 /** The labels a terminal listing is correlated by. */
 export function blockingTerminalLabels(runId: string, role: string): Record<string, string> {
   return { run: runId, kind: "blocking", role };
@@ -101,6 +103,7 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
   const makeRunDir = deps.makeRunDir ?? makeTempRunDir;
   const removeRunDir = deps.removeRunDir ?? removeTempRunDir;
 
+  const checkInSeconds = deps.checkInSeconds ?? BLOCKING_TERMINAL_CHECK_IN_SECONDS;
   return async (spec, opts) => {
     const warn = opts.onWarn ?? (() => {});
     const shell = resolveShell(spec.env);
@@ -127,8 +130,9 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
         {
           client: deps.client,
           signal: opts.signal,
-          checkInSeconds: deps.checkInSeconds,
+          checkInSeconds,
           onStarted: deps.onStarted,
+          onStdout: (delta) => spec.accumulator.onStdout(delta),
         },
       );
 
@@ -147,7 +151,6 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
         );
       }
 
-      spec.accumulator.onStdout(outcome.stdout);
       spec.accumulator.onStderr(outcome.stderr);
       return { exitCode: outcome.exitCode, aborted: false };
     } finally {
