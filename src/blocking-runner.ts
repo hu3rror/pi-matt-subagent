@@ -196,9 +196,9 @@ export async function runBlockingPlan(opts: {
           const current = registry.get(runId);
           if (current && isActiveRunStatus(current.status)) {
             registry.update(runId, {
-              ...(out ? { lastOutput: lastOutputLine(out), usage: partial.usage } : {}),
-              // Model and thinking level are pre-set by the adapter, so they can
-              // land before the first assistant text does (usage cannot).
+              usage: { ...partial.usage },
+              ...(out ? { lastOutput: lastOutputLine(out) } : {}),
+              // Model and thinking level are pre-set by the adapter.
               ...(partial.model ? { model: partial.model } : {}),
               ...(partial.thinkingLevel !== undefined ? { thinkingLevel: partial.thinkingLevel } : {}),
               ...(partial.requestedThinking !== undefined ? { requestedThinking: partial.requestedThinking } : {}),

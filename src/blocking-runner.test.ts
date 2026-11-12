@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Message } from "@earendil-works/pi-ai";
-import { createRunRegistry, isActiveRunStatus, type AgentConfig } from "./lib.ts";
+import { createRunRegistry, isActiveRunStatus, toolErrorDetails, type AgentConfig, type RunEntry } from "./lib.ts";
 import { runBlockingPlan, firstInvalidPlanThinkingLevel, truncateParallelOutput, type RunnerSeam, type SingleResult } from "./blocking-runner.ts";
 
 const noAgents: AgentConfig[] = [];
@@ -588,4 +588,42 @@ test("chain mode forwards each step's thinkingLevel to the runner", async () => 
     { agentName: "a", thinkingLevel: "xhigh" },
     { agentName: "b", thinkingLevel: undefined },
   ]);
+});
+
+test("a progress event with no assistant text still publishes the usage it counted", async () => {
+  const registry = createRunRegistry();
+  const toolCallOnly = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }],
+  } as unknown as Message;
+  let live: RunEntry | undefined;
+  const runner: RunnerSeam = {
+    async runTask(_t, opts) {
+      opts.onProgress({ ...okResult("r1", ""), messages: [toolCallOnly], usage: { ...zeroUsage(), turns: 2, input: 40 } });
+      live = registry.snapshot().at(-1);
+      return okResult("r1", "hello");
+    },
+  };
+  await runBlockingPlan({ plan: { mode: "single", agent: "r1", task: "t" }, runner, registry, agents: noAgents });
+  assert.equal(live?.usage?.turns, 2, "usage lands on the first turn boundary, text or no text");
+  assert.equal(live?.usage?.input, 40);
+  assert.equal(live?.lastOutput, undefined, "the output line still waits for assistant text");
+});
+
+test("a run that fails by throw keeps the usage its progress counted", async () => {
+  const registry = createRunRegistry();
+  const runner: RunnerSeam = {
+    async runTask(_t, opts) {
+      opts.onProgress({ ...okResult("r1", ""), usage: { ...zeroUsage(), turns: 2, input: 40 } });
+      throw new Error("terminal t1 is gone");
+    },
+  };
+  await assert.rejects(
+    runBlockingPlan({ plan: { mode: "single", agent: "r1", task: "t" }, runner, registry, agents: noAgents }),
+    /terminal t1 is gone/,
+  );
+  const error = toolErrorDetails(registry.snapshot(), 0);
+  assert.equal(error?.status, "failed");
+  assert.equal(error?.usage?.turns, 2, "a killed run reports what it spent, not zeros");
+  assert.equal(error?.usage?.input, 40);
 });
