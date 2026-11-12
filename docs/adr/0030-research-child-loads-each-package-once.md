@@ -1,0 +1,22 @@
+# Research child loads each package once, and a failed launch says why
+
+> [ZH] research 子会话按 package ref 去重：装载器保留下来的扩展每个包只留一份（先出现的那份胜出，其余丢掉的安装路径写进运行日志），旋钮里重复的包名同样折叠；`hc` carrier 启动 `pi` 时，对「会话自身 settings 已经装载的包」不再追加 `--extension`——同一包两个安装根会让子进程把工具注册两次，pi 直接拒绝启动。匹配用 package ref（剥掉 `npm:` 前缀与版本区间），所以带版本的旋钮条目照样命中 settings 里的同名包，被跳过的是启动标志而不是装载意图。启动失败时，子进程 stderr 的尾部随失败原因进入推送给调用方的状态文本，日志照旧保留完整 stderr。
+
+Issue #57: a research child dies when `researchChildExtensions` names a package that the session's own settings already load. Two install roots of one package reach the child (`~/.pi/agent/npm/node_modules/…` from settings, `~/.pi/agent/tmp/extensions/npm/<hash>/node_modules/…` from the launched `--extension` flag), the package registers its tools twice, and pi's CLI treats the conflict diagnostic as fatal at startup. ADR 0025 says the child's loadout is exactly the knob's packages; this ADR keeps that intent and adds the missing rule — a package is loaded once, whichever route it arrives by.
+
+## Decision
+
+- **One entry per package ref, everywhere.** `knobExtensionEntries(entries, knob)` keeps the first loader entry that matches a knob package and reports the losing install roots; the in-process child's loader filter and its loadout self-report both go through it, and every dropped root produces a `[loadout] warn` line naming the path. The knob itself is de-duplicated the same way (`partitionExtensionSpecs` collapses two specs that name one package).
+- **Matching is by package ref, not by install path.** `extensionPackageRef` strips the `npm:` prefix and the version range, so `npm:@scope/pkg@2`, `@scope/pkg` and a settings entry `npm:@scope/pkg@1` all refer to one package. It is the only spec→ref rule: the loader filter, the loadout self-report and the tool probe all match install paths through it, so a version-pinned knob entry keeps its tools instead of being reported as not loaded.
+- **The `hc` carrier launches without flags for packages the session's settings already load.** The launched `pi` resolves the same settings, so the package arrives anyway; the run log says which spec was left out. When every entry is skipped the flags are omitted entirely rather than emptied — `buildDispatchArgs` turns an empty list into `--no-extensions` (issue #53), which would drop the settings' packages instead. Two reasons to skip are logged apart: a package the settings already load, and a package the knob itself names twice.
+- **A knob that is still fatal fails loudly with its reason.** A non-zero exit carries the tail of the child's stderr (last 20 lines, truncated readably, marked with `…`) as the run's `errorMessage`; the extension raises a warning notification with it and `researchStatusContent` repeats it in the pushed status, which already points at the run log for the full output.
+- **A settings entry that loads nothing on its own is not "already loaded".** `settingsPackageRefs` skips `packages` entries with `autoload: false`: they start empty and apply only their explicit patterns, so dropping their launch flag would lose the package silently.
+- **The in-process child ignores the settings list.** It resolves its own settings, and its loader filter keeps one entry per package; which root survives follows pi's loader order, which the filter does not reorder.
+
+## Consequences
+
+- Upgrading users hit by the reported crash get a child that starts; the duplicate install is real but no longer fatal.
+- A version range pinned in the knob is advisory on the `hc` carrier: when the settings already load the package, the settings' resolved version wins. The trade is deliberate — the alternative is the crash the issue reports — and the run log names the spec that was left out.
+- A genuine startup failure (a package whose tools really clash with another) still fails the run, now with the child's own words in the warning instead of a bare exit code.
+- A settings entry that carries its own extension allow-list still counts as loading its package: if that filter excludes the extension the knob wanted, the child reports no knob tools (`[loadout] warn`) instead of failing to start — the run log stays the honest surface.
+- ADR 0025's "exactly the knob's packages" now carries this exception: settings-loaded packages are not re-requested, and each package appears once.

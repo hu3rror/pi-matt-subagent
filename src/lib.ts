@@ -1301,15 +1301,6 @@ export const TOOL_ALIASES: Record<string, string> = {
 };
 
 /**
- * The package-name portion of a spec (drops a `npm:` prefix, keeps scoped
- * names whole): `npm:@ssk_dev/pi-web-access-lean` → `@ssk_dev/pi-web-access-lean`.
- * A bare path is returned unchanged.
- */
-export function packageNameOfSpec(spec: string): string {
-  return spec.startsWith("npm:") ? spec.slice(4) : spec;
-}
-
-/**
  * True when a file/extension path lives under `node_modules/<pkg>` (scoped
  * names keep their inner slash). Shared by the research child's loader
  * filter and the tool probe, so both sides of the loadout can never drift.
@@ -1324,6 +1315,83 @@ export function pathIsInsidePackage(filePath: string, pkgName: string): boolean 
   if (idx < 0) return false;
   const rest = norm(filePath).slice(idx + needle.length);
   return rest === "" || rest.startsWith("/");
+}
+
+/**
+ * The package ref a spec names, without its version range (`npm:@s/n@2` →
+ * `@s/n`); any other spec exactly as written.
+ */
+export function extensionPackageRef(spec: string): string {
+  if (!spec.startsWith("npm:")) return spec;
+  const name = spec.slice("npm:".length);
+  const scopeSlash = name.startsWith("@") ? name.indexOf("/") : 0;
+  const versionAt = scopeSlash < 0 ? -1 : name.indexOf("@", scopeSlash + 1);
+  return versionAt > 0 ? name.slice(0, versionAt) : name;
+}
+
+/**
+ * Splits a launch's extension knob into the specs to launch with, the ones the
+ * settings already provide, and the ones an earlier spec already names, one spec
+ * per package; both skipped lists keep knob order so the run log can name them.
+ */
+export function partitionExtensionSpecs(
+  specs: readonly string[],
+  loadedPackageSpecs: readonly string[],
+): { launch: string[]; redundant: string[]; collapsed: string[] } {
+  const loaded = new Set(loadedPackageSpecs.map(extensionPackageRef));
+  const seen = new Set(loaded);
+  const launch: string[] = [];
+  const redundant: string[] = [];
+  const collapsed: string[] = [];
+  for (const spec of specs) {
+    const ref = extensionPackageRef(spec);
+    if (seen.has(ref)) {
+      (loaded.has(ref) ? redundant : collapsed).push(spec);
+      continue;
+    }
+    seen.add(ref);
+    launch.push(spec);
+  }
+  return { launch, redundant, collapsed };
+}
+
+/**
+ * The package refs a session's settings load, from both `packages` entry forms;
+ * an entry with `autoload: false` loads nothing on its own, so it is not one.
+ */
+export function settingsPackageRefs(
+  packages: ReadonlyArray<string | { source: string; autoload?: boolean }> | undefined,
+): string[] {
+  return (packages ?? [])
+    .filter((entry) => typeof entry === "string" || entry.autoload !== false)
+    .map((entry) => extensionPackageRef(typeof entry === "string" ? entry : entry.source));
+}
+
+/**
+ * The extensions a research child keeps: the loader's entries that match a knob
+ * package, one per package ref (the first entry wins; `dropped` holds the rest).
+ */
+export function knobExtensionEntries<T extends { sourceInfo?: { path?: string } }>(
+  entries: readonly T[],
+  knob: readonly string[],
+): { kept: T[]; dropped: T[] } {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  const dropped: T[] = [];
+  for (const entry of entries) {
+    const matched = knob.find((k) =>
+      pathIsInsidePackage(entry.sourceInfo?.path ?? "", extensionPackageRef(k)),
+    );
+    if (matched === undefined) continue;
+    const ref = extensionPackageRef(matched);
+    if (seen.has(ref)) {
+      dropped.push(entry);
+      continue;
+    }
+    seen.add(ref);
+    kept.push(entry);
+  }
+  return { kept, dropped };
 }
 
 /**
@@ -1363,8 +1431,8 @@ export function researchChildToolNames(input: {
   for (const t of input.registryTools) {
     const sourcePath = t.sourcePath ?? "";
     for (const k of input.knob) {
-      if (pathIsInsidePackage(sourcePath, packageNameOfSpec(k))) {
-        packagesHit.add(packageNameOfSpec(k));
+      if (pathIsInsidePackage(sourcePath, extensionPackageRef(k))) {
+        packagesHit.add(extensionPackageRef(k));
         packageToolNames.add(t.name);
         names.add(t.name);
         break;
@@ -1375,7 +1443,7 @@ export function researchChildToolNames(input: {
   return {
     names,
     packageToolNames: [...packageToolNames],
-    packagesNotLoaded: [...new Set(input.knob.map(packageNameOfSpec).filter((p) => !packagesHit.has(p)))],
+    packagesNotLoaded: [...new Set(input.knob.map(extensionPackageRef).filter((p) => !packagesHit.has(p)))],
   };
 }
 
@@ -1508,6 +1576,11 @@ function resolveToolsInternal(
     dropped.push(t);
   }
   return { resolved, dropped };
+}
+
+/** The run-log warning naming a duplicate install root the research child drops. */
+export function duplicateInstallLine(installPath: string): string {
+  return `[loadout] warn · dropped a second install of ${installPath} — the child loads the package once\n`;
 }
 
 /**
@@ -1816,6 +1889,8 @@ export type CreateChildSession = (opts: {
    * so the existing fakes and the dev-only script compile unchanged.
    */
   onToolCall?: (call: ToolCallEvent) => void;
+  /** The package refs the session's settings already load (ADR 0030). */
+  settingsPackageRefs?: string[];
 }) => ResearchChildSession;
 
 /**
@@ -2222,13 +2297,15 @@ export function researchStatusContent(
   status: ResearchExitInfo["status"],
   findingsPath: string,
   logPath?: string,
+  errorMessage?: string,
 ): string {
   const log = logPath ? ` The run log is at ${logPath}.` : "";
+  const reason = errorMessage ? ` The child reported: ${errorMessage}` : "";
   switch (status) {
     case "succeeded":
       return `The background research you started has completed. Read the findings file at ${findingsPath} to collect the results.`;
     case "failed":
-      return `The background research you started failed. Read any partial findings at ${findingsPath} to see what exists.${log}`;
+      return `The background research you started failed. Read any partial findings at ${findingsPath} to see what exists.${reason}${log}`;
     case "terminated":
       return `The background research you started was stopped by its wall-clock limit, so the findings may be truncated. Read them at ${findingsPath} and judge by content.${log}`;
     case "aborted":

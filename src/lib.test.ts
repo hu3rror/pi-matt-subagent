@@ -93,8 +93,12 @@ import {
   TOOL_ALIASES,
   TOOL_CONTRACTS,
   childLoadoutReport,
-  packageNameOfSpec,
+  duplicateInstallLine,
+  extensionPackageRef,
+  knobExtensionEntries,
+  partitionExtensionSpecs,
   pathIsInsidePackage,
+  settingsPackageRefs,
   runStageLine,
   type AgentConfig,
   type FrontmatterParser,
@@ -173,12 +177,6 @@ test("TOOL_ALIASES maps only the fff search names to built-ins", () => {
   assert.deepEqual(TOOL_ALIASES, { ffgrep: "grep", ffind: "find" });
 });
 
-test("packageNameOfSpec strips a npm: prefix and keeps scoped names whole", () => {
-  assert.equal(packageNameOfSpec("npm:@ssk_dev/pi-web-access-lean"), "@ssk_dev/pi-web-access-lean");
-  assert.equal(packageNameOfSpec("npm:@upstash/context7-pi"), "@upstash/context7-pi");
-  assert.equal(packageNameOfSpec("@x/y"), "@x/y");
-});
-
 test("pathIsInsidePackage matches install paths on both separators, scoped and plain", () => {
   assert.ok(
     pathIsInsidePackage(
@@ -200,6 +198,65 @@ test("pathIsInsidePackage rejects other packages, unrelated paths, and prefixes"
   assert.ok(!pathIsInsidePackage("/n/node_modules/pi-web-access-lean2/x.ts", "pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/n/node_modules/@ssk_dev/index.ts", "@ssk_dev/pi-web-access-lean"));
   assert.ok(!pathIsInsidePackage("/tmp/somewhere.ts", "read"));
+});
+
+test("extensionPackageRef drops the version range and keeps other specs as written", () => {
+  assert.equal(extensionPackageRef("npm:@scope/pkg@1.2.0"), "@scope/pkg");
+  assert.equal(extensionPackageRef("npm:pkg"), "pkg");
+  assert.equal(extensionPackageRef("npm:@scope/pkg"), "@scope/pkg");
+  assert.equal(extensionPackageRef("github:owner/repo"), "github:owner/repo");
+});
+
+test("partitionExtensionSpecs launches only what the settings do not already load", () => {
+  assert.deepEqual(partitionExtensionSpecs(["npm:@scope/pkg@1.2.0", "@scope/other"], ["@scope/pkg"]), {
+    launch: ["@scope/other"],
+    redundant: ["npm:@scope/pkg@1.2.0"],
+    collapsed: [],
+  });
+  assert.deepEqual(partitionExtensionSpecs(["a", "b"], []), { launch: ["a", "b"], redundant: [], collapsed: [] });
+  assert.deepEqual(partitionExtensionSpecs(["npm:pkg", "npm:pkg@2"], []), {
+    launch: ["npm:pkg"],
+    redundant: [],
+    collapsed: ["npm:pkg@2"],
+  });
+  assert.deepEqual(partitionExtensionSpecs(["@scope/pkg"], ["npm:@scope/pkg@2"]), {
+    launch: [],
+    redundant: ["@scope/pkg"],
+    collapsed: [],
+  });
+});
+
+test("duplicateInstallLine names the install root the child drops", () => {
+  assert.equal(
+    duplicateInstallLine("/u/.pi/agent/tmp/extensions/npm/ab/node_modules/@scope/pkg/index.js"),
+    "[loadout] warn · dropped a second install of /u/.pi/agent/tmp/extensions/npm/ab/node_modules/@scope/pkg/index.js — the child loads the package once\n",
+  );
+});
+
+test("settingsPackageRefs reads both packages entry forms", () => {
+  assert.deepEqual(settingsPackageRefs(["npm:@scope/a@1", { source: "npm:b" }]), [
+    "@scope/a",
+    "b",
+  ]);
+  assert.deepEqual(settingsPackageRefs(undefined), []);
+  assert.deepEqual(settingsPackageRefs([{ source: "npm:c", autoload: false }, { source: "npm:d", autoload: true }]), [
+    "d",
+  ]);
+});
+
+test("knobExtensionEntries keeps one install per package and names the rest", () => {
+  const settingsRoot = "/home/u/.pi/agent/npm/node_modules/@scope/pkg/dist/index.js";
+  const temporaryRoot = "/home/u/.pi/agent/tmp/extensions/npm/ab12/node_modules/@scope/pkg/dist/index.js";
+  const other = "/home/u/.pi/agent/npm/node_modules/other/dist/index.js";
+  const entries = [
+    { sourceInfo: { path: settingsRoot } },
+    { sourceInfo: { path: other } },
+    { sourceInfo: { path: temporaryRoot } },
+    { sourceInfo: { path: "/home/u/.pi/agent/extensions/subagent.ts" } },
+  ];
+  const result = knobExtensionEntries(entries, ["npm:@scope/pkg@2"]);
+  assert.deepEqual(result.kept, [{ sourceInfo: { path: settingsRoot } }]);
+  assert.deepEqual(result.dropped, [{ sourceInfo: { path: temporaryRoot } }]);
 });
 
 // Issue #43 — the research child's available tool set is built-in names
@@ -662,6 +719,13 @@ test("researchStatusContent flags the wall-clock cut and names the log only when
   assert.ok(!terminated.includes("research.log"), "no log line without a logPath");
   const failed = researchStatusContent("failed", "/tmp/f.md", "/tmp/research.log");
   assert.ok(failed.includes("/tmp/research.log"), "the run log is named when available");
+});
+
+test("researchStatusContent repeats the child's failure reason when the run reported one", () => {
+  const failed = researchStatusContent("failed", "/tmp/f.md", "/tmp/research.log", "exited with code 1: conflict");
+  assert.ok(failed.includes("exited with code 1: conflict"), "the child's complaint reaches the main context");
+  const quiet = researchStatusContent("failed", "/tmp/f.md", "/tmp/research.log");
+  assert.ok(!quiet.includes("reported"), "a run without a reason says nothing about one");
 });
 
 test("scopeAllowsProject is true only for project and both", () => {

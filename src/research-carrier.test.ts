@@ -172,6 +172,95 @@ test("audits tool calls from the child's event stream and passes the extension l
   assert.deepEqual(seenArgs.slice(4, 6), ["--extension", "@scope/pkg"], "the knob's packages load into the child");
 });
 
+test("launches without a knob entry the session's settings already load", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const seenArgs: string[] = [];
+  const session = createHcResearchChildSession(
+    {
+      ...childOpts(path.join(dir, "research.log")),
+      extensions: ["npm:@scope/web-access@1.2.0", "@scope/other"],
+      settingsPackageRefs: ["@scope/web-access"],
+    },
+    {
+      client: runningCore(),
+      sh: "/bin/sh",
+      invocation: (args) => {
+        seenArgs.push(...args);
+        return { command: process.execPath, args: ["-e", "process.exit(0);"] };
+      },
+    },
+  );
+
+  const [output] = await Promise.all([drain(session), session.done]);
+
+  const launched = seenArgs.filter((arg, index) => seenArgs[index - 1] === "--extension");
+  assert.deepEqual(launched, ["@scope/other"], "a package the settings already load needs no second install");
+  assert.match(output, /settings already load npm:@scope\/web-access@1\.2\.0/, "the log names what the child left out");
+});
+
+test("a knob the settings fully cover leaves the extension flags off", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const seenArgs: string[] = [];
+  const session = createHcResearchChildSession(
+    {
+      ...childOpts(path.join(dir, "research.log")),
+      extensions: ["npm:@scope/web-access@1.2.0"],
+      settingsPackageRefs: ["@scope/web-access"],
+    },
+    {
+      client: runningCore(),
+      sh: "/bin/sh",
+      invocation: (args) => {
+        seenArgs.push(...args);
+        return { command: process.execPath, args: ["-e", "process.exit(0);"] };
+      },
+    },
+  );
+
+  await Promise.all([drain(session), session.done]);
+
+  assert.ok(!seenArgs.includes("--extension"), "no flag installs a second copy");
+  assert.ok(!seenArgs.includes("--no-extensions"), "the child still resolves the settings that load the package");
+});
+
+test("a non-zero exit carries the child's stderr as the failure reason", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const session = createHcResearchChildSession(childOpts(path.join(dir, "research.log")), {
+    client: runningCore(),
+    sh: "/bin/sh",
+    invocation: scriptInvocation(
+      'process.stderr.write("conflict: @scope/pkg registered web_access twice\\n"); process.exit(1);',
+    ),
+  });
+
+  const [, failure] = await Promise.all([drain(session), session.done.then(() => undefined, (err: Error) => err)]);
+
+  assert.match(String(failure), /exited with code 1: conflict: @scope\/pkg registered web_access twice/);
+});
+
+test("a long stderr is cut to its last lines and says so", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+  const session = createHcResearchChildSession(childOpts(path.join(dir, "research.log")), {
+    client: runningCore(),
+    sh: "/bin/sh",
+    invocation: scriptInvocation(
+      `process.stderr.write(${JSON.stringify(`${lines.join("\n")}\n`)}); process.exit(1);`,
+    ),
+  });
+
+  const [, failure] = await Promise.all([drain(session), session.done.then(() => undefined, (err: Error) => err)]);
+
+  const reason = String(failure);
+  assert.ok(reason.includes("line 30"), "the newest line survives");
+  assert.ok(!reason.includes("line 9"), "lines past the tail are cut");
+  assert.match(reason, /exited with code 1: …\nline 11/);
+});
+
 test("rejects done on a non-zero exit after flushing the trailing output", async (t) => {
   const dir = researchDir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

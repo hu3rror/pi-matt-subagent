@@ -60,6 +60,7 @@ import {
   configKeySpec,
   defaultConfig,
   discoverAgents,
+  duplicateInstallLine,
   effectiveResearchChildExtensions,
   emptyUsage,
   expandPresetText,
@@ -71,6 +72,7 @@ import {
   isConfigKey,
   isConfigSetKey,
   isTerminalRunStatus,
+  knobExtensionEntries,
   loadWorkflowPreset,
   mergeToolParams,
   omitConfigKey,
@@ -79,14 +81,13 @@ import {
   parseRoleDefaultFieldValue,
   parseRoleDefaultsKey,
   parseSubagentsArgs,
-  packageNameOfSpec,
-  pathIsInsidePackage,
-  runStageLine,
   planRunThinking,
   presetsDirOf,
   readLogTail,
   researchChildToolNames,
   researchStatusContent,
+  runStageLine,
+  settingsPackageRefs,
   RESEARCH_RESULT_SCHEMA,
   RESEARCH_TOOL_DESCRIPTION,
   RESEARCH_TOOL_PARAMS,
@@ -114,6 +115,7 @@ import {
   type AgentFrontmatter,
   type ConfigSetKey,
   type ConfigStatus,
+  type CreateChildSession,
   type DeclaredLevelEntry,
   type FrontmatterParser,
   type ResearchHandle,
@@ -253,18 +255,16 @@ export function createResearchChildSession(opts: {
       // simply never appear in the base's extensions, so the filter drops
       // them harmlessly (the drift report surfaces the consequence).
       const knob = opts.extensions;
-      // One predicate shared by the loader filter below and the loadout
-      // self-report after creation, so the two sides of the knob match can
-      // never drift (same guarantee `pathIsInsidePackage` gives the probe).
-      const isKnobPackage = (e: { sourceInfo?: { path?: string } }) =>
-        knob.some((k) => pathIsInsidePackage(e.sourceInfo?.path ?? "", packageNameOfSpec(k)));
       const loader = new DefaultResourceLoader({
         cwd: opts.cwd,
         agentDir: getAgentDir(),
-        extensionsOverride: (base) => ({
-          ...base,
-          extensions: base.extensions.filter((e) => isKnobPackage(e)),
-        }),
+        extensionsOverride: (base) => {
+          const { kept, dropped } = knobExtensionEntries(base.extensions, knob);
+          for (const entry of dropped) {
+            pushChunk(duplicateInstallLine(entry.sourceInfo?.path ?? entry.path));
+          }
+          return { ...base, extensions: kept };
+        },
         systemPromptOverride: () => opts.systemPrompt,
       });
       await loader.reload();
@@ -340,7 +340,7 @@ export function createResearchChildSession(opts: {
         // misread a healthy loadout as a package failure (observed false
         // negative: `NO knob packages registered` with the packages installed
         // and kept by the filter).
-        const knobExtensions = loader.getExtensions().extensions.filter((e) => isKnobPackage(e));
+        const knobExtensions = knobExtensionEntries(loader.getExtensions().extensions, knob).kept;
         const keptKnobTools = knobExtensions.flatMap((e) => [...e.tools.keys()]);
         for (const line of childLoadoutReport({
           knob,
@@ -1561,7 +1561,7 @@ export default function (pi: ExtensionAPI) {
       // resolves the run `aborted` and the push below delivers the outcome.
       const abortController = new AbortController();
       researchAborts.set(runId, abortController);
-      const researchChildFactory = createResearchChildFactory({
+      const carrierChildFactory = createResearchChildFactory({
         carrier: config.carrier,
         client: getHcClient,
         onStarted: (terminal) => sessionTerminals.track(terminal),
@@ -1581,6 +1581,9 @@ export default function (pi: ExtensionAPI) {
           }),
         onWarn: (message) => notifyWarning(ctx, message),
       });
+      const settingsRefs = settingsPackageRefs(pi.getSettings().packages);
+      const researchChildFactory: CreateChildSession = (childOpts) =>
+        carrierChildFactory({ ...childOpts, settingsPackageRefs: settingsRefs });
 
       let handle: ResearchHandle;
       try {
@@ -1622,7 +1625,7 @@ export default function (pi: ExtensionAPI) {
                 pi.sendMessage(
                   {
                     customType: RESEARCH_STATUS_CUSTOM_TYPE,
-                    content: researchStatusContent(info.status, findingsPath, handle.logPath),
+                    content: researchStatusContent(info.status, findingsPath, handle.logPath, info.errorMessage),
                     display: true,
                     details: {
                       status: info.status,
@@ -1635,6 +1638,9 @@ export default function (pi: ExtensionAPI) {
                 );
               } catch (err) {
                 if (!(err instanceof Error && err.message.includes("stale"))) throw err;
+              }
+              if (info.status === "failed" && info.errorMessage) {
+                notifyWarning(ctx, `research run ${runId} failed: ${info.errorMessage}`);
               }
             },
           },

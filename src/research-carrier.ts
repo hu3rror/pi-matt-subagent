@@ -7,6 +7,7 @@ import type { HcClient } from "./hc-client.ts";
 import {
   buildDispatchArgs,
   getPiInvocation,
+  partitionExtensionSpecs,
   type Carrier,
   type CreateChildSession,
   type ResearchChildSession,
@@ -45,11 +46,16 @@ export function createHcResearchChildSession(
   fs.writeFileSync(promptPath, opts.systemPrompt, { encoding: "utf8", mode: 0o600 });
   const outPath = `${opts.logPath}.terminal.out`;
   const errPath = `${opts.logPath}.terminal.err`;
+  const { launch, redundant: redundantExtensions, collapsed: collapsedExtensions } =
+    partitionExtensionSpecs(opts.extensions, opts.settingsPackageRefs ?? []);
+  // A fully skipped knob omits the flags: an empty list would reach pi as
+  // `--no-extensions` (issue #53) and drop the packages the settings load.
+  const launchExtensions = launch.length === 0 && opts.extensions.length > 0 ? undefined : launch;
   const args = buildDispatchArgs({
     model: modelRef(opts.model),
     thinking: opts.thinkingLevel,
     tools: opts.tools,
-    extensions: opts.extensions,
+    extensions: launchExtensions,
     promptPath,
     task: opts.task,
   });
@@ -73,6 +79,12 @@ export function createHcResearchChildSession(
     ended = true;
     release();
   };
+  if (redundantExtensions.length > 0) {
+    push(`[loadout] info · the session's settings already load ${redundantExtensions.join(", ")}, so the launch leaves it out\n`);
+  }
+  if (collapsedExtensions.length > 0) {
+    push(`[loadout] info · the knob names ${collapsedExtensions.join(", ")} twice, so the launch leaves the repeat out\n`);
+  }
 
   const output = (async function* () {
     while (true) {
@@ -160,7 +172,14 @@ export function createHcResearchChildSession(
         if (result?.ended !== true) continue;
         pump();
         const exitCode = result.exit_code ?? 1;
-        if (exitCode !== 0) throw new Error(`research child exited with code ${exitCode}`);
+        if (exitCode !== 0) {
+          const complaint = stderrTail(errPath);
+          throw new Error(
+            complaint === ""
+              ? `research child exited with code ${exitCode}`
+              : `research child exited with code ${exitCode}: ${complaint}`,
+          );
+        }
         return;
       }
     } finally {
@@ -236,6 +255,21 @@ export function createResearchChildFactory(input: ResearchChildFactoryInput): Cr
 function modelRef(model: unknown): string | undefined {
   const ref = model as { provider?: unknown; id?: unknown } | undefined;
   return typeof ref?.provider === "string" && typeof ref.id === "string" ? `${ref.provider}/${ref.id}` : undefined;
+}
+
+const FAILURE_TAIL_LINES = 20;
+
+function stderrTail(file: string): string {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw err;
+  }
+  const lines = text.split("\n").filter((line) => line.trim() !== "");
+  const tail = lines.slice(-FAILURE_TAIL_LINES);
+  return lines.length > tail.length ? `…\n${tail.join("\n")}` : tail.join("\n");
 }
 
 function readAppended(file: string, offset: number): { bytes: Buffer; offset: number } {
