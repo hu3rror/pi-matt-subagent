@@ -16,8 +16,8 @@
 - **两个工具、两种语义** —— `subagent`（阻塞式）和 `research`（后台式），和上游 skills 的要求对齐。
 - **阻塞式 subagent** —— 在独立子进程中跑单个 / 并行 / 链式 agent；结果一次性全部返回，`chain` 通过 `{previous}` 占位符把上一步的输出传给下一步。
 - **后台 research** —— 进程内第二会话在后台把带引用的调研结果写入文件，你继续干活；完成状态（`succeeded` / `failed` / `terminated` / `aborted`）推回你的会话——不用轮询。
-- **七个内置角色** —— `standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`，以及 `comment-sicko`（只报告不改码的注释审计，配合 `no-comments` 工作流）。
-- **四个斜杠命令** —— `/code-review <ref>`、`/design-it-twice <candidate>`、`/research <question>`，加上用于运行管理的 `/subagents`。
+- **内置角色** —— `standards-reviewer`、`spec-reviewer`、`design-explorer`、`architecture-scout`、`researcher`、`fact-finder`，以及 `comment-sicko`（只报告不改码的注释审计，配合 `no-comments` 工作流）。
+- **斜杠命令** —— `/code-review <ref>`、`/design-it-twice <candidate>`、`/research <question>`，加上用于运行管理的 `/subagents`。
 - **单次运行覆盖** —— 通过公开的 `model` 字段钉住单次运行的模型；思考力度是确定性的（单任务 > 单次调用覆盖 > 会话声明档位 > 按角色定制 > 配置默认 > 角色预设 > 继承主会话档位（原样）），`set-thinking-level` 工具是模型改变它的唯一可见通道。
 - **实时运行管理** —— 页脚计数器（`⧗ N subagents running`），用 `/subagents` 跟踪、停止或查看运行。
 
@@ -33,7 +33,7 @@ pi install npm:pi-matt-subagent
 pi install <path-to-this-repo>
 ```
 
-两种方式都会安装扩展，扩展注册三个 workflow preset（`/code-review`、`/design-it-twice`、`/research`）和 `/subagents` 命令。用 `pi list` 验证；preset 会出现在 TUI 的 `/` 补全里，除非用 `hideWorkflowPresets` 配置隐藏（隐藏后需 `/reload` 生效）。
+两种方式都会安装扩展，扩展注册 workflow preset（`/code-review`、`/design-it-twice`、`/research`）和 `/subagents` 命令。用 `pi list` 验证；preset 会出现在 TUI 的 `/` 补全里，除非用 `hideWorkflowPresets` 配置隐藏（隐藏后需 `/reload` 生效）。
 
 ## 快速上手
 
@@ -51,7 +51,7 @@ pi install <path-to-this-repo>
 | `research` | **后台式** | 进程内第二会话把带引用的调研结果写入文件后立即返回，完成状态推回你的会话——不用轮询。 |
 | `set-thinking-level` | **会话级** | 把主会话的思考级别设为本会话余下部分（上游 `pi.setThinkingLevel`，仅会话级、绝不持久化；新会话从你的全局默认开始）。模型改变思考力度的唯一可见通道——只在用户明确要求不同深度时调用。设置后，请求档位同时成为子代理派发压过配置默认与按角色钉的**声明档位**（issue #40）。 |
 
-两者都接受可选的 `input` 字段：一个承载仍对公开 schema 隐藏的参数的 JSON 对象字符串（`subagent` 的 `thinkingOverride`；`research` 的 `maxWallClockMs`——运行时长上限，只能收紧默认值，默认 60 分钟）。**单次运行的 `model` 覆盖是两个工具上的公开字段**（ADR 0022——隐藏通道被证明不可靠：模型会漏掉它，运行静默回退到配置的默认模型）。
+两者都接受可选的 `input` 字段：一个承载仍对公开 schema 隐藏的参数的 JSON 对象字符串（`subagent` 的 `thinkingOverride`；`research` 的 `maxWallClockMs`——运行时长上限，只能收紧 `researchWallClockMs` 的默认值）。**单次运行的 `model` 覆盖是两个工具上的公开字段**（ADR 0022——隐藏通道被证明不可靠：模型会漏掉它，运行静默回退到配置的默认模型）。
 
 直接字段优先于同名 JSON 键；非法 JSON 会抛出清晰的模型可见错误，合并后的参数在派发前会按完整契约校验。
 
@@ -59,7 +59,7 @@ pi install <path-to-this-repo>
 {
   "task": "review the diff since HEAD~1 for standards compliance",
   "agent": "standards-reviewer",
-  "model": "sensenova/sensenova-6.8-flash-lite"
+  "model": "openai/gpt-x"
 }
 ```
 
@@ -67,7 +67,7 @@ pi install <path-to-this-repo>
 
 模型名按 `provider/id` 形式解析自 `~/.pi/agent/models.json` 注册表；无法解析的名称会大声失败，运行不会启动。
 
-## 四个斜杠命令
+## 斜杠命令
 
 - **`/code-review <ref>`** —— 对自 `<ref>` 起的 diff 做双角度审查（Standards + Spec），用两个并行的阻塞式 subagent 运行。
 - **`/design-it-twice <candidate>`** —— 为一个待加深的候选生成 3–4 个截然不同的接口设计（并行阻塞式 subagent），再按深度、内聚性和边界位置比较。
@@ -76,7 +76,7 @@ pi install <path-to-this-repo>
 
 ## 角色和派发
 
-插件内置七个角色：六个对应 Matt Pocock skills 里描述的岗位，`comment-sicko` 是移植自 pstack `no-comments` 工作流的只报告注释审计（MIT）——它只报告，由调用方动手修。`~/.pi/agent/agents/` 下的用户 agent 和 `.pi/agents/` 下的项目 agent 按名称覆盖内置角色（项目 agent 需要信任确认）。
+插件内置角色：它们对应 Matt Pocock skills 里描述的岗位，`comment-sicko` 是移植自 pstack `no-comments` 工作流的只报告注释审计（MIT）——它只报告，由调用方动手修。`~/.pi/agent/agents/` 下的用户 agent 和 `.pi/agents/` 下的项目 agent 按名称覆盖内置角色（项目 agent 需要信任确认）。
 
 思考力度通过两个正交层级确定性解析。决策源层级是 **单任务/单步 `thinkingLevel` > 单次调用覆盖（`input.thinkingOverride`）> 声明（会话声明档位——转录里最后一个 `set-thinking-level` 调用的请求值，粘性跨换模型与续会话）> `roleDefaults` 按角色档位 > 配置默认（`dispatchDefaultThinkingLevel`）> 角色预设 > 继承**（主会话档位**原样透传**——你声明的深度如 `xhigh` 会原样传给无预置角色）。结果再经过目标模型的能力钳制（`clampThinkingLevel`，向上优先）——请求档与生效档双记录，被钳制时显示如 `high (req: xhigh)`。公开的 `thinkingLevel` 参数已移除（它是随机性的来源）；模型改变力度的唯一可见通道是 `set-thinking-level` 工具，仅在用户明确要求不同深度时调用。钉了模型的角色（frontmatter/embedded 或 `roleDefaults.<role>.model`）只跳过继承层。派发模型两个工具一致按 per-call 优先解析——per-call 覆盖 > 角色钉的模型 > `roleDefaults` 模型 > 配置默认 > 继承主会话模型。
 
@@ -89,13 +89,13 @@ pi install <path-to-this-repo>
 | `maxTasksPerCall` | 8 | 单次调用的任务上限——并行任务**和**链式步骤都算；超限拒绝调用 |
 | `maxConcurrency` | 4 | 并行模式下同时运行的 subagent 进程数上限 |
 | `perTaskOutputCap` | 50 KiB | 并行聚合中单个任务摘要输出的字节上限 |
-| `researchWallClockMs` | 45 分钟 | 后台 research 的默认运行时长上限，也是 `input.maxWallClockMs` 的硬上限（已显式配置的旧值会压过新默认——重置该键才能拿到 45 分钟） |
+| `researchWallClockMs` | 45 分钟 | 后台 research 的默认运行时长上限，也是 `input.maxWallClockMs` 的硬上限（显式配置的值会压过默认——重置该键才能拿到默认值） |
 | `researchChildExtensions` | `[]`（安静默认） | research 子会话装载的 npm 包；空列表即安静默认（只有内置工具、无网络）。配置了包之后，包的工具**自动**进入子会话——一步完成，无需改角色。`set` 接受逗号列表；`config reset researchChildExtensions` 回到安静默认 |
 | `logTailBytes` | 4096 | `/subagents tail` 读取日志的字节上限 |
 | `dispatchDefaultModel` | （继承） | 调用和角色都未指定时的默认 `provider/id` |
-| `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对七个内置角色生效，不再是死配置）；未设时 → 继承主会话档位（原样） |
+| `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对内置角色生效）；未设时 → 继承主会话档位（原样） |
 | `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
-| `hideWorkflowPresets` | `false` | 隐藏三个内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）——适合已安装对应 skills（覆盖同一工作流）的用户。扩展加载时读取，需 `/reload` 生效。不影响三个工具与 `/subagents` |
+| `hideWorkflowPresets` | `false` | 隐藏内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）——适合已安装对应 skills（覆盖同一工作流）的用户。扩展加载时读取，需 `/reload` 生效。不影响工具与 `/subagents` |
 | `carrier` | `spawn` | blocking 子agent 与后台 research 在哪里运行：`spawn`（pi 自己的管道，默认）或 `hc`（在运行中的 herdr-core 上开一个名为 `sa-<run id>` 的终端，可列出、attach、kill）。`hc` 需要可达的 core 与 POSIX `sh`：blocking run 缺任一都告警并回退到 `spawn`；research run 只在缺 `sh` 时回退（core 起不了终端则判该次 run 失败）。分发时读取，无需 `/reload` |
 
 `hideWorkflowPresets` 开启后，输入被隐藏的 preset 名称与任何未知 `/` 命令一样：文本原样发给模型。
@@ -119,7 +119,7 @@ pi install <path-to-this-repo>
 
 ## Research 子会话扩展（信任判据）
 
-后台 research 子会话启动时**只带 pi 的内置工具**——绝不复用主会话的完整扩展集，也不装载任何你没点名的扩展包。要给 researcher 网页/库文档查询能力，把包放进 `researchChildExtensions` 旋钮，包提供的工具会**自动**进入子会话：不用改任何角色文件、没有第二步。两个经过审查的示例包：`npm:@ssk_dev/pi-web-access-lean`（网页搜索/抓取，提供 `web_access`）与 `npm:@upstash/context7-pi`（库文档，提供 `query-docs` / `resolve-library-id`）。
+后台 research 子会话启动时**只带 pi 的内置工具**——绝不复用主会话的完整扩展集，也不装载任何你没点名的扩展包。要给 researcher 网页/库文档查询能力，把包放进 `researchChildExtensions` 旋钮，包提供的工具会**自动**进入子会话：不用改任何角色文件、没有第二步。经过审查的示例包：`npm:@ssk_dev/pi-web-access-lean`（网页搜索/抓取，提供 `web_access`）与 `npm:@upstash/context7-pi`（库文档，提供 `query-docs` / `resolve-library-id`）。
 
 这是一条**精心维护的信任判据，而不是默认装载清单**。一个包要获得推荐，必须满足：只读、无外部写副作用、外部成本明确且低、服务于一手来源检案（官网/库文档）。
 
@@ -136,12 +136,11 @@ pi install <path-to-this-repo>
 ```
 
 - **安静默认** —— 空的 `researchChildExtensions` 什么都不装载：子会话只有内置工具、无网络、无警告，运行日志写 `[loadout] info · no query packages configured`。本旋钮不再有 `inherit`（没有可继承的东西）；只剩 `set`（逗号列表）与 `reset`。
-- **升级须知（既有用户）** —— 此改动之前 research 子会话默认装载两个包，所以升级后你的 research 子会话会失去网页/库文档能力，直到你配置该旋钮。这正是设计意图：包现在是选择，不是默认。
 - **更细的控制** —— 在 `~/.pi/agent/agents/researcher.md` 建用户代理覆盖内置 researcher 角色（frontmatter `tools:` + 正文；同名覆盖生效，runner 仍会附加 findings 路径/墙钟/checkpoint 规则），精确钉住声明的工具。
 
 **报错形态与处置**。当声明的工具无法装载（包未安装、被 knob 关闭、或平台不可能——例如非 Windows 上的 `powershell`），运行照常启动但该工具不会出现在子会话里：research 工具返回文本与运行日志会带一条 `⚠ Declared but not loaded: …` 漂移提示，researcher 的 prompt 只列出它真正拥有的工具。忽略提示的症状：researcher 模型瞎猜工具名然后死循环。处置：安装该包、把 knob 指向它、或从角色上删掉该工具。另外，knob 里的包一个工具都没注册时，运行日志会写 `[loadout] warn · no tools loaded from knob packages (…)` 并点名该包。
 
-**如何阅读 research 运行日志——每一行是什么**。每次运行的日志（`logPath`，用 `/subagents tail <id>` 看尾部）混着四类内容，其中只有一类是运行结果：
+**如何阅读 research 运行日志——每一行是什么**。每次运行的日志（`logPath`，用 `/subagents tail <id>` 看尾部）混着多种内容，其中只有一种是运行结果：
 
 | 行 | 来源 | 说明什么 | 不等于什么 |
 |---|---|---|---|
@@ -155,15 +154,15 @@ pi install <path-to-this-repo>
 ## 项目结构
 
 ```
-extensions/subagent.ts         pi 扩展：注册两个工具、运行注册表 UI、进程内 research 子会话工厂
+extensions/subagent.ts         pi 扩展：注册工具、运行注册表 UI、进程内 research 子会话工厂
 src/lib.ts                     纯逻辑——角色、工具 schema（唯一事实来源）、input 合并/校验、
                                工具名解析、research runner、运行注册表记账；零 pi 运行时依赖
 src/blocking-protocol.ts       纯阻塞子进程协议：JSON-lines stdout 累加、usage 跟踪、渐进式 kill
 src/blocking-runner.ts         纯阻塞编排——单个 / 并行 / 链式计划
 src/*.test.ts                  单元测试（node --test，不需要 pi 运行时）
 scripts/                       token 基准和 e2e 脚本（仅开发用）
-prompts/                       三个 workflow preset 的 markdown 源（扩展加载时读取）
-docs/adr/                      19 条已记录的决策（双通道、research 重构、配置面、usage 行……）
+prompts/                       workflow preset 的 markdown 源（扩展加载时读取）
+docs/adr/                      架构决策记录
 GLOSSARY.md                    领域词汇表（subagent、role、blocking、background、push……）
 ```
 
@@ -174,4 +173,4 @@ npm test          # 单元测试，不需要 pi 运行时
 npm run typecheck # 扩展、lib 和脚本的类型检查
 ```
 
-扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`、`scripts/a-axis-e2e.ts`、`scripts/research-teardown-e2e.ts`、`scripts/hc-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献（`subagent` / `research` / `set-thinking-level` 约 486 / 398 / 104 tokens），并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。
+扩展只是 `src/lib.ts` 的薄消费者；测试覆盖的是其中的纯函数（派发参数组装、工具解析、`input` 合并/校验、工具面契约）。真实 pi 的 e2e 脚本（`scripts/push-e2e.ts`、`scripts/blocking-e2e.ts`、`scripts/a-axis-e2e.ts`、`scripts/research-teardown-e2e.ts`、`scripts/hc-e2e.ts`）覆盖单元测试涉及不到的进程接线；`node scripts/benchmark-tools.ts` 测量工具面的 token 贡献，并有回归测试守护。`node scripts/apply-skill-patch.ts` 在 mattpocock 上游同步后，把 ADR 0013 的补丁文本重新应用到已安装的 skills。

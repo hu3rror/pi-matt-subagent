@@ -11,10 +11,9 @@
  * contribution) and writes the per-tool char/token numbers. Tokens are the
  * fixed ceil(chars / 4) character-proxy estimate, not a provider tokenizer.
  *
- * Prints the README table rows (annotated with measurement date and pi
- * version) and the guard-test baseline constants to paste into
- * src/lib.test.ts. Not part of `npm test`; run manually whenever the
- * registered surface changes and paste the fresh numbers.
+ * Prints the guard-test baseline constants to paste into src/lib.test.ts. Not
+ * part of `npm test`; run manually whenever the registered surface changes and
+ * paste the fresh numbers.
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -91,10 +90,5 @@ for (const name of ["subagent", "research", "set-thinking-level"]) {
     `  ${name}: ${measured[name].tokens},  ceiling (× ${TOKEN_GUARD_MULTIPLIER}): ${Math.ceil(measured[name].tokens * TOKEN_GUARD_MULTIPLIER)}`,
   );
 }
-console.log("");
-console.log("README table rows:");
-console.log(`| \`subagent\` | description + parameter schema | **${measured.subagent.tokens}** |`);
-console.log(`| \`research\` | description + parameter schema | **${measured.research.tokens}** |`);
-console.log(`| \`set-thinking-level\` | description + parameter schema | **${measured["set-thinking-level"].tokens}** |`);
 console.log("");
 console.log("Measured with pi " + version + " in a separate temporary process with empty working directory and configuration.");

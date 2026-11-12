@@ -33,7 +33,7 @@ Lightweight subagents facades go further: they collapse the whole model-facing s
 ## Consequences
 
 - The model-facing surface grows by exactly one optional `input` field per tool; the call shape is otherwise unchanged.
-- The footprint is now measured and guarded: a token benchmark (Seam E, `scripts/benchmark-tools.ts`) feeds the README table, and a test asserts the serialized surface stays within baseline × 1.2.
+- The footprint is now measured and guarded: a token benchmark (Seam E, `scripts/benchmark-tools.ts`) prints the baseline, and a test asserts the serialized surface stays within baseline × 1.2.
 - Parameter schemas move into the runtime-free lib module; the extension's inline TypeBox definitions are gone. `typebox` becomes a devDependency (it was already a peerDependency) so the lib module and its tests resolve under `node --test`.
 - Merge/validation logic is pure and unit-tested under `node --test` (Seam A); the surface contract is asserted at the lib seam (Seam D, Path 1 — no fake pi).
 - One behavioral note: because the full contract rejects unknown keys, `input` cannot smuggle arbitrary keys past validation — the loud-failure guarantee cuts both ways.
