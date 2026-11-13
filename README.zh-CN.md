@@ -96,7 +96,7 @@ pi install <path-to-this-repo>
 | `dispatchDefaultThinkingLevel` | （继承） | 高于角色预设的默认思考级别（issue #39——对内置角色生效）；未设时 → 继承主会话档位（原样） |
 | `roleDefaults` | （继承） | 按角色的派发定制：`{ "<role>": { model?, thinkingLevel? } }`。`roleDefaults.<role>.thinkingLevel` 压过配置默认与角色自身预设；`roleDefaults.<role>.model` 压过配置默认模型。用点分键编辑：`config set roleDefaults.standards-reviewer.thinkingLevel low` |
 | `hideWorkflowPresets` | `false` | 隐藏内置 workflow preset（`/code-review`、`/design-it-twice`、`/research`）——适合已安装对应 skills（覆盖同一工作流）的用户。扩展加载时读取，需 `/reload` 生效。不影响工具与 `/subagents` |
-| `carrier` | `spawn` | blocking 子agent 与后台 research 在哪里运行：`spawn`（pi 自己的管道，默认）或 `hc`（在运行中的 herdr-core 上开一个名为 `sa-<run id>` 的终端，可列出、attach、kill）。`hc` 需要可达的 core 与 POSIX `sh`：blocking run 缺任一都告警并回退到 `spawn`；research run 只在缺 `sh` 时回退（core 起不了终端则判该次 run 失败）。分发时读取，无需 `/reload` |
+| `carrier` | `spawn` | blocking 子agent 与后台 research 在哪里运行：`spawn`（pi 自己的管道，或进程内子会话，默认）或 `hc`（在运行中的 herdr-core 上开一个名为 `sa-<run id>` 的终端，带 `kind=blocking` 或 `kind=research` 标签，可列出、attach、kill）。`hc` 需要可达的 core 与 POSIX `sh`、`tee`：blocking run 缺任一都告警并回退到 `spawn`；research run 只在缺 `sh` 时回退（core 起不了终端则判该次 run 失败）。派发时读取，无需 `/reload`；找、看、杀一个 run 见[运行管理 `hc` run](#运行管理-hc-run) |
 
 `hideWorkflowPresets` 开启后，输入被隐藏的 preset 名称与任何未知 `/` 命令一样：文本原样发给模型。
 
@@ -116,6 +116,21 @@ pi install <path-to-this-repo>
 ```
 
 `set` 把生效值写入文件；`reset` 移除单个键（回到该键的默认值）或整个文件。点分 `roleDefaults.<role>.<field>` 键编辑嵌套旋钮；reset 点分键只移除该字段（清空的角色自动剪除）。非法条目会把对应键回退为默认值，并在配置视图中标记 `[degraded]`。
+
+## 运行管理 `hc` run
+
+把 `carrier` 设为 `hc` 后，run 会开在自己的终端里；主机缺前置条件时按上面 carrier 那一行所述回退或失败。终端名为 `sa-<run id 前 8 位>`，并带三个标签：`run`（run id）、`kind`（`blocking` 或 `research`）、`role`。
+
+- **找到它** —— `hc ls --label kind=blocking`（或 `kind=research`）列出 run 终端，加 `--all` 连已结束的也列；`hc get <终端> --json` 显示该终端的标签、argv、退出码与原因。
+- **只读旁观** —— `hc attach <终端> --observe` 镜像屏幕，不向子进程输入；`Ctrl+\` 断开。
+- **向它输入** —— 不带 `--observe` 的 `hc attach <终端>` 会把你的按键送进子进程。在那里按 `Ctrl+C` 会杀掉该 run，它落 `failed`（终端记录 `reason=exited`、`signal=2`），不是 `aborted`。
+- **杀掉它** —— `hc kill <终端>`，run 落 `failed`，终端记录 `reason=killed`。已结束的终端留在 `hc ls --all` 里，直到 `hc rm <终端>`。
+- **会话结束** —— 本会话起过的终端在 `session_shutdown` 时逐个 kill，落定为 `finished` 后再 rm（ADR 0028）；kill 失败则告警并留在列表里。pi 被硬杀（SIGKILL、崩溃）走不到这条路：那些终端会留下，恢复方式是 `hc ls --all` 加手工 `hc kill`/`hc rm`。
+- **失败 run 的产物** —— `hc` 的 blocking run 失败时保留它的 `pi-hc-run-*` 目录，失败退出时路径出现在结果的 `details.results[i].runDir`（中止或丢 core 时改由 warn 行或错误信息点名）。目录内有 `stdout.jsonl`（子进程事件流）、`stderr.log`、`stdout.jsonl.exit`（shell 脚本写的退出码 sidecar）。没有东西会清扫这些目录，删除由你负责；成功的 run 会自己删掉。
+
+### `hc` 子进程里的权限询问
+
+blocking 子进程的环境带着 `PI_SUBAGENT_PARENT_SESSION=<你的会话 id>`，终端会继承它。装了权限系统时，子进程里触发的 `ask` 会转发到该会话的收件箱，所以提示出现在派发这次 run 的会话里，而不是终端里。只有带 UI 的会话才能服务这个收件箱：没有 UI 的会话无法作答，子进程的工具调用会直接失败，而不是弹提示。research 子进程不带这个标记，它里面的 `ask` 目前没有转发路径（ADR 0029）。
 
 ## Research 子会话扩展（信任判据）
 

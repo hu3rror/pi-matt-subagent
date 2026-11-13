@@ -96,7 +96,7 @@ Behavioral knobs live in a lazily-created file at `~/.pi/agent/extensions/matt-s
 | `dispatchDefaultThinkingLevel` | (inherit) | Default thinking level above the role preset (issue #39 — live for the embedded roles); absent → inherited (main-session level as-is) |
 | `roleDefaults` | (inherit) | Per-role dispatch customization: `{ "<role>": { model?, thinkingLevel? } }`. `roleDefaults.<role>.thinkingLevel` beats the config default and the role's own preset; `roleDefaults.<role>.model` beats the config default model. Edit via dotted keys: `config set roleDefaults.standards-reviewer.thinkingLevel low` |
 | `hideWorkflowPresets` | `false` | Hides the workflow presets (`/code-review`, `/design-it-twice`, `/research`) from `/` completion — for users with the matching skills installed, which cover the same workflows. Read at extension load, so needs `/reload`. Never gates the tools or `/subagents` |
-| `carrier` | `spawn` | Where a blocking child and a background research child run: `spawn` (pi's own pipe, or the in-process session, the default) or `hc` (a named `sa-<run id>` terminal on a running herdr-core, labelled `kind=blocking` or `kind=research`, so you can list, attach to, or kill it). `hc` needs a reachable core, a POSIX `sh` and `tee`: a blocking run without any of them warns and falls back to `spawn`, while a research run falls back only when `sh` is missing (a core that cannot take the terminal fails that run). Read at dispatch, no `/reload`. Watch one read-only with `hc attach <terminal> --observe` (detach: `Ctrl+\`); a plain `hc attach` types into the child, so `Ctrl+C` there kills the run and it lands `failed`, not `aborted` |
+| `carrier` | `spawn` | Where a blocking child and a background research child run: `spawn` (pi's own pipe, or the in-process session, the default) or `hc` (a named `sa-<run id>` terminal on a running herdr-core, labelled `kind=blocking` or `kind=research`, so you can list, attach to, or kill it). `hc` needs a reachable core, a POSIX `sh` and `tee`: a blocking run without any of them warns and falls back to `spawn`, while a research run falls back only when `sh` is missing (a core that cannot take the terminal fails that run). Read at dispatch, no `/reload`; see [Operating an `hc` run](#operating-an-hc-run) for finding, watching and killing one |
 
 When `hideWorkflowPresets` is on, typing a hidden preset name behaves like any unknown `/` command: the text goes to the model unchanged.
 
@@ -116,6 +116,21 @@ Drive it from `/subagents config`:
 ```
 
 `set` writes the effective value to the file; `reset` removes one key (back to that knob's default) or the whole file. Dotted `roleDefaults.<role>.<field>` keys edit the nested knob; resetting a dotted key removes just that field (an emptied role prunes itself). Invalid entries degrade that key to its default and are flagged `[degraded]` in the config view.
+
+## Operating an `hc` run
+
+With `carrier` set to `hc`, a run starts in a terminal of its own; a host missing a prerequisite falls back or fails as the carrier row above describes. The terminal is named `sa-<the run id's first 8 characters>` and carries three labels: `run` (the run id), `kind` (`blocking` or `research`) and `role`.
+
+- **Find it** — `hc ls --label kind=blocking` (or `kind=research`) lists the run terminals; `--all` includes finished ones. `hc get <terminal> --json` shows that terminal's labels, argv, exit code and reason.
+- **Watch it read-only** — `hc attach <terminal> --observe` mirrors the screen without typing into the child; `Ctrl+\` detaches.
+- **Type into it** — `hc attach <terminal>` without `--observe` sends your keystrokes to the child. `Ctrl+C` there kills the run, which lands `failed` (the terminal records `reason=exited`, `signal=2`), not `aborted`.
+- **Kill it** — `hc kill <terminal>`; the run lands `failed`, and the terminal records `reason=killed`. A finished terminal stays in `hc ls --all` until `hc rm <terminal>`.
+- **Session shutdown** — the terminals this session started are killed, then removed once finished, on `session_shutdown` (ADR 0028); a kill that fails warns and leaves the terminal in the list. A hard kill of pi (SIGKILL, crash) skips that path: those terminals stay, and `hc ls --all` with a manual `hc kill`/`hc rm` is the recovery.
+- **A failed run's artifacts** — an `hc` blocking run that fails keeps its `pi-hc-run-*` directory, and a failed exit names it on the result at `details.results[i].runDir` (an abort or a lost core names it in the warn line or the error message instead). It holds `stdout.jsonl` (the child's event stream), `stderr.log`, and `stdout.jsonl.exit` (the sidecar the shell script wrote). Nothing sweeps these directories, so removing them is your job; a successful run removes its own.
+
+### Permission asks inside an `hc` child
+
+A blocking child's environment carries `PI_SUBAGENT_PARENT_SESSION=<your session id>`, and the terminal inherits it. Under a loaded permission system, an `ask` raised inside the child is forwarded to that session's inbox, so the prompt appears in the session that dispatched the run rather than in the terminal. Only a session with a UI serves that inbox: a session without one cannot answer the ask, and the child's tool call fails instead of prompting. A research child carries no such marker, so an `ask` inside it has no forwarding path today (ADR 0029).
 
 ## Research child extensions (trust surface)
 
