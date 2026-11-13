@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
@@ -35,6 +35,16 @@ process.exit(3);
 `;
 
 const invocation = { command: process.execPath, args: ["-e", CHILD_SCRIPT] };
+
+const runDirs: string[] = [];
+function trackedRunDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hc-run-test-"));
+  runDirs.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of runDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 const task: RunnerTask = { agentName: "general", task: "say hello" };
 
 function readySpec(runId: string): ChildSpec {
@@ -137,14 +147,16 @@ test("a run's terminal is named and labelled for its run id", () => {
 test("the carrier seam assembles the same result over spawn and hc (parity)", async () => {
   const overSpawn = createCarrierRunner({ transport: spawnTransport, prepare: () => ready("run-parity") });
   const overHc = createCarrierRunner({
-    transport: createHcTransport({ client: runningCore(), findShell: () => "/bin/sh" }),
+    transport: createHcTransport({ client: runningCore(), findShell: () => "/bin/sh", makeRunDir: trackedRunDir }),
     prepare: () => ready("run-parity"),
   });
 
   const spawned = await overSpawn.runTask(task, { onProgress: () => {}, runId: "run-parity" });
   const carried = await overHc.runTask(task, { onProgress: () => {}, runId: "run-parity" });
 
-  assert.deepEqual(carried, spawned);
+  const { runDir: keptDir, ...carriedRest } = carried;
+  assert.equal(typeof keptDir, "string", "the failed run names the directory it kept");
+  assert.deepEqual(carriedRest, spawned);
   assert.equal(carried.exitCode, 3);
   assert.equal((carried.messages[0] as unknown as { content: Array<{ text: string }> }).content[0].text, "hello");
   assert.equal(carried.usage.turns, 1);
@@ -168,7 +180,7 @@ test("progress events reach the accumulator over the hc carrier", async () => {
     return seen;
   };
   let seen: string[] = [];
-  const transport = createHcTransport({ client: runningCore(), findShell: () => "/bin/sh" });
+  const transport = createHcTransport({ client: runningCore(), findShell: () => "/bin/sh", makeRunDir: trackedRunDir });
   const runner = createCarrierRunner({
     transport,
     prepare: () => {
@@ -201,7 +213,7 @@ test("an hc run reports usage while it is live and counts each event once", asyn
   let ended = false;
   const live: number[] = [];
   const runner = createCarrierRunner({
-    transport: createHcTransport({ client: coreStaysLiveUntilChildExit(() => (ended = true)), findShell: () => "/bin/sh" }),
+    transport: createHcTransport({ client: coreStaysLiveUntilChildExit(() => (ended = true)), findShell: () => "/bin/sh", makeRunDir: trackedRunDir }),
     prepare: (): PrepareOutcome => ({
       kind: "ready",
       prepared: {
@@ -350,7 +362,124 @@ test("a core lost mid-run fails the run, naming the terminal and the run id", as
     return true;
   });
   assert.equal(waits, 1);
-  assert.equal(fs.existsSync(dir), false, "the per-run temp dir is removed");
+  assert.equal(fs.existsSync(dir), true, "the lost run's temp dir is kept for post-mortem");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an hc run that fails keeps its directory and names it on the result", async () => {
+  let dir = "";
+  const transport = createHcTransport({
+    client: runningCore(),
+    findShell: () => "/bin/sh",
+    makeRunDir: () => (dir = fs.mkdtempSync(path.join(os.tmpdir(), "carrier-keep-"))),
+  });
+
+  const outcome = await transport(readySpec("run-keep-fail"), {});
+  assert.equal(outcome.exitCode, 3);
+  assert.equal(outcome.runDir, dir);
+  assert.equal(fs.existsSync(path.join(dir, "stdout.jsonl")), true, "the transcript survives the failed run");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an hc run that succeeds removes its directory and reports nothing", async () => {
+  let dir = "";
+  const removed: string[] = [];
+  const transport = createHcTransport({
+    client: runningCore(),
+    findShell: () => "/bin/sh",
+    makeRunDir: () => (dir = fs.mkdtempSync(path.join(os.tmpdir(), "carrier-drop-"))),
+    removeRunDir: (target) => {
+      removed.push(target);
+      fs.rmSync(target, { recursive: true, force: true });
+    },
+  });
+  const spec = {
+    ...readySpec("run-keep-ok"),
+    invocation: { command: process.execPath, args: ["-e", 'process.stdout.write("{}+\\n");'] },
+  };
+
+  const outcome = await transport(spec, {});
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.runDir, undefined);
+  assert.deepEqual(removed, [dir]);
+});
+
+test("an aborted hc run keeps its directory and names it in the warn line", async () => {
+  const controller = new AbortController();
+  let dir = "";
+  const warnings: string[] = [];
+  const transport = createHcTransport({
+    client: {
+      call: async (method) => {
+        if (method === "terminal.run") return { ok: true, result: { address: "t7" } };
+        if (method === "terminal.wait") {
+          controller.abort();
+          return { ok: false, failure: "killed", message: "aborted" };
+        }
+        return { ok: true, result: undefined };
+      },
+      capabilities: () => undefined,
+      dispose: async () => {},
+    },
+    findShell: () => "/bin/sh",
+    findTee: () => "/usr/bin/tee",
+    makeRunDir: () => (dir = fs.mkdtempSync(path.join(os.tmpdir(), "carrier-abort-"))),
+  });
+
+  const outcome = await transport(readySpec("run-abort-keep"), {
+    onWarn: (message) => warnings.push(message),
+    signal: controller.signal,
+  });
+  assert.deepEqual(outcome, { exitCode: 1, aborted: true });
+  assert.equal(fs.existsSync(dir), true, "the aborted run's transcript survives");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /transcript kept at /);
+  assert.match(warnings[0] ?? "", new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("the carrier runner puts a failed run's directory on the result", async () => {
+  const runner = createCarrierRunner({
+    transport: async () => ({ exitCode: 1, aborted: false, runDir: "/tmp/pi-hc-run-example" }),
+    prepare: () => ready("run-dir-1"),
+  });
+
+  const result = await runner.runTask(task, { onProgress: () => {}, runId: "run-dir-1" });
+  assert.equal(result.runDir, "/tmp/pi-hc-run-example");
+});
+
+test("a host without tee falls back to spawn before a terminal is started", async () => {
+  const calls: string[] = [];
+  const warnings: string[] = [];
+  let dirs = 0;
+  let removed: string[] = [];
+  const transport = createHcTransport({
+    client: {
+      call: async (method) => {
+        calls.push(method);
+        return { ok: true, result: undefined };
+      },
+      capabilities: () => undefined,
+      dispose: async () => {},
+    },
+    findShell: () => "/bin/sh",
+    findTee: () => undefined,
+    makeRunDir: () => {
+      dirs++;
+      return "/tmp/pi-hc-run-unused";
+    },
+    removeRunDir: (target) => {
+      removed.push(target);
+    },
+    fallback: async () => ({ exitCode: 0, aborted: false }),
+  });
+
+  const outcome = await transport(readySpec("run-no-tee"), { onWarn: (message) => warnings.push(message) });
+  assert.deepEqual(outcome, { exitCode: 0, aborted: false });
+  assert.deepEqual(calls, []);
+  assert.match(warnings[0] ?? "", /no tee/);
+  assert.equal(dirs, 0, "no run directory is created when the host cannot mirror output");
+  assert.deepEqual(removed, []);
 });
 
 test("the hc carrier kills the terminal when the run is aborted", async () => {
@@ -373,7 +502,7 @@ test("the hc carrier kills the terminal when the run is aborted", async () => {
     dispose: async () => {},
   };
   const runner = createCarrierRunner({
-    transport: createHcTransport({ client: core, findShell: () => "/bin/sh" }),
+    transport: createHcTransport({ client: core, findShell: () => "/bin/sh", makeRunDir: trackedRunDir }),
     prepare: () => ready("run-kill"),
   });
 
@@ -403,6 +532,7 @@ test("the hc carrier reports each started terminal to the session teardown", asy
     transport: createHcTransport({
       client: core,
       findShell: () => "/bin/sh",
+      makeRunDir: trackedRunDir,
       onStarted: (terminal) => tracked.push(terminal),
     }),
     prepare: () => ready("run-track"),
@@ -431,7 +561,7 @@ test("the hc carrier warns when an aborted run's terminal cannot be killed", asy
     dispose: async () => {},
   };
   const runner = createCarrierRunner({
-    transport: createHcTransport({ client: core, findShell: () => "/bin/sh" }),
+    transport: createHcTransport({ client: core, findShell: () => "/bin/sh", makeRunDir: trackedRunDir }),
     prepare: () => ready("run-orphan"),
     onWarn: (message) => warnings.push(message),
   });

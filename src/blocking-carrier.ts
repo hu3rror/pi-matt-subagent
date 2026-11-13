@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { escalateKill, type BlockingResultAccumulator, type SingleResult } from "./blocking-protocol.ts";
 import type { RunnerSeam, RunnerTask } from "./blocking-runner.ts";
 import type { HcClient } from "./hc-client.ts";
-import { findSh, runInTerminal, type TerminalInvocation } from "./terminal-run.ts";
+import { findSh, findTee, runInTerminal, type TerminalInvocation } from "./terminal-run.ts";
 
 export interface ChildSpec {
   invocation: TerminalInvocation;
@@ -26,6 +26,7 @@ export interface ChildRunOptions {
 export interface ChildOutcome {
   exitCode: number;
   aborted: boolean;
+  runDir?: string;
 }
 
 export type ChildTransport = (spec: ChildSpec, opts: ChildRunOptions) => Promise<ChildOutcome>;
@@ -80,6 +81,7 @@ export interface HcTransportDeps {
   client: HcClient;
   fallback?: ChildTransport;
   findShell?: (env: NodeJS.ProcessEnv) => string | undefined;
+  findTee?: (env: NodeJS.ProcessEnv) => string | undefined;
   makeRunDir?: () => string;
   removeRunDir?: (dir: string) => void;
   /** Seconds per `terminal.wait` check-in. */
@@ -100,6 +102,7 @@ function removeTempRunDir(dir: string): void {
 export function createHcTransport(deps: HcTransportDeps): ChildTransport {
   const fallback = deps.fallback ?? spawnTransport;
   const resolveShell = deps.findShell ?? ((env: NodeJS.ProcessEnv) => findSh(env));
+  const resolveTee = deps.findTee ?? findTee;
   const makeRunDir = deps.makeRunDir ?? makeTempRunDir;
   const removeRunDir = deps.removeRunDir ?? removeTempRunDir;
 
@@ -111,8 +114,13 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
       warn("carrier hc: no sh on PATH, so a terminal cannot run the child; falling back to spawn for this run.");
       return fallback(spec, opts);
     }
+    if (!resolveTee(spec.env)) {
+      warn("carrier hc: no tee on PATH, so the child's output cannot be mirrored; falling back to spawn for this run.");
+      return fallback(spec, opts);
+    }
 
     const dir = makeRunDir();
+    let keepDir = false;
     try {
       const outcome = await runInTerminal(
         {
@@ -141,23 +149,28 @@ export function createHcTransport(deps: HcTransportDeps): ChildTransport {
           warn(`carrier hc: ${outcome.message}; falling back to spawn for this run.`);
           return fallback(spec, opts);
         }
+        keepDir = true;
         if (outcome.kind === "aborted") {
-          if (!outcome.killed) warn(`carrier hc: ${outcome.message}`);
+          const kept = `transcript kept at ${dir}`;
+          warn(outcome.killed ? `carrier hc: aborted; ${kept}` : `carrier hc: ${outcome.message}; ${kept}`);
           return { exitCode: 1, aborted: true };
         }
         throw new Error(
           `carrier hc: herdr-core lost terminal ${blockingTerminalName(spec.runId)} (${outcome.terminal}) ` +
-            `during run ${spec.runId}: ${outcome.message}`,
+            `during run ${spec.runId}: ${outcome.message}; transcript kept at ${dir}`,
         );
       }
 
       spec.accumulator.onStderr(outcome.stderr);
-      return { exitCode: outcome.exitCode, aborted: false };
+      keepDir = outcome.exitCode !== 0;
+      return { exitCode: outcome.exitCode, aborted: false, ...(keepDir ? { runDir: dir } : {}) };
     } finally {
-      try {
-        removeRunDir(dir);
-      } catch (err) {
-        warn(`carrier hc: leaving ${dir} behind (${(err as Error).message})`);
+      if (!keepDir) {
+        try {
+          removeRunDir(dir);
+        } catch (err) {
+          warn(`carrier hc: leaving ${dir} behind (${(err as Error).message})`);
+        }
       }
     }
   };
@@ -191,6 +204,7 @@ export function createCarrierRunner(opts: {
         const outcome = await opts.transport(spec, { signal: runOpts.signal, onWarn: opts.onWarn });
         const result = spec.accumulator.finish();
         result.exitCode = outcome.exitCode;
+        if (outcome.runDir) result.runDir = outcome.runDir;
         if (outcome.aborted) throw new Error("Subagent was aborted");
         return result;
       } finally {

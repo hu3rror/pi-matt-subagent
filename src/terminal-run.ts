@@ -36,9 +36,6 @@ export interface TerminalRunDeps {
 /**
  * Why a terminal run did not produce an exit code.
  *
-/**
- * Why a terminal run did not produce an exit code.
- *
  * - `startup`: the terminal was never created (core unreachable, probe or
  *   `terminal.run` failing). Nothing ran; the caller may fall back.
  * - `lost`: the core took the run and then stopped answering, so the outcome is
@@ -64,6 +61,34 @@ export function toShellScript(invocation: TerminalInvocation, outPath: string, e
   ].join("\n");
 }
 
+function findOnPath(
+  names: string[],
+  env: NodeJS.ProcessEnv,
+  exists: (file: string) => boolean,
+): string | undefined {
+  const dirs = (env.PATH ?? env.Path ?? "").split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (exists(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolves `tee` on PATH. The run script mirrors the child's stdout through it,
+ * so a caller that skips this check starts the child and reads back nothing.
+ */
+export function findTee(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (file: string) => boolean = fs.existsSync,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  return findOnPath(platform === "win32" ? ["tee.exe", "tee"] : ["tee"], env, exists);
+}
+
 /**
  * Resolves `sh` on PATH. The carrier builds its command around a POSIX shell,
  * so a host without one (Windows without Git/MSYS/`sh.exe`) must be detected
@@ -75,16 +100,7 @@ export function findSh(
   exists: (file: string) => boolean = fs.existsSync,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  const dirs = (env.PATH ?? env.Path ?? "").split(path.delimiter);
-  const names = platform === "win32" ? ["sh.exe", "sh"] : ["sh"];
-  for (const dir of dirs) {
-    if (!dir) continue;
-    for (const name of names) {
-      const candidate = path.join(dir, name);
-      if (exists(candidate)) return candidate;
-    }
-  }
-  return undefined;
+  return findOnPath(platform === "win32" ? ["sh.exe", "sh"] : ["sh"], env, exists);
 }
 
 interface WaitResultLike {

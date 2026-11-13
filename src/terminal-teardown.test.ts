@@ -182,6 +182,7 @@ test("both carriers report their terminals to the same session teardown", async 
     transport: createHcTransport({
       client: core,
       findShell: () => "/bin/sh",
+      findTee: () => "/usr/bin/tee",
       makeRunDir: () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-teardown-run-")),
       onStarted: (terminal) => terminals.track(terminal),
     }),

@@ -31,6 +31,11 @@ export interface SingleResult {
   stopReason?: string;
   errorMessage?: string;
   step?: number;
+  /**
+   * Where a failed `hc` run kept its transcript, once the run has returned a
+   * result. Aborted runs keep their directory but report it in the warn line.
+   */
+  runDir?: string;
 }
 
 /**

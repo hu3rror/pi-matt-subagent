@@ -102,7 +102,7 @@ _Avoid_: 会话思考档位（那是 inherited 层）, 主会话档位
 _Avoid_: 自动降一级（低一级换算）, 与模型无关的档位
 
 **carrier（执行载体）**:
-子 agent 在哪儿执行，以及由此换来的人可观察性（issue #50，ADR 0029）。取值两个，派发时按 extension config 读取：`spawn`（默认）——blocking 子进程走 pi 自己的管道，research 走进程内子会话；`hc`——两者都在运行中的 herdr-core 上开成终端（名字 `sa-<run id 前 8 位>`，标签 `run`/`kind`/`role`），可从 pi 外部列出、attach、单独 kill。载体只换执行位置：结果对象、退出码处理、push 与 run status 在两种载体下一致，工具参数不因载体而变。失败按时机分，且两种载体并不对称：blocking 的启动期失败（core 不可达、探测失败、`terminal.run` 报错、没有 POSIX `sh`）告警并只对该次 run 回退 `spawn`；research 只在缺 `sh` 时回退进程内子会话，core 卡在这一步就直接判该次 run 失败。任一载体运行中丢了 core 就判该 run 失败并点名终端与 run id——不重跑、不伪造空成功。终端不挂 parent（不传 `caller`），回收靠会话结束时的显式 kill（ADR 0028）。此处「载体」指**在哪执行**；本仓库另一个「载体」用法指错误怎么报（见 tool error），两者无关。
+子 agent 在哪儿执行，以及由此换来的人可观察性（issue #50，ADR 0029）。取值两个，派发时按 extension config 读取：`spawn`（默认）——blocking 子进程走 pi 自己的管道，research 走进程内子会话；`hc`——两者都在运行中的 herdr-core 上开成终端（名字 `sa-<run id 前 8 位>`，标签 `run`/`kind`/`role`），可从 pi 外部列出、attach、单独 kill。载体只换执行位置：结果对象、退出码处理、push 与 run status 在两种载体下一致（`hc` 的失败 run 额外带上保留目录的 `runDir`），工具参数不因载体而变。失败按时机分，且两种载体并不对称：blocking 的启动期失败（core 不可达、探测失败、`terminal.run` 报错、没有 POSIX `sh` 或 `tee`）告警并只对该次 run 回退 `spawn`；research 只在缺 `sh` 时回退进程内子会话，core 卡在这一步就直接判该次 run 失败。任一载体运行中丢了 core 就判该 run 失败并点名终端与 run id——不重跑、不伪造空成功。终端不挂 parent（不传 `caller`），回收靠会话结束时的显式 kill（ADR 0028）。此处「载体」指**在哪执行**；本仓库另一个「载体」用法指错误怎么报（见 tool error），两者无关。
 _Avoid_: 后端, 传输层, runner（与 RunnerSeam 混用）
 
 **extension config（扩展配置）**:

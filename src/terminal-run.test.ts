@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fakeHcClient } from "./test-helpers.ts";
-import { findSh, runInTerminal, shellQuote, toShellScript } from "./terminal-run.ts";
+import { findSh, findTee, runInTerminal, shellQuote, toShellScript } from "./terminal-run.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-run-test-"));
 const outPath = path.join(tmp, "stdout.jsonl");
@@ -83,6 +83,17 @@ test("findSh resolves sh from PATH even when earlier entries have none", () => {
   );
   assert.equal(findSh({ PATH: "/nope" }, () => false), undefined);
   assert.equal(findSh({}, () => true), undefined);
+});
+
+test("findTee resolves tee from PATH and finds nothing when PATH has none", () => {
+  const dir = path.join(os.tmpdir(), "bin");
+  assert.equal(
+    findTee({ PATH: [path.join("/nope"), "/usr/bin"].join(path.delimiter) }, (file) => file === path.join("/usr/bin", "tee")),
+    path.join("/usr/bin", "tee"),
+  );
+  assert.equal(findTee({ PATH: "/nope" }, () => false), undefined);
+  assert.equal(findTee({}, () => true), undefined);
+  assert.equal(findTee({ PATH: dir }, () => true, "win32"), path.join(dir, "tee.exe"));
 });
 
 test("findSh looks for sh.exe first on win32", () => {
@@ -338,4 +349,22 @@ test("a silent stretch between check-ins hands over nothing and lets the run fin
 
   assert.deepEqual(seen, [{ wait: 3, text: '{"type":"message_end"}\n' }]);
   assert.equal(outcome.ok && outcome.exitCode, 0);
+});
+
+test("a run that ends without an exit code reports exit code 1, never a success", async () => {
+  for (const result of [
+    { terminal: "t7", ended: true, reason: "killed", exit_code: null },
+    { terminal: "t7", ended: true, reason: "unknown" },
+  ]) {
+    const client = fakeHcClient({
+      onCall: ({ method }) => {
+        if (method === "terminal.run") return { ok: true, result: { address: "t7" } };
+        if (method === "terminal.wait") return { ok: true, result };
+        return { ok: true, result: undefined };
+      },
+    });
+
+    const outcome = await runInTerminal(request, { client });
+    assert.equal(outcome.ok && outcome.exitCode, 1, JSON.stringify(result));
+  }
 });
