@@ -1672,6 +1672,8 @@ export interface ResearchRunOptions {
   abortSignal?: AbortSignal;
   /** Fired exactly once when the run reaches a terminal state. */
   onExit?: (info: ResearchExitInfo) => void;
+  /** The immediate parent session id; absent at top level, where nothing dispatched the run. */
+  parentSessionId?: string;
 }
 
 /** The research run's terminal outcome, resolved by the runner. */
@@ -1882,6 +1884,8 @@ export type CreateChildSession = (opts: {
   logPath: string;
   /** The registry run id: the carrier's terminal identity for this run. */
   runId: string;
+  /** The immediate parent session id; absent at top level, where nothing dispatched the child. */
+  parentSessionId?: string;
   /**
    * Optional synchronous hook invoked once per executed tool call (the child
    * session's `tool_execution_start` event). The runner uses it to append the
@@ -2025,6 +2029,7 @@ export function runBackgroundResearch(
       findingsPath: opts.findingsPath,
       logPath,
       runId: opts.runId ?? researchId,
+      parentSessionId: opts.parentSessionId,
       onToolCall,
     });
   } catch (err) {

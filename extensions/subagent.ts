@@ -1568,11 +1568,6 @@ export default function (pi: ExtensionAPI) {
         inProcess: (childOpts) =>
           createResearchChildSession({
             ...childOpts,
-            // The research tool's own session id: the child announces its
-            // immediate parent, mirroring the blocking path's per-spawn
-            // marker (buildSubagentEnv). Absent at top level — the payload
-            // builder then omits the key.
-            parentSessionId: ctx.sessionManager.getSessionId(),
             // The parent session's bus: a synchronous emit, no-op with no
             // subscriber (pure announcement — nothing is read back).
             onLifecycle: (announcement) => {
@@ -1601,6 +1596,7 @@ export default function (pi: ExtensionAPI) {
             agents,
             extensions: knob,
             runId,
+            parentSessionId: ctx.sessionManager.getSessionId(),
             abortSignal: abortController.signal,
             // Fires exactly once at a terminal state: settle the registry entry
             // and push the outcome into the main context — content worded as an

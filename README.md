@@ -130,7 +130,7 @@ With `carrier` set to `hc`, a run starts in a terminal of its own; a host missin
 
 ### Permission asks inside an `hc` child
 
-A blocking child's environment carries `PI_SUBAGENT_PARENT_SESSION=<your session id>`, and the terminal inherits it. Under a loaded permission system, an `ask` raised inside the child is forwarded to that session's inbox, so the prompt appears in the session that dispatched the run rather than in the terminal. Only a session with a UI serves that inbox: a session without one cannot answer the ask, and the child's tool call fails instead of prompting. A research child carries no such marker, so an `ask` inside it has no forwarding path today (ADR 0029).
+Every out-of-process child's environment carries `PI_SUBAGENT_PARENT_SESSION=<your session id>`, and the terminal inherits it — blocking children and research children on `hc` alike. Under a loaded permission system, an `ask` raised inside the child is forwarded to that session's inbox, so the prompt appears in the session that dispatched the run rather than in the terminal. Only a session with a UI serves that inbox: a session without one cannot answer the ask, and the child's tool call fails instead of prompting. The marker is set either way, and no child can prompt on its own — every child this extension starts is headless, so a missing parent means a failed ask rather than a dialog (ADR 0014, ADR 0029).
 
 ## Research child extensions (trust surface)
 

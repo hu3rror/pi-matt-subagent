@@ -6,6 +6,7 @@ import { createFileTail } from "./file-tail.ts";
 import type { HcClient } from "./hc-client.ts";
 import {
   buildDispatchArgs,
+  buildSubagentEnv,
   getPiInvocation,
   partitionExtensionSpecs,
   type Carrier,
@@ -128,9 +129,7 @@ export function createHcResearchChildSession(
       const started = await deps.client.call("terminal.run", {
         argv: [deps.sh, "-c", toShellScript(resolveInvocation(args), outPath, errPath)],
         cwd: opts.cwd,
-        env: Object.fromEntries(
-          Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-        ),
+        env: buildSubagentEnv(process.env, opts.parentSessionId),
         name: blockingTerminalName(opts.runId),
         labels: { run: opts.runId, kind: RESEARCH_TERMINAL_KIND, role: "researcher" },
       });

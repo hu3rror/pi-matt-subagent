@@ -468,3 +468,24 @@ test("an aborted hc research run settles aborted, never succeeded", async (t) =>
     "an aborted run writes nothing that could pass for findings",
   );
 });
+
+test("the research terminal env carries the subagent marker naming the parent session", async (t) => {
+  const dir = researchDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const logPath = path.join(dir, "research.log");
+  const core = runningCore();
+  const session = createHcResearchChildSession(
+    { ...childOpts(logPath), parentSessionId: "sess-parent" },
+    { client: core, invocation: scriptInvocation("process.exit(0)"), sh: "/bin/sh" },
+  );
+
+  await Promise.all([drain(session), session.done]);
+
+  const run = core.calls.find((c) => c.method === "terminal.run")?.params as { env: Record<string, string> };
+  assert.equal(
+    run.env.PI_SUBAGENT_PARENT_SESSION,
+    "sess-parent",
+    "an out-of-process child names the session that dispatched it",
+  );
+});
+

@@ -8,9 +8,13 @@
 一次隔离上下文的委托执行——在独立上下文里完成一个任务并返回结果，与主会话内联执行相对。
 _Avoid_: sub-agent, 后台任务
 
-**subagent marker（子代理标记）**:
-blocking 子进程环境里的纯公告变量 `PI_SUBAGENT_PARENT_SESSION`（gotgenes 现行 out-of-process 约定）：每次 spawn 注入**直接父会话**的 id，嵌套 subagent 各命名各自的直接父；本包只设置从不读取，消费方（权限问询转发、身份守卫等）在子进程侧读。值语义：有父会话 id 才携带（顶层手动 run 无标记），环境继承完整保留、不改调用方对象。legacy `PI_SUBAGENT_CHILD`/`PI_SUBAGENT_NAME` 与 role 提示 `PI_SUBAGENT_ROLE` 刻意不设。in-process 半边（ADR 0014 的刻意不发出已逆转，ADR 0026）：research 子会话不经环境通道，改在父会话 `pi.events` 上广播三个生命周期事件（`subagents:child:session-created` / `subagents:child:bound` / `subagents:child:disposed`，与权限系统订阅常量字符一致）——created 于绑定扩展前同步发出、bound 仅绑定成功后、disposed 于 run 的 finally（成败皆发）；无订阅方时每次广播都是静默 no-op，本包保持纯公告、从不读回。
+**subagent env marker（子代理环境标记）**:
+out-of-process 子进程环境里的纯公告变量 `PI_SUBAGENT_PARENT_SESSION`（gotgenes 现行约定）：注入**直接父会话**的 id，嵌套 subagent 各命名各自的直接父；本包只设置从不读取，消费方（权限问询转发、身份守卫等）在子进程侧读。值语义：有父会话 id 才携带（顶层手动 run 无标记），环境继承完整保留、不改调用方对象；**无条件**——不因父会话没有 UI 而省略，能否被服务由父会话自己判断（ADR 0014）。legacy `PI_SUBAGENT_CHILD`/`PI_SUBAGENT_NAME` 与 role 提示 `PI_SUBAGENT_ROLE` 刻意不设。通道由**执行形态**决定，不由派发工具决定：凡 out-of-process 子进程走本通道，凡 in-process 子会话走 child lifecycle announcement（ADR 0014/0026）。
 _Avoid_: child marker, PI_SUBAGENT_CHILD, 环境注入变量
+
+**child lifecycle announcement（子会话生命周期公告）**:
+in-process 子会话在父会话 `pi.events` 上广播的三个事件（`subagents:child:session-created` / `subagents:child:bound` / `subagents:child:disposed`，与权限系统订阅常量字符一致）：created 于绑定扩展前同步发出、bound 仅绑定成功后、disposed 于 run 的 finally（成败皆发）；无订阅方时每次广播都是静默 no-op，本包保持纯公告、从不读回（ADR 0026 逆转 ADR 0014 的刻意不发出）。通道由**执行形态**决定：同一个 research 工具在 `carrier: hc` 下产出 out-of-process 子进程，走 subagent env marker 而非本事件（ADR 0014/0026）。
+_Avoid_: lifecycle marker, 事件注入（本通道不经环境变量）
 
 **role**:
 一个命名了的 subagent 模板：固定的 system prompt、工具集、可选 model；每次运行的具体任务由调用方在 `task` 里给出。自 issue #39 起，role 还可经 `roleDefaults` 配置按角色定制 `model`/`thinkingLevel`（压过内置 preset 与 config 默认，见 config knob）。
