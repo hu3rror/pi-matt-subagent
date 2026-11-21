@@ -4,6 +4,20 @@ One section per release, newest first. After an update, pi shows the entries new
 the version you last ran, at your next fresh launch (it reads this file through
 `pi.changelogPath` / `CHANGELOG.md`). v0.1.0, v0.1.1 and v0.3.0 have no notes.
 
+## [0.14.4] - 2026-11-21
+
+### Highlights
+
+Dependencies move to pi 1.6.0. No user-visible change: tools, commands, the config schema and the render path are untouched. The one breaking change in pi 1.6.0 — component `render()` now returns `readonly string[]` — does not apply here, because this package composes `Box` and `Text` instead of subclassing `Component`.
+
+### Docs & Chore
+
+- pi packages synced to 1.6.0 (`pi-ai`, `pi-agent-core`, `pi-coding-agent`, `pi-tui`). Import surface, typecheck and tests unchanged.
+
+### Full Changelog
+
+https://github.com/hu3rror/pi-matt-subagent/compare/v0.14.3...v0.14.4
+
 ## [0.14.3] - 2026-11-04
 
 ### Highlights
